@@ -67,7 +67,7 @@ const writeFile: Tool = {
     "write_file",
     `Create a new file, or fully overwrite an existing one.
 Boundaries: the whole file is replaced by content; to change a small part of a file use edit_file instead — do not rewrite whole files.
-Precondition: overwriting an existing file requires reading it with read_file first.
+Precondition: overwriting an existing file requires reading it with read_file first. Writes may require user approval.
 On error: follow the error message — read the file first, then retry.`,
     {
       path: { type: "string", description: "File path; parent directories are created automatically" },
@@ -93,7 +93,7 @@ const editFile: Tool = {
     "edit_file",
     `Replace one exact string in a file: old_string → new_string.
 Boundaries: old_string must match the file content exactly (including whitespace and indentation) and must be unique in the file; if it is not unique, include a few surrounding lines as context.
-Precondition: you MUST have read the file with read_file first.
+Precondition: you MUST have read the file with read_file first. Edits may require user approval.
 On error: "not found" means old_string does not match the file — re-read and copy it exactly; "not unique" means include more surrounding context.
 ALWAYS use this tool to edit files. NEVER use sed/awk or shell redirection via run_bash.`,
     {
@@ -132,13 +132,14 @@ function globToRegex(glob: string): RegExp {
   return new RegExp(`^${escaped}$`); // anchor so the whole name must match
 }
 
-// Recursively yield every file under dir, skipping junk directories.
+// Recursively yield every file under dir, skipping junk and hidden entries.
 function* walk(dir: string): Generator<string> {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     if (entry.isDirectory()) {
       if (!SKIP_DIRS.has(entry.name) && !entry.name.startsWith(".")) yield* walk(path.join(dir, entry.name)); // recurse, but never into node_modules/.git/hidden dirs
-    } else if (entry.isFile()) {
-      yield path.join(dir, entry.name); // yield every regular file
+    } else if (entry.isFile() && !entry.name.startsWith(".")) {
+      // dotfiles (.env and friends) often hold secrets — search never surfaces them
+      yield path.join(dir, entry.name);
     }
   }
 }
@@ -194,6 +195,7 @@ const runBash: Tool = {
     `Run a bash command on the user's machine (30s timeout) and return its output.
 Boundaries: only for things that truly need execution — installing dependencies, running tests/scripts, git operations.
 To read files use read_file (not cat), to search use search (not grep/find), to edit files use edit_file (not sed/redirection).
+Dangerous commands require user approval; some are denied outright. A [permission] result is a hard boundary — never try to work around it.
 On error: failures return the error output — analyze it and try a different approach; do not resend the same command unchanged.`,
     { command: { type: "string", description: "The bash command to run" } },
     ["command"],

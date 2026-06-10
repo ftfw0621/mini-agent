@@ -2,6 +2,7 @@ import OpenAI from "openai"; // types + client for the chat completions API
 import chalk from "chalk"; // terminal colors for status lines
 import { toolDefinitions, dispatch } from "./tools.js"; // the tool manuals + the executor
 import { classifyError, ApiErrorKind } from "./errors.js"; // failure taxonomy
+import { checkPermission } from "./permissions.js"; // the allow/ask/deny gate
 
 export const MAX_ROUNDS = 15; // model→tool round cap per query
 export const MAX_RETRIES = 10; // total failed API calls per query, across all rounds
@@ -36,6 +37,7 @@ export interface LoopOptions {
   model: string; // which model to call
   signal: AbortSignal; // aborts the in-flight API request on Ctrl+C
   isInterrupted: () => boolean; // polled between steps for a clean stop
+  confirm: (question: string) => Promise<boolean>; // ask the human; resolves false in non-interactive sessions
 }
 
 // Exponential backoff with jitter: 500ms, 1s, 2s, ... ±25%, capped.
@@ -112,15 +114,28 @@ export async function runLoop(
       if (!msg.tool_calls?.length) {
         return { reason: TerminateReason.Done, finalText: msg.content ?? "" }; // no tool calls = final answer
       }
-      // Execute every tool call via the single dispatch entry point.
+
+      // Execute every tool call, each behind the permission gate.
       for (const call of msg.tool_calls) {
         if (call.type !== "function") continue; // ignore non-function call types
-        console.log(chalk.cyan(`🔧 ${call.function.name}`) + chalk.dim(` ${call.function.arguments.slice(0, 120)}`)); // show what is being called
-        messages.push({
-          role: "tool", // the tool-result message role
-          tool_call_id: call.id, // paired with the call by id
-          content: dispatch(call.function.name, call.function.arguments), // dispatch never throws
-        });
+        console.log(chalk.cyan(`🔧 ${call.function.name}`) + chalk.dim(` ${call.function.arguments.slice(0, 120)}`)); // show what the model wants to do
+
+        // The permission gate sits between the model's intent and execution.
+        const v = checkPermission(call.function.name, call.function.arguments);
+        let content: string; // what goes back to the model as the tool result
+        if (v.decision === "deny") {
+          console.log(chalk.red(`  ⛔ denied: ${v.reason}`)); // tell the user we blocked it
+          content = `[permission] Denied: ${v.reason}. This is a hard rule — do not try to work around it; pick a different approach or ask the user.`; // teach the model the boundary
+        } else if (v.decision === "ask") {
+          const ok = await opts.confirm(`${call.function.name} (${v.reason}):\n   ${v.summary}`); // pause and ask the human
+          if (!ok) console.log(chalk.yellow("  ✋ declined")); // make the refusal visible
+          content = ok
+            ? dispatch(call.function.name, call.function.arguments) // approved — actually run it
+            : `[permission] The user declined this action. Ask them how to proceed, or choose a safer alternative.`; // declined — tell the model
+        } else {
+          content = dispatch(call.function.name, call.function.arguments); // allow — run without ceremony
+        }
+        messages.push({ role: "tool", tool_call_id: call.id, content }); // feed the result back, paired by id
       }
       break; // round complete, move to the next one
     }

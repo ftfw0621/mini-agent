@@ -21,11 +21,32 @@ const EXIT_NOTES: Record<Exclude<TerminateReason, TerminateReason.Done>, string>
   [TerminateReason.UserInterrupt]: "Interrupted — stopped cleanly.",
 };
 
+// Ask the human to approve a dangerous action.
+// Fail closed: in a non-interactive session (piped stdin, CI) nobody can say
+// yes, so the answer is no. MINI_AGENT_AUTO_APPROVE=1 is our bypass mode for
+// scripted use — but hard denies still win over it (checked in permissions.ts
+// before we ever get here).
+async function confirm(question: string): Promise<boolean> {
+  console.log(chalk.yellow(`\n⚠️ approval needed — ${question}`)); // always show what is being asked
+  if (process.env.MINI_AGENT_AUTO_APPROVE === "1") {
+    console.log(chalk.dim("  auto-approved (MINI_AGENT_AUTO_APPROVE=1)")); // bypass mode — say so out loud
+    return true; // approve without asking
+  }
+  if (!process.stdin.isTTY) {
+    console.log(chalk.dim("  non-interactive session — denied by default (fail closed)")); // nobody can answer — refuse
+    return false; // fail closed
+  }
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout }); // open a prompt
+  const answer = await rl.question("  Allow? [y/N] "); // wait for the human
+  rl.close(); // release stdin again
+  return /^y(es)?$/i.test(answer.trim()); // anything but y/yes means no
+}
+
 async function main() {
   // Step 1: get the task from the user.
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout }); // wire up terminal I/O
   const task = await rl.question("What should the AI do?\n> "); // block until the user answers
-  rl.close(); // release stdin
+  rl.close(); // free stdin (confirm() opens its own interface when needed)
 
   // Step 2: wire up Ctrl+C handling.
   // First Ctrl+C: abort the in-flight request and wind down politely.
@@ -45,6 +66,7 @@ async function main() {
     model: "deepseek-chat", // function calling works reliably on this model (not deepseek-reasoner)
     signal: controller.signal, // for aborting requests
     isInterrupted: () => interrupted, // for stopping between steps
+    confirm, // for permission prompts
   });
 
   // Step 4: render the ending.
