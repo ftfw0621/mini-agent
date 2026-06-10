@@ -16,7 +16,8 @@ const EXIT_NOTES: Record<Exclude<TerminateReason, TerminateReason.Done>, string>
   [TerminateReason.CircuitBreaker]: "3 API failures in a row — stopping here instead of burning money.",
   [TerminateReason.RetryBudgetExhausted]: `${MAX_RETRIES} failed API calls in this query — giving up. Check your network and try again.`,
   [TerminateReason.RateLimitBudgetExhausted]: "DeepSeek keeps rate-limiting us. Wait a minute, then try again.",
-  [TerminateReason.ContextTooLong]: "The conversation no longer fits the model's context window. (Compaction arrives on Day 5 — for now, start fresh.)",
+  [TerminateReason.ContextTooLong]: "The conversation no longer fits the model's context window, and compaction could not shrink it enough. Start a fresh session.",
+  [TerminateReason.CompactionFailed]: "Automatic compaction kept failing — stopping instead of looping. Start a fresh session.",
   [TerminateReason.FatalApiError]: "Unrecoverable API error — retrying would not help. Check your API key and request.",
   [TerminateReason.UserInterrupt]: "Interrupted — stopped cleanly.",
 };

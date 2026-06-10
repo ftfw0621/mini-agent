@@ -7,7 +7,12 @@ import type OpenAI from "openai"; // types only — no client is created here
 // The foundation of "read before edit": which files has this session actually read?
 // Files that were never read must not be edited — otherwise the model edits from
 // (possibly stale) memory and wrecks the file.
-const readFiles = new Set<string>(); // absolute paths read so far in this session
+// A Map instead of a Set since Day 5: the touch order ranks files for recovery
+// after compaction (most recently touched = most likely needed next).
+// A monotonic counter, not Date.now(): two reads in the same millisecond would
+// get identical wall-clock stamps and the ordering would be arbitrary.
+let touchCounter = 0; // increments on every read/write — strictly ordered
+const readFiles = new Map<string, number>(); // absolute path → touch sequence number
 
 const TOOL_RESULT_LIMIT = 4000; // cap (chars) for a normal tool result entering the context
 const READ_LIMIT = 16000; // read_file gets a larger cap of its own
@@ -53,7 +58,7 @@ ALWAYS use this tool to read files. NEVER run cat/head/tail via run_bash.`,
     if (!fs.existsSync(p)) return fail(`File not found: ${p}. Check the path — you can locate files with search.`); // wrong path → tell the model how to find it
     if (!fs.statSync(p).isFile()) return fail(`${p} is a directory, not a file.`); // directories are not readable
     const content = fs.readFileSync(p, "utf8"); // read the whole file as text
-    readFiles.add(p); // remember: this session has read this file (unlocks edit/overwrite)
+    readFiles.set(p, ++touchCounter); // remember: this session has read this file (unlocks edit/overwrite)
     if (content.length > READ_LIMIT) {
       return content.slice(0, READ_LIMIT) + `\n... (file is ${content.length} chars, truncated)`; // cap huge files, but say so
     }
@@ -82,7 +87,7 @@ On error: follow the error message — read the file first, then retry.`,
     }
     fs.mkdirSync(path.dirname(p), { recursive: true }); // create parent directories as needed
     fs.writeFileSync(p, args.content, "utf8"); // write the new content
-    readFiles.add(p); // you wrote it, so you know its content — counts as read
+    readFiles.set(p, ++touchCounter); // you wrote it, so you know its content — counts as read
     return `Wrote ${p} (${args.content.length} chars)`; // confirm with the size as a sanity check
   },
 };
@@ -239,4 +244,21 @@ export function dispatch(name: string, argsJson: string): string {
   } catch (err) {
     return fail(`Tool crashed: ${(err as Error).message}`); // even a crashing tool becomes a readable result
   }
+}
+
+// ============ File-state queries (used by compaction recovery) ============
+// The most recently touched files, newest first.
+export function recentFiles(limit: number): string[] {
+  return [...readFiles.entries()] // [path, sequence] pairs
+    .sort((a, b) => b[1] - a[1]) // newest first
+    .slice(0, limit) // top N only
+    .map(([p]) => p); // just the paths
+}
+
+// Evict everything except the given paths. After compaction, a file the model
+// can no longer see must also lose its "already read" status — otherwise the
+// model could edit it based on content that is no longer in the conversation.
+export function forgetFilesExcept(keep: string[]): void {
+  const keepSet = new Set(keep); // for O(1) lookup
+  for (const p of [...readFiles.keys()]) if (!keepSet.has(p)) readFiles.delete(p); // drop the rest
 }
