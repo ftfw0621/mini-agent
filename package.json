@@ -4,7 +4,7 @@
   "description": "A Claude Code-style CLI agent built from scratch with the DeepSeek API — companion code for a 10-day tutorial",
   "type": "module",
   "scripts": {
-    "start": "tsx --env-file=.env src/raw-loop.ts",
+    "start": "tsx --env-file=.env src/agent.ts",
     "typecheck": "tsc --noEmit"
   },
   "engines": {

@@ -17,6 +17,7 @@ npm start
 | Tag | What's inside |
 |---|---|
 | `day1` | A raw tool-calling loop in ~50 lines: one tool, one loop, two safety nets |
+| `day2` | The five core tools (read/write/edit/search/bash): read-before-edit, old_string uniqueness, a dispatch that never throws, four-element tool descriptions |
 
 (updated daily)
 
