@@ -1,26 +1,29 @@
 # mini-agent
 
-A Claude Code-style CLI agent built from scratch in TypeScript, powered by the DeepSeek API.
+用 DeepSeek API 从零手写一个类 Claude Code 的命令行 Agent,TypeScript 实现。
 
-10 days, one commit per day. **The commit history is the table of contents**: `git log --oneline` shows the outline, `git checkout dayN` gives you the complete code as it was at the end of day N.
+10 天,每天一个 commit。**commit 历史就是课程目录**:`git log --oneline` 看大纲,`git checkout dayN` 拿到第 N 天收工时的完整代码。
 
-## Quick start
+> 代码、注释、commit message 用英文——模型的工具调用主要在英文数据上训练,英文指令引导更稳,也方便国际读者;配套教程是中文。
+
+## 快速开始
 
 ```bash
 npm install
-cp .env.example .env   # fill in your DeepSeek API key
+cp .env.example .env   # 填入你的 DeepSeek API Key
 npm start
 ```
 
-## Progress
+## 进度
 
-| Tag | What's inside |
+| Tag | 内容 |
 |---|---|
-| `day1` | A raw tool-calling loop in ~50 lines: one tool, one loop, two safety nets |
-| `day2` | The five core tools (read/write/edit/search/bash): read-before-edit, old_string uniqueness, a dispatch that never throws, four-element tool descriptions |
+| `day1` | ~50 行 raw tool-calling loop:一个工具、一个循环、两条保险 |
+| `day2` | 工具五件套(read/write/edit/search/bash):编辑前必须先读、old_string 唯一性、永不抛异常的 dispatch、四要素工具说明书 |
+| `day3` | 主循环状态机:错误分类、指数退避(带抖动)、双重重试预算、熔断器,8 种终态各配人话提示,Ctrl+C 体面退出 |
 
-(updated daily)
+(每天更新)
 
-## Companion tutorial (Chinese)
+## 配套教程(中文)
 
-Each tag pairs with one tutorial chapter: why the code is written this way, what Claude Code itself does, and the pitfalls you would hit. Available on Xiaohongshu @(TBD).
+每个 tag 对应教程一章:为什么这么写、Claude Code 原版怎么做、你会踩的坑。获取方式见小红书 @老李是谁。

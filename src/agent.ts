@@ -1,51 +1,60 @@
 import OpenAI from "openai"; // the API client
+import chalk from "chalk"; // terminal colors
 import readline from "node:readline/promises"; // promise-based terminal input
-import { toolDefinitions, dispatch } from "./tools.js"; // the tool manuals + the executor
+import { runLoop, TerminateReason, MAX_ROUNDS, MAX_RETRIES, type LoopResult } from "./loop.js"; // the state machine
 
 // Build the API client once, for the whole session.
 const client = new OpenAI({
-  baseURL: "https://api.deepseek.com", // DeepSeek's OpenAI-compatible endpoint
+  baseURL: process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com", // overridable for testing (point it at a dead port to simulate outages)
   apiKey: process.env.DEEPSEEK_API_KEY, // comes from .env via --env-file
+  maxRetries: 0, // we own the retry policy — never let the SDK retry underneath us
 });
 
-const MAX_ROUNDS = 15; // more tools, slightly higher cap — but there must be one
+// What we tell the user for every way a query can end. No raw stack traces.
+const EXIT_NOTES: Record<Exclude<TerminateReason, TerminateReason.Done>, string> = {
+  [TerminateReason.RoundCap]: `Hit the ${MAX_ROUNDS}-round cap. The task may be too big for one go — try splitting it.`,
+  [TerminateReason.CircuitBreaker]: "3 API failures in a row — stopping here instead of burning money.",
+  [TerminateReason.RetryBudgetExhausted]: `${MAX_RETRIES} failed API calls in this query — giving up. Check your network and try again.`,
+  [TerminateReason.RateLimitBudgetExhausted]: "DeepSeek keeps rate-limiting us. Wait a minute, then try again.",
+  [TerminateReason.ContextTooLong]: "The conversation no longer fits the model's context window. (Compaction arrives on Day 5 — for now, start fresh.)",
+  [TerminateReason.FatalApiError]: "Unrecoverable API error — retrying would not help. Check your API key and request.",
+  [TerminateReason.UserInterrupt]: "Interrupted — stopped cleanly.",
+};
 
 async function main() {
-  // Get the task from the user.
+  // Step 1: get the task from the user.
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout }); // wire up terminal I/O
   const task = await rl.question("What should the AI do?\n> "); // block until the user answers
   rl.close(); // release stdin
 
-  // The conversation history — the model's entire memory.
-  const messages: OpenAI.ChatCompletionMessageParam[] = [{ role: "user", content: task }];
+  // Step 2: wire up Ctrl+C handling.
+  // First Ctrl+C: abort the in-flight request and wind down politely.
+  // Second Ctrl+C: the user really means it — force quit.
+  const controller = new AbortController(); // its signal is passed into every API request
+  let interrupted = false; // polled by the loop between steps
+  process.on("SIGINT", () => {
+    if (interrupted) process.exit(130); // second press: exit immediately (130 = killed by SIGINT)
+    interrupted = true; // first press: raise the flag...
+    controller.abort(); // ...and cancel the in-flight API request
+    console.log(chalk.yellow("\n(interrupt received — winding down, Ctrl+C again to force quit)")); // tell the user we heard them
+  });
 
-  for (let round = 1; round <= MAX_ROUNDS; round++) {
-    // One API call: full history + the manuals of all five tools.
-    const res = await client.chat.completions.create({
-      model: "deepseek-chat", // function calling works reliably on this model
-      messages, // everything so far
-      tools: toolDefinitions, // the five manuals from tools.ts
-    });
-    const msg = res.choices[0].message; // the model's reply
-    messages.push(msg); // into history, so tool results stay paired with their calls
+  // Step 3: run the loop until it terminates for some named reason.
+  const result: LoopResult = await runLoop([{ role: "user", content: task }], {
+    client, // the configured API client
+    model: "deepseek-chat", // function calling works reliably on this model (not deepseek-reasoner)
+    signal: controller.signal, // for aborting requests
+    isInterrupted: () => interrupted, // for stopping between steps
+  });
 
-    // No tool calls = the model considers the task done. That is the final state.
-    if (!msg.tool_calls?.length) {
-      console.log(`\n🤖 ${msg.content}`); // print the final answer
-      return; // normal exit
-    }
-    // Execute every tool call via the single dispatch entry point.
-    for (const call of msg.tool_calls) {
-      if (call.type !== "function") continue; // ignore non-function call types
-      console.log(`\n🔧 ${call.function.name} ${call.function.arguments.slice(0, 120)}`); // show what is being called
-      messages.push({
-        role: "tool", // the tool-result message role
-        tool_call_id: call.id, // paired with the call by id
-        content: dispatch(call.function.name, call.function.arguments), // dispatch never throws
-      });
-    }
+  // Step 4: render the ending.
+  if (result.reason === TerminateReason.Done) {
+    console.log(`\n🤖 ${result.finalText}`); // the happy path: print the model's answer
+    return;
   }
-  console.log(`\n⚠️ Hit the ${MAX_ROUNDS}-round cap, stopping.`); // loop guard: stop at the cap
+  console.log(chalk.yellow(`\n⚠️ ${EXIT_NOTES[result.reason]}`)); // every other ending gets its one-line human explanation
+  if (result.detail) console.log(chalk.dim(`   ${result.detail.slice(0, 300)}`)); // raw error detail, trimmed, for the curious
+  process.exitCode = result.reason === TerminateReason.UserInterrupt ? 130 : 1; // scripts can tell interrupt from failure
 }
 
 main(); // kick everything off
