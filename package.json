@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "start": "tsx --env-file=.env src/agent.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "eval": "tsx --env-file=.env eval/run.ts"
   },
   "engines": {
     "node": ">=20.6"

@@ -25,6 +25,17 @@ Behavior rules:
 - A [permission] denial is a hard boundary. Do not attempt workarounds — explain and ask the user.
 - If the task is ambiguous, ask one clarifying question instead of guessing.`;
 
+// The sub-agent constitution: a worker with a fresh context and one job.
+// Key line: its FINAL message is the entire deliverable — the parent sees
+// nothing else of what it did.
+export const SUB_AGENT_PROMPT = `You are a sub-agent: a worker spawned by a parent agent to complete one self-contained task.
+
+Rules:
+- You know nothing about the parent's conversation. Work only from the task description.
+- Use your tools to do the work. Verify what you claim — do not guess.
+- Your FINAL message is returned to the parent verbatim. Make it a compact, factual report: findings, exact paths, numbers, code snippets. No greetings, no questions back.
+- You cannot talk to the user. If the task cannot be completed, report precisely what is missing.`;
+
 // Project memory: an optional AGENT.md in the current directory — the
 // equivalent of Claude Code's CLAUDE.md. Loaded once per session: stable
 // within a session (cache-friendly), different across projects (by design).

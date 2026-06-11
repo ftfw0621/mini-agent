@@ -41,9 +41,9 @@ function noFlyHit(p: string): string | null {
 // Hard stops. Not a question — these never run.
 const BASH_DENY: Array<[RegExp, string]> = [
   [/\brm\s+(-[a-zA-Z]+\s+)*['"]?(\/|~)['"]?(\s|$)/, "rm targeting / or ~ — catastrophic"], // rm -rf / and rm -rf ~
-  [/(^|[\s;&|])\.git(\/|\s|$)/, "touches the .git directory"], // any command that names .git
+  [/(^|[\s;&|/])\.git(\/|\s|$)/, "touches the .git directory"], // any command naming .git — the / in the prefix class catches absolute paths like /repo/.git
   [/(^|[\s;&|/])\.env(\s|$|[;&|])/, ".env holds secrets"], // any command that names .env
-  [/(^|[\s;&|])~?\/?\.ssh(\/|\s|$)/, ".ssh holds credentials"], // any command that names .ssh
+  [/(^|[\s;&|/])\.ssh(\/|\s|$)/, ".ssh holds credentials"], // any command that names .ssh — same / fix
 ];
 
 // Dangerous but sometimes legitimate — stop and ask the human.
@@ -91,6 +91,10 @@ export function checkPermission(toolName: string, argsJson: string): Verdict {
   switch (toolName) {
     case "search":
       return { decision: "allow", reason: "read-only", summary: "search" }; // searching never mutates anything
+    case "task":
+      // Spawning a sub-agent is orchestration, not action: every tool the
+      // sub-agent uses goes through this same gate individually.
+      return { decision: "allow", reason: "sub-agent tools are gated individually", summary: "task" };
     case "read_file": {
       const p = args.path ?? ""; // the file the model wants to read
       if (SECRET_FILE_RE.test(path.resolve(p))) {

@@ -207,10 +207,13 @@ On error: failures return the error output — analyze it and try a different ap
   ),
   run: (args) => {
     try {
-      const out = execSync(args.command, { encoding: "utf8", timeout: 30_000 }); // run it, 30s time limit
+      // stderr is piped (not inherited): it belongs in the tool result for the
+      // model to read, not splattered onto the user's terminal.
+      const out = execSync(args.command, { encoding: "utf8", timeout: 30_000, stdio: ["ignore", "pipe", "pipe"] });
       return out || "(command succeeded, no output)"; // never return an empty string
     } catch (err) {
-      return fail(`Command failed: ${(err as Error).message}`); // failure becomes guidance, not a crash
+      const e = err as Error & { stderr?: string }; // execSync attaches the captured stderr on failure
+      return fail(`Command failed: ${e.message}${e.stderr ? `\nstderr: ${e.stderr.slice(0, 1000)}` : ""}`); // failure becomes guidance, not a crash
     }
   },
 };
@@ -261,4 +264,16 @@ export function recentFiles(limit: number): string[] {
 export function forgetFilesExcept(keep: string[]): void {
   const keepSet = new Set(keep); // for O(1) lookup
   for (const p of [...readFiles.keys()]) if (!keepSet.has(p)) readFiles.delete(p); // drop the rest
+}
+
+// Snapshot / restore the read-state around a sub-agent run. The sub-agent
+// shares this module's state, but what IT read was never seen by the parent's
+// conversation — restoring the snapshot keeps read-before-edit honest across
+// agent boundaries.
+export function snapshotFileState(): Map<string, number> {
+  return new Map(readFiles); // shallow copy is enough — values are numbers
+}
+export function restoreFileState(snapshot: Map<string, number>): void {
+  readFiles.clear(); // drop whatever the sub-agent read or wrote
+  for (const [p, seq] of snapshot) readFiles.set(p, seq); // bring back the parent's view
 }

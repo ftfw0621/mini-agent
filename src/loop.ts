@@ -1,10 +1,11 @@
 import OpenAI from "openai"; // types + client for the chat completions API
 import chalk from "chalk"; // terminal colors for status lines
 import ora from "ora"; // the "thinking..." spinner while waiting for the first token
-import { toolDefinitions, dispatch } from "./tools.js"; // the tool manuals + the executor
+import { toolDefinitions, dispatch, snapshotFileState, restoreFileState } from "./tools.js"; // the tool manuals + the executor + file-state isolation
 import { classifyError, ApiErrorKind } from "./errors.js"; // failure taxonomy
 import { checkPermission } from "./permissions.js"; // the allow/ask/deny gate
 import { estimateHistoryTokens, compactHistory, COMPACT_AT, MAX_COMPACTIONS_PER_QUERY, MAX_COMPACT_FAILURES } from "./context.js"; // context management
+import { SUB_AGENT_PROMPT } from "./prompt.js"; // the sub-agent's own constitution
 
 export const MAX_ROUNDS = 15; // model→tool round cap per query
 export const MAX_RETRIES = 10; // total failed API calls per query, across all rounds
@@ -43,6 +44,52 @@ export interface LoopOptions {
   signal: AbortSignal; // aborts the in-flight API request on Ctrl+C
   isInterrupted: () => boolean; // polled between steps for a clean stop
   confirm: (question: string) => Promise<boolean>; // ask the human; resolves false in non-interactive sessions
+  quiet?: boolean; // suppress all narration (used by the eval harness)
+  subAgent?: boolean; // this loop IS a sub-agent: no task tool, no text streaming, indented tool logs
+}
+
+// The task tool: the parent's handle on sub-agents. Defined here (not in
+// tools.ts) because running it needs the loop itself — it IS a loop.
+const taskTool: OpenAI.ChatCompletionTool = {
+  type: "function",
+  function: {
+    name: "task",
+    description: `Delegate one self-contained subtask to a sub-agent that works in a FRESH context.
+The sub-agent has the same tools (except task) but knows NOTHING about this conversation — put every detail it needs into the description.
+Use it for exploration that would flood your context: reading many files, broad searches, summarizing a directory.
+The sub-agent's report is INPUT MATERIAL, not verified truth — re-check key claims yourself before acting on them.
+On error: a failed sub-agent returns [sub-agent failed: reason] — retry with a clearer description, or do the work yourself.`,
+    parameters: {
+      type: "object",
+      properties: {
+        description: { type: "string", description: "The complete, self-contained task for the sub-agent" },
+      },
+      required: ["description"],
+    },
+  },
+};
+
+// Run one sub-agent: a fresh conversation, same tools minus task, same
+// permission gate, and the parent's file read-state protected by a snapshot.
+async function runSubAgent(description: string, opts: LoopOptions): Promise<string> {
+  if (!opts.quiet) console.log(chalk.blue(`  ⎿ sub-agent started: ${description.slice(0, 100)}`)); // show the delegation
+  const snapshot = snapshotFileState(); // what the sub-agent reads, the parent has NOT seen
+  try {
+    const subMessages: OpenAI.ChatCompletionMessageParam[] = [
+      { role: "system", content: SUB_AGENT_PROMPT }, // its own, smaller constitution
+      { role: "user", content: description }, // the task is its entire world
+    ];
+    const result = await runLoop(subMessages, { ...opts, subAgent: true }); // recurse, flagged as sub-agent
+    if (result.reason === TerminateReason.Done && result.finalText?.trim()) {
+      // The framing matters: the parent must treat this as material to verify,
+      // not as conclusions to copy — the most common multi-agent failure mode.
+      return `Sub-agent report (INPUT MATERIAL — verify key claims before acting on them):\n${result.finalText}`;
+    }
+    return `[sub-agent failed: ${result.reason}]`; // any non-Done ending, compressed to one line
+  } finally {
+    restoreFileState(snapshot); // the parent's read-before-edit state, exactly as it was
+    if (!opts.quiet) console.log(chalk.blue("  ⎿ sub-agent done")); // close the bracket
+  }
 }
 
 // Exponential backoff with jitter: 500ms, 1s, 2s, ... ±25%, capped.
@@ -76,7 +123,9 @@ async function streamModelCall(
 ): Promise<{ content: string; toolCalls: AssembledCall[] }> {
   const idleAbort = new AbortController(); // the watchdog's own kill switch
   const signal = AbortSignal.any([opts.signal, idleAbort.signal]); // either the user or the watchdog can abort
-  const spinner = ora({ text: "thinking...", discardStdin: false }).start(); // discardStdin:false — ora would otherwise eat Ctrl+C
+  const spinner = opts.quiet
+    ? null // the eval harness wants silence
+    : ora({ text: opts.subAgent ? "sub-agent working..." : "thinking...", discardStdin: false }).start(); // discardStdin:false — ora would otherwise eat Ctrl+C
   let lastEvent = Date.now(); // when did we last hear ANYTHING from the stream?
   let stallWarned = false; // only warn once per quiet stretch
 
@@ -84,17 +133,19 @@ async function streamModelCall(
   // - idle (nothing at all for 90s) → cut the stream, let the retry layer handle it
   // - stall (slow but alive for 30s) → log it and keep waiting
   const watchdog = setInterval(() => {
-    const quiet = Date.now() - lastEvent; // ms since the last event
-    if (quiet > IDLE_TIMEOUT_MS) idleAbort.abort(); // dead — cut it
-    else if (quiet > STALL_WARN_MS && !stallWarned) {
+    const quietMs = Date.now() - lastEvent; // ms since the last event
+    if (quietMs > IDLE_TIMEOUT_MS) idleAbort.abort(); // dead — cut it
+    else if (quietMs > STALL_WARN_MS && !stallWarned) {
       stallWarned = true; // don't repeat the warning every second
-      console.log(chalk.dim(`  [watchdog] stream quiet for ${Math.round(quiet / 1000)}s — still waiting (slow ≠ dead)`));
+      console.log(chalk.dim(`  [watchdog] stream quiet for ${Math.round(quietMs / 1000)}s — still waiting (slow ≠ dead)`));
     }
   }, 1000);
 
   try {
     const stream = await opts.client.chat.completions.create(
-      { model: opts.model, messages, tools: toolDefinitions, stream: true }, // stream: print tokens as they are born
+      // Sub-agents do NOT get the task tool: one level of delegation only.
+      // Nested spawning means orphan processes and debugging hell.
+      { model: opts.model, messages, tools: opts.subAgent ? toolDefinitions : [...toolDefinitions, taskTool], stream: true },
       { signal }, // abortable by user AND watchdog
     );
     let content = ""; // accumulated answer text
@@ -106,16 +157,20 @@ async function streamModelCall(
       const delta = chunk.choices[0]?.delta; // this chunk's increment
       if (!delta) continue; // keep-alive or usage chunk — nothing to do
       if (delta.content) {
-        if (spinner.isSpinning) spinner.stop(); // first token: replace the spinner with real output
-        if (!printedPrefix) {
-          process.stdout.write("\n🤖 "); // prefix once, then stream raw
-          printedPrefix = true;
+        if (spinner?.isSpinning) spinner.stop(); // first token: replace the spinner with real output
+        if (!opts.quiet && !opts.subAgent) {
+          // Only the top-level agent streams to the screen — a sub-agent's
+          // inner monologue would be mistaken for the answer.
+          if (!printedPrefix) {
+            process.stdout.write("\n🤖 "); // prefix once, then stream raw
+            printedPrefix = true;
+          }
+          process.stdout.write(delta.content); // print the token immediately — this IS the streaming UX
         }
-        process.stdout.write(delta.content); // print the token immediately — this IS the streaming UX
-        content += delta.content; // and keep it for the history
+        content += delta.content; // always keep it for the history
       }
       for (const tc of delta.tool_calls ?? []) {
-        if (spinner.isSpinning) spinner.stop(); // tool call starting — spinner served its purpose
+        if (spinner?.isSpinning) spinner.stop(); // tool call starting — spinner served its purpose
         const slot = (calls[tc.index] ??= { id: "", name: "", args: "" }); // create the slot on first fragment
         if (tc.id) slot.id = tc.id; // id arrives once
         if (tc.function?.name) slot.name += tc.function.name; // name usually arrives whole; += is safe either way
@@ -126,8 +181,23 @@ async function streamModelCall(
     return { content, toolCalls: calls.filter(Boolean) }; // sparse array → dense
   } finally {
     clearInterval(watchdog); // always stop the timer
-    if (spinner.isSpinning) spinner.stop(); // and never leave a zombie spinner
+    if (spinner?.isSpinning) spinner.stop(); // and never leave a zombie spinner
   }
+}
+
+// Execute one approved tool call. The task tool is special — it is not in the
+// registry because running it needs the loop itself (it IS a loop).
+async function execute(call: AssembledCall, opts: LoopOptions): Promise<string> {
+  if (call.name !== "task") return dispatch(call.name, call.args); // ordinary tools go through the registry
+  if (opts.subAgent) return "[error] Sub-agents cannot spawn sub-agents. Do the work yourself."; // one level of delegation only
+  let description = ""; // the sub-task text
+  try {
+    description = (JSON.parse(call.args) as { description?: string }).description ?? ""; // arguments arrive as JSON
+  } catch {
+    /* fall through to the error below */
+  }
+  if (!description) return "[error] task requires a non-empty description argument.";
+  return runSubAgent(description, opts); // spawn the worker
 }
 
 // Run one compaction attempt and keep score. Returns true on success.
@@ -242,22 +312,23 @@ export async function runLoop(
 
       // Execute every tool call, each behind the permission gate.
       for (const call of out.toolCalls) {
-        console.log(chalk.cyan(`🔧 ${call.name}`) + chalk.dim(` ${call.args.slice(0, 120)}`)); // show what the model wants to do
+        const indent = opts.subAgent ? chalk.blue("  ⎿ ") : ""; // sub-agent activity is visually nested
+        if (!opts.quiet) console.log(indent + chalk.cyan(`🔧 ${call.name}`) + chalk.dim(` ${call.args.slice(0, 120)}`)); // show what the model wants to do
 
         // The permission gate sits between the model's intent and execution.
         const v = checkPermission(call.name, call.args);
         let content: string; // what goes back to the model as the tool result
         if (v.decision === "deny") {
-          console.log(chalk.red(`  ⛔ denied: ${v.reason}`)); // tell the user we blocked it
+          if (!opts.quiet) console.log(chalk.red(`  ⛔ denied: ${v.reason}`)); // tell the user we blocked it
           content = `[permission] Denied: ${v.reason}. This is a hard rule — do not try to work around it; pick a different approach or ask the user.`; // teach the model the boundary
         } else if (v.decision === "ask") {
           const ok = await opts.confirm(`${call.name} (${v.reason}):\n   ${v.summary}`); // pause and ask the human
-          if (!ok) console.log(chalk.yellow("  ✋ declined")); // make the refusal visible
+          if (!ok && !opts.quiet) console.log(chalk.yellow("  ✋ declined")); // make the refusal visible
           content = ok
-            ? dispatch(call.name, call.args) // approved — actually run it
+            ? await execute(call, opts) // approved — actually run it
             : `[permission] The user declined this action. Ask them how to proceed, or choose a safer alternative.`; // declined — tell the model
         } else {
-          content = dispatch(call.name, call.args); // allow — run without ceremony
+          content = await execute(call, opts); // allow — run without ceremony
         }
         messages.push({ role: "tool", tool_call_id: call.id, content }); // feed the result back, paired by id
       }
