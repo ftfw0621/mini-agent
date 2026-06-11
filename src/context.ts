@@ -101,7 +101,12 @@ export async function compactHistory(
   );
   const summary = res.choices[0].message.content ?? ""; // the structured summary text
   if (!summary.trim()) throw new Error("compaction returned an empty summary"); // empty summary = failed compaction
+  // The constitution survives compaction: keep the leading system message and
+  // drop everything else. Losing the system prompt would silently change the
+  // agent's behavior mid-session.
+  const system = messages[0]?.role === "system" ? [messages[0]] : []; // there is at most one, at index 0
   messages.length = 0; // drop the old history entirely
+  messages.push(...system); // the constitution goes back first
   messages.push({ role: "user", content: `[Context was compacted. Summary of the conversation so far:]\n\n${summary}` }); // the summary becomes the new history
   const recoveredNote = recoverFileState(); // restore working-file contents from disk
   if (recoveredNote) messages.push({ role: "user", content: recoveredNote }); // attach as a second message

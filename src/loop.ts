@@ -1,5 +1,6 @@
 import OpenAI from "openai"; // types + client for the chat completions API
 import chalk from "chalk"; // terminal colors for status lines
+import ora from "ora"; // the "thinking..." spinner while waiting for the first token
 import { toolDefinitions, dispatch } from "./tools.js"; // the tool manuals + the executor
 import { classifyError, ApiErrorKind } from "./errors.js"; // failure taxonomy
 import { checkPermission } from "./permissions.js"; // the allow/ask/deny gate
@@ -11,6 +12,8 @@ export const MAX_RATE_LIMIT_RETRIES = 3; // 429s get their own, much smaller bud
 export const MAX_CONSECUTIVE_FAILURES = 3; // the circuit breaker
 const BACKOFF_BASE_MS = 500; // first retry waits ~this long
 const BACKOFF_CAP_MS = 15_000; // no single wait longer than this
+const IDLE_TIMEOUT_MS = 90_000; // no stream events AT ALL for this long → the stream is dead, cut it
+const STALL_WARN_MS = 30_000; // events arriving slowly → log only. Slow is not dead — cutting a live stream wastes every token already paid for
 
 // A query has many ways to die. Name every one of them — each gets its own
 // user-facing explanation and exit code, instead of a generic "error".
@@ -55,6 +58,75 @@ async function interruptibleSleep(ms: number, isInterrupted: () => boolean): Pro
   const SLICE = 200; // check for interruption every 200ms
   for (let waited = 0; waited < ms && !isInterrupted(); waited += SLICE) {
     await new Promise((r) => setTimeout(r, Math.min(SLICE, ms - waited))); // sleep one slice (or the remainder)
+  }
+}
+
+// A tool call assembled from streaming fragments.
+interface AssembledCall {
+  id: string; // the call id (arrives once)
+  name: string; // the function name (arrives once)
+  args: string; // the JSON arguments (arrive in many small fragments)
+}
+
+// One streaming model call: prints text as it arrives, assembles tool calls
+// from their deltas, and guards the stream with a two-level watchdog.
+async function streamModelCall(
+  messages: OpenAI.ChatCompletionMessageParam[], // the full history to send
+  opts: LoopOptions, // client/model/signal
+): Promise<{ content: string; toolCalls: AssembledCall[] }> {
+  const idleAbort = new AbortController(); // the watchdog's own kill switch
+  const signal = AbortSignal.any([opts.signal, idleAbort.signal]); // either the user or the watchdog can abort
+  const spinner = ora({ text: "thinking...", discardStdin: false }).start(); // discardStdin:false — ora would otherwise eat Ctrl+C
+  let lastEvent = Date.now(); // when did we last hear ANYTHING from the stream?
+  let stallWarned = false; // only warn once per quiet stretch
+
+  // The two-level watchdog, checked once per second:
+  // - idle (nothing at all for 90s) → cut the stream, let the retry layer handle it
+  // - stall (slow but alive for 30s) → log it and keep waiting
+  const watchdog = setInterval(() => {
+    const quiet = Date.now() - lastEvent; // ms since the last event
+    if (quiet > IDLE_TIMEOUT_MS) idleAbort.abort(); // dead — cut it
+    else if (quiet > STALL_WARN_MS && !stallWarned) {
+      stallWarned = true; // don't repeat the warning every second
+      console.log(chalk.dim(`  [watchdog] stream quiet for ${Math.round(quiet / 1000)}s — still waiting (slow ≠ dead)`));
+    }
+  }, 1000);
+
+  try {
+    const stream = await opts.client.chat.completions.create(
+      { model: opts.model, messages, tools: toolDefinitions, stream: true }, // stream: print tokens as they are born
+      { signal }, // abortable by user AND watchdog
+    );
+    let content = ""; // accumulated answer text
+    let printedPrefix = false; // have we printed the 🤖 prefix yet?
+    const calls: AssembledCall[] = []; // tool calls under assembly, indexed by delta.index
+    for await (const chunk of stream) {
+      lastEvent = Date.now(); // feed the watchdog
+      stallWarned = false; // the stream spoke — reset the stall warning
+      const delta = chunk.choices[0]?.delta; // this chunk's increment
+      if (!delta) continue; // keep-alive or usage chunk — nothing to do
+      if (delta.content) {
+        if (spinner.isSpinning) spinner.stop(); // first token: replace the spinner with real output
+        if (!printedPrefix) {
+          process.stdout.write("\n🤖 "); // prefix once, then stream raw
+          printedPrefix = true;
+        }
+        process.stdout.write(delta.content); // print the token immediately — this IS the streaming UX
+        content += delta.content; // and keep it for the history
+      }
+      for (const tc of delta.tool_calls ?? []) {
+        if (spinner.isSpinning) spinner.stop(); // tool call starting — spinner served its purpose
+        const slot = (calls[tc.index] ??= { id: "", name: "", args: "" }); // create the slot on first fragment
+        if (tc.id) slot.id = tc.id; // id arrives once
+        if (tc.function?.name) slot.name += tc.function.name; // name usually arrives whole; += is safe either way
+        if (tc.function?.arguments) slot.args += tc.function.arguments; // arguments stream in fragments — concatenate
+      }
+    }
+    if (printedPrefix) process.stdout.write("\n"); // end the streamed line cleanly
+    return { content, toolCalls: calls.filter(Boolean) }; // sparse array → dense
+  } finally {
+    clearInterval(watchdog); // always stop the timer
+    if (spinner.isSpinning) spinner.stop(); // and never leave a zombie spinner
   }
 }
 
@@ -103,18 +175,19 @@ export async function runLoop(
           return { reason: TerminateReason.CompactionFailed, detail: `${compaction.failures} consecutive compaction failures` }; // the compaction circuit breaker
       }
 
-      let res: OpenAI.ChatCompletion; // the model's reply for this round
+      let out: { content: string; toolCalls: AssembledCall[] }; // the assembled reply for this round
       try {
-        res = await opts.client.chat.completions.create(
-          { model: opts.model, messages, tools: toolDefinitions }, // full history + tool manuals
-          { signal: opts.signal }, // lets Ctrl+C abort the request mid-flight
-        );
+        out = await streamModelCall(messages, opts); // streaming call with spinner + watchdog
       } catch (err) {
         // Interrupt first: an aborted request can surface as all kinds of
         // errors, and none of them deserve a retry line.
         if (opts.isInterrupted()) return { reason: TerminateReason.UserInterrupt };
-        const e = classifyError(err); // turn the raw exception into a named kind
-        if (e.kind === ApiErrorKind.Aborted) return { reason: TerminateReason.UserInterrupt }; // belt and suspenders
+        let e = classifyError(err); // turn the raw exception into a named kind
+        if (e.kind === ApiErrorKind.Aborted) {
+          // The user did NOT press Ctrl+C (checked above), so this abort came
+          // from the idle watchdog — treat it as a retryable timeout.
+          e = { kind: ApiErrorKind.Timeout, retryable: true, message: "stream went silent for 90s — cut by the idle watchdog" };
+        }
         if (e.kind === ApiErrorKind.ContextTooLong) {
           // Reactive compaction: the API just told us we're too big — our
           // estimate was wrong. Compact and retry instead of giving up.
@@ -143,34 +216,48 @@ export async function runLoop(
         continue; // retry the same round
       }
 
+      // An aborted stream does not always throw — sometimes it just ends
+      // early and looks like success. Check the flag explicitly, and keep the
+      // partial text in history (clearly marked) so the next turn makes sense.
+      if (opts.isInterrupted()) {
+        if (out.content) messages.push({ role: "assistant", content: out.content + "\n[interrupted by user]" }); // text only — partial tool calls must NOT go in (they would need paired results)
+        return { reason: TerminateReason.UserInterrupt };
+      }
+
       attempts.consecutive = 0; // success resets the breaker — but never the total budget
 
-      const msg = res.choices[0].message; // the model's reply
-      messages.push(msg); // into history, so tool results stay paired with their calls
+      // Rebuild the assistant message from the assembled stream and add it to
+      // history — tool results must stay paired with their calls.
+      messages.push({
+        role: "assistant", // the model's turn
+        content: out.content || null, // null when the turn was tool calls only
+        ...(out.toolCalls.length
+          ? { tool_calls: out.toolCalls.map((c) => ({ id: c.id, type: "function" as const, function: { name: c.name, arguments: c.args } })) }
+          : {}), // omit the field entirely when there were no calls
+      });
 
-      if (!msg.tool_calls?.length) {
-        return { reason: TerminateReason.Done, finalText: msg.content ?? "" }; // no tool calls = final answer
+      if (!out.toolCalls.length) {
+        return { reason: TerminateReason.Done, finalText: out.content }; // no tool calls = final answer (already streamed to the screen)
       }
 
       // Execute every tool call, each behind the permission gate.
-      for (const call of msg.tool_calls) {
-        if (call.type !== "function") continue; // ignore non-function call types
-        console.log(chalk.cyan(`🔧 ${call.function.name}`) + chalk.dim(` ${call.function.arguments.slice(0, 120)}`)); // show what the model wants to do
+      for (const call of out.toolCalls) {
+        console.log(chalk.cyan(`🔧 ${call.name}`) + chalk.dim(` ${call.args.slice(0, 120)}`)); // show what the model wants to do
 
         // The permission gate sits between the model's intent and execution.
-        const v = checkPermission(call.function.name, call.function.arguments);
+        const v = checkPermission(call.name, call.args);
         let content: string; // what goes back to the model as the tool result
         if (v.decision === "deny") {
           console.log(chalk.red(`  ⛔ denied: ${v.reason}`)); // tell the user we blocked it
           content = `[permission] Denied: ${v.reason}. This is a hard rule — do not try to work around it; pick a different approach or ask the user.`; // teach the model the boundary
         } else if (v.decision === "ask") {
-          const ok = await opts.confirm(`${call.function.name} (${v.reason}):\n   ${v.summary}`); // pause and ask the human
+          const ok = await opts.confirm(`${call.name} (${v.reason}):\n   ${v.summary}`); // pause and ask the human
           if (!ok) console.log(chalk.yellow("  ✋ declined")); // make the refusal visible
           content = ok
-            ? dispatch(call.function.name, call.function.arguments) // approved — actually run it
+            ? dispatch(call.name, call.args) // approved — actually run it
             : `[permission] The user declined this action. Ask them how to proceed, or choose a safer alternative.`; // declined — tell the model
         } else {
-          content = dispatch(call.function.name, call.function.arguments); // allow — run without ceremony
+          content = dispatch(call.name, call.args); // allow — run without ceremony
         }
         messages.push({ role: "tool", tool_call_id: call.id, content }); // feed the result back, paired by id
       }
