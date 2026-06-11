@@ -8,10 +8,21 @@
 
 ## 快速开始
 
+最简方式(npm 包):
+
 ```bash
+echo 'DEEPSEEK_API_KEY=sk-你的key' > .env   # key 在 platform.deepseek.com 获取
+npx mini-agent
+```
+
+从源码跑:
+
+```bash
+git clone https://github.com/Michael-crazyman/mini-agent.git && cd mini-agent
 npm install
 cp .env.example .env   # 填入你的 DeepSeek API Key
-npm start
+npm start              # 跑最新版
+npm run eval           # 10 道题的回归考试
 ```
 
 ## 进度
@@ -25,6 +36,7 @@ npm start
 | `day5` | 上下文管理:token 估算(字节法,宁多勿少)、80% 触发线、6 段结构化摘要(双保险禁工具)、文件恢复(最近 5 个,从磁盘重读)、主动+被动压缩、压缩熔断 |
 | `day6` | 多轮 REPL(行队列输入、/clear、Ctrl+C 三态语义)、system prompt 宪法(数字锚/反面禁令/防虚报)、AGENT.md 项目记忆、流式输出 + 双重看门狗(90s 断流/30s 只警告) |
 | `day7` | 子 agent(task 工具:独立上下文、一层分身不套娃、报告是材料不是结论、文件状态快照隔离)+ 最小 eval(10 道固定题、物证判分、8/10 及格线,`npm run eval`) |
+| `day8` | 封装发布:`bin` 入口 + tsc 构建,`npx mini-agent` 一行启动;内置 .env 加载;缺 key 人话报错 |
 
 (每天更新)
 

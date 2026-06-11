@@ -3,10 +3,19 @@
   "version": "0.1.0",
   "description": "A Claude Code-style CLI agent built from scratch with the DeepSeek API — companion code for a 10-day tutorial",
   "type": "module",
+  "bin": {
+    "mini-agent": "dist/agent.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "start": "tsx --env-file=.env src/agent.ts",
     "typecheck": "tsc --noEmit",
-    "eval": "tsx --env-file=.env eval/run.ts"
+    "eval": "tsx --env-file=.env eval/run.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "prepare": "npm run build"
   },
   "engines": {
     "node": ">=20.6"
