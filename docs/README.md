@@ -1,7 +1,7 @@
-# 教程:从零手搓一个自己的 Claude Code
+# 教程:跟着 AI,从零搓一个自己的 Claude Code
 
-> 10 天,约 1200 行 TypeScript,用 DeepSeek API 从零写出一个能干活的命令行 Agent。
-> 全部教程免费开源。代码与教程一一对应:每章对应一个 git tag,`git checkout dayN` 就是当天收工的完整代码。
+> 10 章(按一天一章的跟做节奏设计),约 1200 行 TypeScript,用 DeepSeek API 从零写出一个能干活的命令行 Agent。
+> 全部教程免费开源。代码与教程一一对应:每章对应一个 git tag,`git checkout dayN` 就是该章对应的完整代码。
 
 ## 目录
 

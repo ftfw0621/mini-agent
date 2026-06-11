@@ -150,7 +150,7 @@ if (!process.stdin.isTTY) return false; // fail closed: nobody can say yes → n
 
 **坑 2:非交互环境默认放行。** 弹确认框在管道/CI 里没人看见,如果默认当「同意」处理,你就造了一个无人值守的满权限 agent。fail closed:读不到 y,就是 N。
 
-**坑 3:禁飞区正则写太宽。** 我们第一版用「路径里含 .git」判定,结果 `.github/workflows` 也被拦了。修正:按**路径段精确匹配**(`parts.includes(".git")`),并且专门写了一条单测 `.github is not .git` 钉死它。安全规则误伤会逼用户去找绕过的方法——绕过一旦成了习惯,真拦截也会被绕。
+**坑 3:禁飞区正则写太宽。** 第一版用「路径里含 .git」判定,结果 `.github/workflows` 也被拦了。修正:按**路径段精确匹配**(`parts.includes(".git")`),并且专门写了一条单测 `.github is not .git` 钉死它。安全规则误伤会逼用户去找绕过的方法——绕过一旦成了习惯,真拦截也会被绕。
 
 **坑 4:用提示词当防线。** 在 system prompt 里写「请不要删除重要文件」然后就觉得安全了——提示词的遵守率大约八成,剩下两成靠什么?权限必须是代码层的闸门,提示词只是让模型少撞墙的导览图。
 

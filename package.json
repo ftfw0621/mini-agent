@@ -1,7 +1,7 @@
 {
-  "name": "mini-agent",
+  "name": "agent-from-zero",
   "version": "0.1.0",
-  "description": "A Claude Code-style CLI agent built from scratch with the DeepSeek API — companion code for a 10-day tutorial",
+  "description": "Build a Claude Code-style CLI agent from scratch, with AI as your pair programmer — companion code for a 10-day tutorial (DeepSeek by default, any OpenAI-compatible model)",
   "type": "module",
   "bin": {
     "mini-agent": "dist/agent.js"

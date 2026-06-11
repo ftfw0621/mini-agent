@@ -157,7 +157,7 @@ process.on("SIGINT", () => {
 
 **坑 1:SDK 在你脚下偷偷重试。** openai SDK 默认自带 2 次内置重试。不关掉它,你的「重试 10 次」实际是 30 次,退避时间也全乱了。一行解决:`new OpenAI({ maxRetries: 0 })`——**重试策略只能有一个主人**。这是今天最隐蔽的坑,不知道的人会觉得「我的熔断器怎么不准」。
 
-**坑 2:abort 的错误形态千奇百怪。** 你以为 Ctrl+C 后 SDK 会抛标准的 `APIUserAbortError`——实测它有时抛连接错误、有时抛 `AbortError`,分类器很容易把它当成网络故障去「重试」,白打日志白等退避。解法是防御性双保险:catch 里**先查中断标志**再分类,分类器里也兜一层 `err.name === "AbortError"`。我写这章时就踩了:第一版 Ctrl+C 后多打了一行 `[retry] unknown`。
+**坑 2:abort 的错误形态千奇百怪。** 你以为 Ctrl+C 后 SDK 会抛标准的 `APIUserAbortError`——实测它有时抛连接错误、有时抛 `AbortError`,分类器很容易把它当成网络故障去「重试」,白打日志白等退避。解法是防御性双保险:catch 里**先查中断标志**再分类,分类器里也兜一层 `err.name === "AbortError"`。写这章代码时就真实踩了:第一版 Ctrl+C 后多打了一行 `[retry] unknown`。
 
 **坑 3:重试静默进行。** 不打那行 `[retry] network — attempt 1/10, waiting 588ms`,用户看到的就是程序卡住 30 秒——然后他会再按一次回车、再开一个进程、再发一次请求。**重试必须可见**,告诉用户「我没死,我在按计划自救」。
 

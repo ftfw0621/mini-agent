@@ -32,7 +32,7 @@ mini-agent — deepseek-chat | "exit" to quit · "/clear" to reset · Ctrl+C int
 
 结构上很简单:把「读输入 → runLoop → 渲染结果」包进 while,`messages` 数组活在循环外面,跨轮累积。`exit` 退出,`/clear` 把历史重置成只剩 system 消息(顺手把文件已读状态也清了——它属于这场对话)。
 
-真正有内容的是输入处理。你的直觉是用 `rl.question()`,**它在管道输入下会丢数据**——这是我们今天踩的第一个真坑,留到坑区细讲。正确做法是行队列:
+真正有内容的是输入处理。你的直觉是用 `rl.question()`,**它在管道输入下会丢数据**——这是今天的第一个真坑,留到坑区细讲。正确做法是行队列:
 
 ```ts
 const pendingLines: string[] = []; // lines that arrived before anyone asked
@@ -120,7 +120,7 @@ if (tc.function?.arguments) slot.args += tc.function.arguments; // fragments —
 
 ## 你会踩的坑
 
-**坑 1:`rl.question` 在管道下丢行。** 管道输入的所有行一次性到达,`question()` 只接住当时在等的那一行,其余的没有监听器,直接蒸发;EOF 后再调 `question()` 还会抛 `ERR_USE_AFTER_CLOSE`。我们第一版就这么崩的。解法是上面的行队列。写 CLI 的通用教训:**交互逻辑必须同时在 TTY 和管道两种模式下测**。
+**坑 1:`rl.question` 在管道下丢行。** 管道输入的所有行一次性到达,`question()` 只接住当时在等的那一行,其余的没有监听器,直接蒸发;EOF 后再调 `question()` 还会抛 `ERR_USE_AFTER_CLOSE`。第一版就这么崩的。解法是上面的行队列。写 CLI 的通用教训:**交互逻辑必须同时在 TTY 和管道两种模式下测**。
 
 **坑 2:abort 不一定抛异常。** 你以为 `controller.abort()` 之后流一定会 throw——实测它有时只是「体面地提前结束」,代码会把半截回答当成正常完成。必须在流结束后**显式检查中断标志**,不能只依赖 catch。这是今天踩的第二个真坑,和 Day 3 的「abort 错误形态千奇百怪」是同一个教训的两面:**中断路径上不要相信任何单一信号**。
 

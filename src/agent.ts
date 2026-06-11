@@ -1,36 +1,18 @@
 #!/usr/bin/env node
-import fs from "node:fs"; // for the minimal .env loader
 import OpenAI from "openai"; // the API client
 import chalk from "chalk"; // terminal colors
 import readline from "node:readline/promises"; // promise-based terminal input
+import { CONFIG, requireApiKey } from "./config.js"; // provider-agnostic settings (.env loaded there)
 import { runLoop, TerminateReason, MAX_ROUNDS, MAX_RETRIES, type LoopResult } from "./loop.js"; // the state machine
 import { buildSystemMessage } from "./prompt.js"; // the constitution + optional AGENT.md project memory
 import { forgetFilesExcept } from "./tools.js"; // to reset file state on /clear
 
-// Minimal .env loader: lets `npx mini-agent` work in any directory that has a
-// .env file — no dotenv dependency, no --env-file flag to remember.
-try {
-  for (const line of fs.readFileSync(".env", "utf8").split("\n")) {
-    const m = line.match(/^([A-Za-z0-9_]+)=(.*)$/); // KEY=value, nothing fancier
-    if (m && !process.env[m[1]]) process.env[m[1]] = m[2]; // real env vars always win over the file
-  }
-} catch {
-  /* no .env here — the key may come from the shell instead */
-}
-
-// No key, no point: fail with instructions instead of a stack trace later.
-if (!process.env.DEEPSEEK_API_KEY) {
-  console.error(chalk.red("Missing DEEPSEEK_API_KEY."));
-  console.error("Get one at https://platform.deepseek.com, then either:");
-  console.error("  echo 'DEEPSEEK_API_KEY=sk-...' > .env   (in this directory)");
-  console.error("  or export DEEPSEEK_API_KEY=sk-...       (in your shell)");
-  process.exit(1);
-}
+requireApiKey(); // fail fast with instructions, not a stack trace from inside the SDK
 
 // Build the API client once, for the whole session.
 const client = new OpenAI({
-  baseURL: process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com", // overridable for testing (point it at a dead port to simulate outages)
-  apiKey: process.env.DEEPSEEK_API_KEY, // from .env (loaded above) or the shell
+  baseURL: CONFIG.baseURL, // DeepSeek by default; any OpenAI-compatible endpoint via MINI_AGENT_BASE_URL
+  apiKey: CONFIG.apiKey, // from .env or the shell
   maxRetries: 0, // we own the retry policy — never let the SDK retry underneath us
 });
 
@@ -47,8 +29,11 @@ const EXIT_NOTES: Record<Exclude<TerminateReason, TerminateReason.Done>, string>
 };
 
 async function main() {
-  // The banner: who am I, and the three things worth knowing.
-  console.log(chalk.bold("mini-agent") + chalk.dim(` — deepseek-chat | "exit" to quit · "/clear" to reset · Ctrl+C interrupts a running task`));
+  // The banner: who am I, which model and host am I on, and the three things worth knowing.
+  console.log(
+    chalk.bold("mini-agent") +
+      chalk.dim(` — ${CONFIG.model} @ ${new URL(CONFIG.baseURL).host} | "exit" to quit · "/clear" to reset · Ctrl+C interrupts a running task`),
+  );
 
   // ONE readline interface for the whole session — the task prompt and the
   // permission prompts share it. Two interfaces on one stdin fight each other.
@@ -144,7 +129,7 @@ async function main() {
 
     const result: LoopResult = await runLoop(messages, {
       client, // the configured API client
-      model: "deepseek-chat", // function calling works reliably on this model (not deepseek-reasoner)
+      model: CONFIG.model, // whatever the user configured — must support function calling
       signal: controller.signal, // for aborting requests
       isInterrupted: () => interrupted, // for stopping between steps
       confirm, // for permission prompts

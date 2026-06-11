@@ -99,3 +99,13 @@ flowchart TD
 ```
 
 > 两张图在 Obsidian / 支持 Mermaid 的环境直接渲染;导出 PDF 时已转为图片。
+
+## 换模型清单(Bring Your Own Model)
+
+任何 OpenAI 兼容端点都能跑,三个变量:`MINI_AGENT_API_KEY` / `MINI_AGENT_BASE_URL` / `MINI_AGENT_MODEL`(默认 DeepSeek,`DEEPSEEK_API_KEY` 继续可用)。换模型时过一遍这张单:
+
+1. **模型必须支持 function calling**——推理特化模型和多数小型本地模型跑不了 agent
+2. **窗口对齐**:压缩触发线默认按 DeepSeek 的 ~1M 算,窗口小的模型设 `MINI_AGENT_CONTEXT_WINDOW`(token 数,以你的 API 真实报错为准——Ch6 的教训)
+3. **跑一遍 `npm run eval`**:同样 10 道题,任何模型直接出分——这就是你的模型横评工具
+4. **观察工具调用质量**:不同模型的「母语」不同(有的爱 cat 不爱 read_file),说明书措辞可能要按模型微调
+

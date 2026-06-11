@@ -1,6 +1,6 @@
 # Ch9 · 收尾:我们刻意没做的事
 
-> 本章对应 `day8`:没有新能力,只有打磨(npm 封装、`npx mini-agent` 一行启动)和这份「不做清单」。
+> 本章对应 `day8`:没有新能力,只有打磨(npm 封装、`npx agent-from-zero` 一行启动——原想用 mini-agent 当包名,被 npm 的相似名保护拦了:已存在 miniagent;装完的命令名仍是 `mini-agent`)和这份「不做清单」。
 
 ## 砍功能也是工程
 
@@ -81,7 +81,7 @@ Day 1: a raw tool-calling loop in ~50 lines
 $ npm run eval
 10/10 passed — above the 8/10 bar
 
-$ npx mini-agent
+$ npx agent-from-zero
 mini-agent — deepseek-chat | ...
 >
 ```

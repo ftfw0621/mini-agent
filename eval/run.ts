@@ -4,6 +4,7 @@ import path from "node:path"; // path joining
 import { execSync } from "node:child_process"; // verifying results by actually running code
 import OpenAI from "openai"; // the API client
 import chalk from "chalk"; // PASS/FAIL coloring
+import { CONFIG, requireApiKey } from "../src/config.js"; // same provider config as the real agent
 import { runLoop, TerminateReason } from "../src/loop.js"; // the agent under test
 import { SYSTEM_PROMPT } from "../src/prompt.js"; // the same constitution the real agent uses
 import { forgetFilesExcept } from "../src/tools.js"; // reset file read-state between cases
@@ -130,9 +131,12 @@ const cases: EvalCase[] = [
 ];
 
 // One client for the whole run — same construction as the real agent.
+// Tip: the eval doubles as a model benchmark — point MINI_AGENT_MODEL at a
+// different provider and see how it scores on the same 10 cases.
+requireApiKey();
 const client = new OpenAI({
-  baseURL: process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com",
-  apiKey: process.env.DEEPSEEK_API_KEY,
+  baseURL: CONFIG.baseURL,
+  apiKey: CONFIG.apiKey,
   maxRetries: 0,
 });
 
@@ -151,7 +155,7 @@ for (const c of cases) {
     ],
     {
       client,
-      model: "deepseek-chat",
+      model: CONFIG.model,
       signal: new AbortController().signal, // never aborted — evals run to completion
       isInterrupted: () => false, // no Ctrl+C in CI
       confirm: async (q) => {
