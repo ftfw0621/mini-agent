@@ -56,6 +56,8 @@ MINI_AGENT_MODEL=gpt-4.1-mini
 | `day7` | 子 agent(task 工具:独立上下文、一层分身不套娃、报告是材料不是结论、文件状态快照隔离)+ 最小 eval(10 道固定题、物证判分、8/10 及格线,`npm run eval`) |
 | `day8` | 封装发布:`bin` 入口 + tsc 构建,npx 一行启动(包名 `agent-from-zero`);内置 .env 加载;缺 key 人话报错 |
 | `day9` | 教程本身:11 章中文教程开源进 [docs/](docs/README.md) |
+| `day10` | Bring your own model:三个环境变量换任意 OpenAI 兼容端点,`npm run eval` 兼职模型横评 |
+| `day11` | 工业级 CLI 表面:settings.json 双层配置(用户权限规则,deny 永远赢)、slash 命令(/help /model /compact)、`-p` 单发模式、`--version`、测试套件进仓库(`npm test`,60 例) |
 
 ## 📖 配套教程(免费开源)
 

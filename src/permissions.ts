@@ -1,4 +1,5 @@
 import path from "node:path"; // used to resolve and split file paths
+import { CONFIG } from "./config.js"; // user-configured allow/deny rules from settings files
 
 // Three verdicts, checked in strict order. The invariant that holds the whole
 // system together: DENY ALWAYS WINS. No flag, no auto-approve mode, no clever
@@ -62,17 +63,31 @@ const BASH_ASK: Array<[RegExp, string]> = [
 const BASH_ALLOW = new Set(["ls", "pwd", "echo", "wc", "which", "date", "node", "npm", "npx", "cat", "head", "tail"]);
 const GIT_READONLY = new Set(["status", "log", "diff", "show", "branch", "remote", "tag"]); // git subcommands that only read
 
+// User rules from settings files, split by kind. Computed per call (not cached)
+// so the test suite can mutate CONFIG.permissions and see the effect.
+function userBashRules(): { allow: string[]; deny: string[] } {
+  return {
+    allow: CONFIG.permissions.allow.filter((r) => !r.startsWith("tool:")), // bash first-words to trust
+    deny: CONFIG.permissions.deny.filter((r) => !r.startsWith("tool:")), // command substrings to block
+  };
+}
+
 // Decide what a bash command deserves: deny, ask, or allow.
 function checkBash(command: string): Verdict {
   const summary = command.trim(); // what the user will see in the prompt
-  // Order is the security model: deny first, ask second, allow last.
+  const user = userBashRules(); // the user's configured additions
+  // Order is the security model: built-in deny, then user deny, then ask,
+  // then allow. A user allow can never jump this queue — allow is checked last.
   for (const [re, why] of BASH_DENY) if (re.test(command)) return { decision: "deny", reason: why, summary };
+  for (const d of user.deny)
+    if (command.toLowerCase().includes(d.toLowerCase())) return { decision: "deny", reason: `denied by your settings ("${d}")`, summary };
   for (const [re, why] of BASH_ASK) if (re.test(command)) return { decision: "ask", reason: why, summary };
   // Compound commands (&&, ;, |, $(), ``) are too hard to reason about — ask.
   if (/[;&|]|\$\(|`/.test(command)) return { decision: "ask", reason: "compound command", summary };
   const words = summary.split(/\s+/); // tokenize to inspect the first word
   if (words[0] === "git" && GIT_READONLY.has(words[1] ?? "")) return { decision: "allow", reason: "read-only git", summary }; // safe git subcommands
   if (BASH_ALLOW.has(words[0])) return { decision: "allow", reason: "safe command", summary }; // known-harmless single command
+  if (user.allow.includes(words[0])) return { decision: "allow", reason: "allowed by your settings", summary }; // the user vouched for this command
   // Fail closed: a command we don't recognize is a question for the human.
   return { decision: "ask", reason: "unrecognized command", summary };
 }
@@ -80,6 +95,11 @@ function checkBash(command: string): Verdict {
 // ---- The single entry point ---------------------------------------------------
 // Called by the loop for EVERY tool call, before anything executes.
 export function checkPermission(toolName: string, argsJson: string): Verdict {
+  // A user-configured tool block beats everything, including built-in allows.
+  if (CONFIG.permissions.deny.includes(`tool:${toolName}`)) {
+    return { decision: "deny", reason: `tool blocked by your settings ("tool:${toolName}")`, summary: toolName };
+  }
+
   let args: Record<string, string>; // the parsed tool arguments
   try {
     args = JSON.parse(argsJson); // arguments arrive as a raw JSON string from the model
@@ -107,6 +127,12 @@ export function checkPermission(toolName: string, argsJson: string): Verdict {
       const p = args.path ?? ""; // the file the model wants to change
       const hit = noFlyHit(p); // is it in the no-fly zone?
       if (hit) return { decision: "deny", reason: hit, summary: p }; // hard stop — deny always wins
+      // The user may pre-approve write tools ("tool:edit_file") to skip the
+      // prompt — note this runs AFTER the no-fly check, so it widens "ask",
+      // never "deny".
+      if (CONFIG.permissions.allow.includes(`tool:${toolName}`)) {
+        return { decision: "allow", reason: "pre-approved by your settings", summary: p };
+      }
       return { decision: "ask", reason: "writes to your filesystem", summary: p }; // normal writes need a human yes
     }
     case "run_bash":

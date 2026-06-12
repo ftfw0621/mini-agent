@@ -1,6 +1,6 @@
 {
   "name": "agent-from-zero",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Build a Claude Code-style CLI agent from scratch, with AI as your pair programmer — companion code for a 10-day tutorial (DeepSeek by default, any OpenAI-compatible model)",
   "type": "module",
   "bin": {
@@ -15,7 +15,8 @@
     "typecheck": "tsc --noEmit",
     "eval": "tsx --env-file=.env eval/run.ts",
     "build": "tsc -p tsconfig.build.json",
-    "prepare": "npm run build"
+    "prepare": "npm run build",
+    "test": "tsx tests/tools.test.ts && tsx tests/permissions.test.ts && tsx tests/context.test.ts"
   },
   "engines": {
     "node": ">=20.6"

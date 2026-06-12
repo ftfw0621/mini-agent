@@ -17,7 +17,15 @@
 | [Ch7](ch07-repl-and-prompt.md) | 从一问一答到一场对话:REPL、宪法与流式输出 | `day6` |
 | [Ch8](ch08-subagents-and-eval.md) | 分身术与期末考:子 agent 和 eval | `day7` |
 | [Ch9](ch09-what-we-didnt-build.md) | 收尾:我们刻意没做的事 | `day8` |
-| [附录](ch10-appendix.md) | 常量速查表与架构图 | — |
+| [附录](ch10-appendix.md) | 常量速查表与架构图(含换模型清单,对应 `day10`) | — |
+
+## 进阶篇:走向工业级
+
+课程主线到 Ch9 为止是一个完整的 agent;进阶篇把它打磨成工业级 CLI,体例不变(一章一个 tag,五段结构)。
+
+| 章 | 标题 | 对应 tag |
+|---|---|---|
+| [Ch11](ch11-settings-and-cli.md) | 配置即权限:settings、slash 命令与一个真正的 CLI 表面 | `day11` |
 
 ## 怎么学
 

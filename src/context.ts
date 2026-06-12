@@ -1,15 +1,16 @@
 import fs from "node:fs"; // re-reading files from disk during recovery
 import OpenAI from "openai"; // API types + client type
 import chalk from "chalk"; // status lines
+import { CONFIG } from "./config.js"; // the resolved context window (env > settings files > default)
 import { recentFiles, forgetFilesExcept } from "./tools.js"; // session file state (what was read/edited, and when)
 
 // ---- The context window ------------------------------------------------------
-// 1,048,565 came from a real API error message, not from documentation.
+// The default (1,048,565) came from a real API error message, not from docs.
 // Trust what the API tells you over what you remember reading.
-export const CONTEXT_WINDOW = Number(process.env.MINI_AGENT_CONTEXT_WINDOW || 1_048_565); // overridable for other models
+export const CONTEXT_WINDOW = CONFIG.contextWindow; // resolved in config.ts: env > project file > global file > default
 // Compact well before the hard limit: estimation is approximate and the summary
 // itself needs room. 80% is deliberately conservative.
-export const COMPACT_AT = Number(process.env.MINI_AGENT_COMPACT_AT || Math.floor(CONTEXT_WINDOW * 0.8)); // overridable so tests can trigger compaction cheaply
+export const COMPACT_AT = Number(process.env.MINI_AGENT_COMPACT_AT || Math.floor(CONTEXT_WINDOW * 0.8)); // env override kept so tests can trigger compaction cheaply
 
 // How many times one query may compact / fail to compact before we give up.
 export const MAX_COMPACTIONS_PER_QUERY = 4; // a query that needs more is too big — stop, don't loop
