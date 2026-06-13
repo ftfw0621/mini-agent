@@ -17,5 +17,10 @@
     "PreToolUse": [{ "match": "run_bash", "command": ".mini-agent/guard-bash.sh" }],
     "PostToolUse": [{ "match": "edit_file", "command": "echo 'remember to run the linter' 1>&2; exit 0" }],
     "Stop": [{ "command": "npm test >/dev/null 2>&1 || (echo 'tests are failing — keep fixing' 1>&2; exit 2)" }]
+  },
+
+  "mcpServers": {
+    "_comment": "External tool servers (Model Context Protocol). Each is a process we spawn and speak JSON-RPC to. Their tools appear as mcp__<name>__<tool> and default to asking before each call.",
+    "fs": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/you/allow"] }
   }
 }

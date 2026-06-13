@@ -31,6 +31,14 @@ export interface HookDef {
   timeoutMs?: number; // kill the hook after this long (default 10s)
 }
 
+// One MCP server: a process we spawn and speak JSON-RPC to over stdio. Its tools
+// are discovered at startup and exposed to the model as mcp__<server>__<tool>.
+export interface McpServerDef {
+  command: string; // executable, e.g. "npx"
+  args?: string[]; // arguments, e.g. ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+  env?: Record<string, string>; // extra environment variables for the server
+}
+
 // What a settings file may contain. Unknown keys are ignored.
 interface SettingsFile {
   model?: string; // which model to call
@@ -46,6 +54,7 @@ interface SettingsFile {
     SessionStart?: HookDef[]; // when a session begins — stdout goes to the model
     Stop?: HookDef[]; // when the agent wants to finish — exit 2 sends it back to work
   };
+  mcpServers?: Record<string, McpServerDef>; // external tool servers, keyed by name
 }
 
 // Read one settings file. A broken settings file is a HARD error, not a warning:
@@ -103,6 +112,8 @@ export const CONFIG = {
     SessionStart: [...(globalSettings.hooks?.SessionStart ?? []), ...(projectSettings.hooks?.SessionStart ?? [])],
     Stop: [...(globalSettings.hooks?.Stop ?? []), ...(projectSettings.hooks?.Stop ?? [])],
   },
+  // MCP servers: project entries override global ones with the same name.
+  mcpServers: { ...(globalSettings.mcpServers ?? {}), ...(projectSettings.mcpServers ?? {}) } as Record<string, McpServerDef>,
 };
 
 // No key, no point: fail with instructions instead of a stack trace later.

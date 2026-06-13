@@ -29,6 +29,7 @@
 | [Ch12](ch12-sessions-and-telemetry.md) | 记得住自己干过什么:会话持久化与本地遥测 | `day12` |
 | [Ch13](ch13-async-execution.md) | 别冻住:把工具执行改成全异步 | `day13` |
 | [Ch14](ch14-hooks.md) | 核心做精,业务外挂:Hook 生命周期系统 | `day14` |
+| [Ch15](ch15-mcp.md) | 借来的工具:接入 MCP 生态 | `day15` |
 
 ## 怎么学
 

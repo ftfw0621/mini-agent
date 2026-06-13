@@ -152,7 +152,7 @@ async function streamModelCall(
     const stream = await opts.client.chat.completions.create(
       // Sub-agents do NOT get the task tool: one level of delegation only.
       // Nested spawning means orphan processes and debugging hell.
-      { model: opts.model, messages, tools: opts.subAgent ? toolDefinitions : [...toolDefinitions, taskTool], stream: true },
+      { model: opts.model, messages, tools: opts.subAgent ? toolDefinitions() : [...toolDefinitions(), taskTool], stream: true },
       { signal }, // abortable by user AND watchdog
     );
     let content = ""; // accumulated answer text

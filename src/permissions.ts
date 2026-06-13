@@ -138,7 +138,13 @@ export function checkPermission(toolName: string, argsJson: string): Verdict {
     case "run_bash":
       return checkBash(args.command ?? ""); // bash gets input-aware analysis
     default:
-      // A tool we don't know gets the most suspicious treatment, not the least.
-      return { decision: "ask", reason: "unknown tool", summary: toolName };
+      // Everything else — unknown tools and MCP tools (mcp__server__tool) —
+      // gets the most suspicious treatment, not the least: ask. The user can
+      // pre-approve a trusted MCP tool with "tool:mcp__server__tool" in
+      // settings, or block one with "tool:..." in deny (checked at the top).
+      if (CONFIG.permissions.allow.includes(`tool:${toolName}`)) {
+        return { decision: "allow", reason: "pre-approved by your settings", summary: toolName };
+      }
+      return { decision: "ask", reason: toolName.startsWith("mcp__") ? "external MCP tool" : "unknown tool", summary: toolName };
   }
 }

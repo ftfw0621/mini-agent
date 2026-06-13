@@ -3,7 +3,7 @@ import { CONFIG } from "../src/config.js"; // mutated to inject hooks (the test 
 import { check, finish } from "./helpers.js"; // assertions
 
 // Helper: set the hooks for one event, run them, return the outcome.
-async function withHooks(event: "PreToolUse" | "PostToolUse" | "SessionStart" | "Stop", defs: { match?: string; command: string }[], payload: Record<string, unknown> = {}) {
+async function withHooks(event: "PreToolUse" | "PostToolUse" | "SessionStart" | "Stop", defs: { match?: string; command: string; timeoutMs?: number }[], payload: Record<string, unknown> = {}) {
   CONFIG.hooks[event] = defs; // inject
   const out = await runHooks(event, payload); // run
   CONFIG.hooks[event] = []; // clean up for the next case

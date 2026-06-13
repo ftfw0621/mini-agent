@@ -61,10 +61,11 @@ MINI_AGENT_MODEL=gpt-4.1-mini
 | `day12` | 会话持久化(`--resume`,快照式 + 原子写)+ 本地遥测(事件 JSONL + `/stats`,绝不出本机,`MINI_AGENT_NO_TELEMETRY=1` 关闭) |
 | `day13` | 异步执行:run_bash 换 spawn(不冻 UI、Ctrl+C 秒杀、30s 超时 SIGKILL)、超长输出落盘、只读工具并行;`npm test` 65 例 |
 | `day14` | Hook 生命周期系统:PreToolUse(拦截工具)/PostToolUse(追加校验)/SessionStart(注入上下文)/Stop(测试驱动 AI),退出码协议、stderr 喂回模型;`npm test` 76 例 |
+| `day15` | MCP 接入:stdio JSON-RPC 客户端(握手/行缓冲/id 配对),外部 server 工具注册成内置同款(同一 dispatch + 权限闸门,默认 ask);`npm test` 84 例 |
 
 ## 📖 配套教程(免费开源)
 
-**[完整教程在 docs/ 目录](docs/README.md)**——11 章,每章对应一个 tag:为什么这么写、Claude Code 原版怎么做、你会踩的坑。每章五段结构:做完长什么样 → 跟着写 → 为什么 → 坑 → 小结。
+**[完整教程在 docs/ 目录](docs/README.md)**——主线 + 进阶共十几章,每章对应一个 tag:为什么这么写、Claude Code 原版怎么做、你会踩的坑。每章五段结构:做完长什么样 → 跟着写 → 为什么 → 坑 → 小结。
 
 想看更深的「为什么」:公众号的 **Harness Engineering 拆书系列**(30+ 篇)逐章拆了《Harness Engineering:从 Claude Code 看 AI 编码工程》——本仓库每个设计决策背后的原理、数据和事故案例都在那里。公众号 @老李是谁。
 

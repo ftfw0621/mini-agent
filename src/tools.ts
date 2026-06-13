@@ -27,9 +27,10 @@ const SPILL_NOTE_SLACK = 400; // room for the "[...saved to FILE]" note so dispa
 // A tool = a manual for the model to read (definition) + code that does the work
 // (run). Since Day 13, run may be async (run_bash spawns a process) and may
 // receive an AbortSignal so a long command dies with Ctrl+C instead of running
-// to its 30s timeout.
+// to its 30s timeout. We use the function-tool variant specifically (not the
+// custom-tool one) so .function.name is always available.
 export interface Tool {
-  definition: OpenAI.ChatCompletionTool; // the machine-readable manual
+  definition: OpenAI.ChatCompletionFunctionTool; // the machine-readable manual
   run: (args: Record<string, string>, signal?: AbortSignal) => string | Promise<string>; // returns text (or a promise of it)
 }
 
@@ -42,7 +43,7 @@ function def(
   description: string, // the manual: what / boundaries / preconditions / on error
   properties: Record<string, { type: string; description: string }>, // parameter schema
   required: string[], // which parameters are mandatory
-): OpenAI.ChatCompletionTool {
+): OpenAI.ChatCompletionFunctionTool {
   return {
     type: "function", // the only tool type the chat API supports
     function: { name, description, parameters: { type: "object", properties, required } },
@@ -269,7 +270,10 @@ On error: failures return the error output — analyze it and try a different ap
 };
 
 // ============ Registry & dispatch ============
-// One place that knows every tool. Adding a tool = adding one entry here.
+// The built-in tools. External tools (MCP servers, Day 15) are registered into
+// the same record at startup, so they flow through the same dispatch and the
+// same permission gate — there is exactly one execution path, no matter where a
+// tool came from.
 export const tools: Record<string, Tool> = {
   read_file: readFile,
   write_file: writeFile,
@@ -278,12 +282,23 @@ export const tools: Record<string, Tool> = {
   run_bash: runBash,
 };
 
-// The list of manuals sent to the model on every API call.
-export const toolDefinitions = Object.values(tools).map((t) => t.definition);
+// Register an external tool (e.g. one discovered from an MCP server). Kept in
+// the same `tools` record so dispatch, the permission gate, and the tool-list
+// sent to the model all treat it identically to a built-in.
+export function registerExternalTool(tool: Tool): void {
+  tools[tool.definition.function.name] = tool;
+}
+
+// The manuals sent to the model. A function (not a const) since Day 15: MCP
+// tools register after module load, so the list must be computed when asked.
+export function toolDefinitions(): OpenAI.ChatCompletionTool[] {
+  return Object.values(tools).map((t) => t.definition);
+}
 
 // Read-only tools never touch the filesystem in a conflicting way, so the loop
 // is free to run a batch of them concurrently. Anything that writes or executes
-// runs alone, in order. (See loop.ts for the batching.)
+// (including any external/MCP tool, which we cannot reason about) runs alone, in
+// order. (See loop.ts for the batching.)
 const READ_ONLY_TOOLS = new Set(["read_file", "search"]);
 export const isReadOnlyTool = (name: string): boolean => READ_ONLY_TOOLS.has(name);
 

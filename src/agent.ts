@@ -11,6 +11,7 @@ import { compactHistory, estimateHistoryTokens, COMPACT_AT } from "./context.js"
 import { newSessionId, saveSession, latestSession } from "./session.js"; // conversation persistence (project-local)
 import { initTelemetry, emit, statsReport } from "./telemetry.js"; // local-only event log + /stats
 import { runHooks } from "./hooks.js"; // SessionStart lifecycle hook
+import { connectMcpServers } from "./mcp.js"; // external tool servers (MCP)
 
 // package.json sits one level above both src/ (dev) and dist/ (built) — same path either way.
 const pkg = createRequire(import.meta.url)("../package.json") as { version: string };
@@ -106,6 +107,12 @@ async function main() {
   }
   initTelemetry(sessionId); // arm the local event log (no-op under MINI_AGENT_NO_TELEMETRY=1)
   emit("agent_session_start", { mode: printTask !== null ? "print" : "repl" }); // how this session was started
+
+  // Connect to any configured MCP servers and register their tools. This must
+  // finish before the first model call so the tools appear in the manual. A
+  // server that fails to start is skipped, never fatal.
+  const disconnectMcp = await connectMcpServers();
+  process.on("exit", disconnectMcp); // best-effort cleanup of server subprocesses
 
   // SessionStart hooks run once, here. Their stdout is injected as context the
   // model sees on its first turn — e.g. inject the current git branch, an
