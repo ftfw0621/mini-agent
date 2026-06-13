@@ -22,5 +22,10 @@
   "mcpServers": {
     "_comment": "External tool servers (Model Context Protocol). Each is a process we spawn and speak JSON-RPC to. Their tools appear as mcp__<name>__<tool> and default to asking before each call.",
     "fs": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/you/allow"] }
+  },
+
+  "judge": {
+    "_comment": "Optional LLM classifier over the rule-based gate: auto-allows commands the rules marked 'ask' only when clearly safe. Never overrides a deny; fails closed. Off by default.",
+    "enabled": false
   }
 }

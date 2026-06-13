@@ -55,6 +55,10 @@ interface SettingsFile {
     Stop?: HookDef[]; // when the agent wants to finish — exit 2 sends it back to work
   };
   mcpServers?: Record<string, McpServerDef>; // external tool servers, keyed by name
+  judge?: {
+    enabled?: boolean; // run an LLM classifier on "ask" verdicts to auto-allow the clearly safe
+    model?: string; // judge model (defaults to the main model); a cheaper one is ideal
+  };
 }
 
 // Read one settings file. A broken settings file is a HARD error, not a warning:
@@ -114,6 +118,11 @@ export const CONFIG = {
   },
   // MCP servers: project entries override global ones with the same name.
   mcpServers: { ...(globalSettings.mcpServers ?? {}), ...(projectSettings.mcpServers ?? {}) } as Record<string, McpServerDef>,
+  // LLM permission judge: off unless a settings file turns it on. Project wins.
+  judge: {
+    enabled: projectSettings.judge?.enabled ?? globalSettings.judge?.enabled ?? false,
+    model: projectSettings.judge?.model || globalSettings.judge?.model || undefined, // undefined → use the main model
+  },
 };
 
 // No key, no point: fail with instructions instead of a stack trace later.

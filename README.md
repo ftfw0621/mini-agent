@@ -62,6 +62,7 @@ MINI_AGENT_MODEL=gpt-4.1-mini
 | `day13` | 异步执行:run_bash 换 spawn(不冻 UI、Ctrl+C 秒杀、30s 超时 SIGKILL)、超长输出落盘、只读工具并行;`npm test` 65 例 |
 | `day14` | Hook 生命周期系统:PreToolUse(拦截工具)/PostToolUse(追加校验)/SessionStart(注入上下文)/Stop(测试驱动 AI),退出码协议、stderr 喂回模型;`npm test` 76 例 |
 | `day15` | MCP 接入:stdio JSON-RPC 客户端(握手/行缓冲/id 配对),外部 server 工具注册成内置同款(同一 dispatch + 权限闸门,默认 ask);`npm test` 84 例 |
+| `day16` | 可选 LLM 权限裁判:只看规则判 ask 的灰色地带、只能 ask→allow、prompt 铁死格式、解析 fail closed、自带熔断、默认关闭;`npm test` 98 例 |
 
 ## 📖 配套教程(免费开源)
 

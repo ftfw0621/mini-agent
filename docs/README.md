@@ -30,6 +30,7 @@
 | [Ch13](ch13-async-execution.md) | 别冻住:把工具执行改成全异步 | `day13` |
 | [Ch14](ch14-hooks.md) | 核心做精,业务外挂:Hook 生命周期系统 | `day14` |
 | [Ch15](ch15-mcp.md) | 借来的工具:接入 MCP 生态 | `day15` |
+| [Ch16](ch16-llm-judge.md) | 让 AI 看门:LLM 权限裁判(减摩擦,不减安全) | `day16` |
 
 ## 怎么学
 

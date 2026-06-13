@@ -8,6 +8,7 @@ import { estimateHistoryTokens, compactHistory, COMPACT_AT, MAX_COMPACTIONS_PER_
 import { SUB_AGENT_PROMPT } from "./prompt.js"; // the sub-agent's own constitution
 import { emit } from "./telemetry.js"; // local-only event log (no-op unless the CLI armed it)
 import { runHooks } from "./hooks.js"; // user lifecycle hooks (PreToolUse / PostToolUse / Stop)
+import type { Judge } from "./judge.js"; // optional LLM permission classifier
 
 export const MAX_ROUNDS = 15; // model→tool round cap per query
 export const MAX_RETRIES = 10; // total failed API calls per query, across all rounds
@@ -48,6 +49,7 @@ export interface LoopOptions {
   confirm: (question: string) => Promise<boolean>; // ask the human; resolves false in non-interactive sessions
   quiet?: boolean; // suppress all narration (used by the eval harness)
   subAgent?: boolean; // this loop IS a sub-agent: no task tool, no text streaming, indented tool logs
+  judge?: Judge; // optional LLM classifier that auto-allows clearly-safe "ask" commands
 }
 
 // The task tool: the parent's handle on sub-agents. Defined here (not in
@@ -209,7 +211,19 @@ async function runOneCall(call: AssembledCall, opts: LoopOptions): Promise<{ id:
     if (!opts.quiet) console.log(chalk.red(`  ⛔ denied: ${v.reason}`)); // tell the user we blocked it
     content = `[permission] Denied: ${v.reason}. This is a hard rule — do not try to work around it; pick a different approach or ask the user.`; // teach the model the boundary
   } else if (v.decision === "ask") {
-    const ok = await opts.confirm(`${call.name} (${v.reason}):\n   ${v.summary}`); // pause and ask the human
+    // Optional LLM judge: for a run_bash command the rules couldn't classify,
+    // ask the judge first. It can only DOWNGRADE ask→allow for the clearly
+    // safe; anything else still goes to the human. The judge never sees a deny.
+    let autoAllowed = false;
+    if (opts.judge && call.name === "run_bash") {
+      let cmd = "";
+      try { cmd = (JSON.parse(call.args) as { command?: string }).command ?? ""; } catch { /* leave empty → judge will ask */ }
+      if (cmd && (await opts.judge.classify(cmd)) === "allow") {
+        autoAllowed = true;
+        if (!opts.quiet) console.log(chalk.dim("  ⚖ judge: clearly safe, auto-allowed")); // visible — the user can see the judge worked
+      }
+    }
+    const ok = autoAllowed || (await opts.confirm(`${call.name} (${v.reason}):\n   ${v.summary}`)); // judge-allowed, or pause and ask the human
     if (!ok) emit("agent_tool_declined", { tool: call.name }); // the human said no — that is signal
     if (!ok && !opts.quiet) console.log(chalk.yellow("  ✋ declined")); // make the refusal visible
     content = ok

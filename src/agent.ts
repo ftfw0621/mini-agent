@@ -12,6 +12,7 @@ import { newSessionId, saveSession, latestSession } from "./session.js"; // conv
 import { initTelemetry, emit, statsReport } from "./telemetry.js"; // local-only event log + /stats
 import { runHooks } from "./hooks.js"; // SessionStart lifecycle hook
 import { connectMcpServers } from "./mcp.js"; // external tool servers (MCP)
+import { Judge } from "./judge.js"; // optional LLM permission classifier
 
 // package.json sits one level above both src/ (dev) and dist/ (built) — same path either way.
 const pkg = createRequire(import.meta.url)("../package.json") as { version: string };
@@ -114,6 +115,10 @@ async function main() {
   const disconnectMcp = await connectMcpServers();
   process.on("exit", disconnectMcp); // best-effort cleanup of server subprocesses
 
+  // The optional LLM permission judge, built once if a settings file enabled it.
+  const judge = CONFIG.judge.enabled ? new Judge(client, CONFIG.judge.model || CONFIG.model) : undefined;
+  if (judge) console.log(chalk.dim(`(permission judge on — model ${CONFIG.judge.model || CONFIG.model})`));
+
   // SessionStart hooks run once, here. Their stdout is injected as context the
   // model sees on its first turn — e.g. inject the current git branch, an
   // on-call rota, today's deploy freeze status. (exit 2 here is ignored: there
@@ -141,6 +146,7 @@ async function main() {
       model: CONFIG.model,
       signal: controller.signal,
       isInterrupted: () => interrupted,
+      judge, // auto-allow clearly-safe commands even unattended (safer than blanket AUTO_APPROVE)
       // Print mode never prompts: unattended means nobody can say yes.
       // MINI_AGENT_AUTO_APPROVE=1 still works for scripted use; hard denies
       // were enforced in permissions.ts long before this runs.
@@ -289,6 +295,7 @@ async function main() {
       signal: controller.signal, // for aborting requests
       isInterrupted: () => interrupted, // for stopping between steps
       confirm, // for permission prompts
+      judge, // optional LLM classifier for the "ask" middle ground
     });
     running = false; // back at the prompt — Ctrl+C means "exit" again
     saveSession(sessionId, CONFIG.model, messages); // snapshot after every turn — crash-safe by construction
