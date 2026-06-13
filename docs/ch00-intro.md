@@ -2,7 +2,7 @@
 
 ## 你将做出什么
 
-跟着这份教程做 10 天——一天一章,总代码量约 1200 行——你会从零做出一个在自己终端里干活的 AI Agent——类似 Claude Code,而且每一行你都看得懂、说得清为什么:
+跟着这份教程,一天一章做下去——主线 10 天做出一个能用的 agent,再花 4 天进阶,把它打磨成工业级 CLI。总代码量约 2000 行,你会从零做出一个在自己终端里干活的 AI Agent——类似 Claude Code,而且每一行你都看得懂、说得清为什么:
 
 ```
 mini-agent — deepseek-chat | "exit" to quit · "/clear" to reset · Ctrl+C interrupts
@@ -43,7 +43,7 @@ mini-agent — deepseek-chat | "exit" to quit · "/clear" to reset · Ctrl+C int
 配套仓库的 **commit 历史就是课程目录**:
 
 ```bash
-git log --oneline        # 十行,就是十章的大纲
+git log --oneline        # 每行就是一天,一眼看到全部大纲
 git checkout day3        # 第 3 章对应的完整代码
 ```
 
@@ -95,6 +95,8 @@ npx agent-from-zero   # 装好发布版试一下手感(可选;包名 agent-from-
 
 ## 课程地图
 
+**主线(10 天,做出一个能用的 agent):**
+
 | 天 | 内容 | 一句话 |
 |---|---|---|
 | Day 1 | 50 行 raw loop | agent 的本质是一个循环 |
@@ -106,8 +108,18 @@ npx agent-from-zero   # 装好发布版试一下手感(可选;包名 agent-from-
 | Day 7 | REPL 与宪法 | 慢 ≠ 死 |
 | Day 8 | 子 agent 与 eval | 没有 eval 永远是 demo |
 | Day 9 | 刻意没做的事 | 砍功能也是工程 |
+| Day 10 | 任意模型可配 | 换模型是配置,不是改代码 |
 
-(Day 编号是跟做节奏——一晚一章设计,章节编号 Ch1-Ch9 与之对应,Ch3 是 Day 2 的设计篇。)
+**进阶(4 天,打磨成工业级 CLI):**
+
+| 天 | 内容 | 一句话 |
+|---|---|---|
+| Day 11 | 配置与 CLI 表面 | 安全策略是数据,不是代码 |
+| Day 12 | 会话持久化与遥测 | 记得住,看得见 |
+| Day 13 | 异步执行 | 慢不能冻死整个进程 |
+| Day 14 | Hook 系统 | 核心做精,业务外挂 |
+
+(Day 编号是跟做节奏——一晚一章设计,章节编号 Ch1-Ch14 与之对应,Ch3 是 Day 2 的设计篇。新手可以只跟主线 10 天,进阶 4 天等想做工业级时再来。)
 
 准备好了就翻到 Ch1——50 行代码,让 AI 第一次替你干活。
 
