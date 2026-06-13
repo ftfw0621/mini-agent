@@ -27,6 +27,7 @@
 |---|---|---|
 | [Ch11](ch11-settings-and-cli.md) | 配置即权限:settings、slash 命令与一个真正的 CLI 表面 | `day11` |
 | [Ch12](ch12-sessions-and-telemetry.md) | 记得住自己干过什么:会话持久化与本地遥测 | `day12` |
+| [Ch13](ch13-async-execution.md) | 别冻住:把工具执行改成全异步 | `day13` |
 
 ## 怎么学
 

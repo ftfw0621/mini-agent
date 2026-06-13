@@ -26,23 +26,27 @@ fs.writeFileSync(f2, "SECOND ".repeat(10));
 fs.writeFileSync(f3, "X".repeat(20000)); // larger than the 16000-char total budget
 
 forgetFilesExcept([]); // start with a clean read-state (other suites may have run)
-dispatch("read_file", JSON.stringify({ path: f1 })); // touch order: f1 → f2 → f3
-dispatch("read_file", JSON.stringify({ path: f2 }));
-dispatch("read_file", JSON.stringify({ path: f3 }));
+await dispatch("read_file", JSON.stringify({ path: f1 })); // touch order: f1 → f2 → f3
+await dispatch("read_file", JSON.stringify({ path: f2 }));
+await dispatch("read_file", JSON.stringify({ path: f3 }));
 
 const note = recoverFileState(); // what compaction would re-attach
 check("recovery returns a note", note !== null);
 check("newest file recovered first", note!.indexOf(f3) < note!.indexOf(f1), "f3 should appear before f1");
-check("huge file capped at 4000", (note!.match(/X/g) || []).length <= 4000, String((note!.match(/X/g) || []).length));
+// The huge file is one unbroken run of X's; the cap shows up as the longest
+// such run. (Counting all X's would also catch stray X's in the random temp
+// path — a real flake we hit while writing this.)
+const longestXRun = Math.max(0, ...(note!.match(/X+/g) || []).map((s) => s.length));
+check("huge file capped at 4000", longestXRun <= 4000, String(longestXRun));
 check("all three fit within budget", note!.includes(f1) && note!.includes(f2) && note!.includes(f3));
 
 // ---- eviction: not recovered = must re-read before editing ---------------------------
 const f4 = path.join(dir, "evicted.txt");
 fs.writeFileSync(f4, "EVICT ".repeat(5));
-dispatch("read_file", JSON.stringify({ path: f4 })); // mark as read...
+await dispatch("read_file", JSON.stringify({ path: f4 })); // mark as read...
 forgetFilesExcept([]); // ...then evict everything (simulating a recovery that dropped it)
-checkContains("evicted file requires re-read before edit", dispatch("edit_file", JSON.stringify({ path: f4, old_string: "EVICT", new_string: "KEPT" })), "have not read");
-dispatch("read_file", JSON.stringify({ path: f4 })); // re-reading unlocks it again
-checkContains("re-read unlocks editing", dispatch("edit_file", JSON.stringify({ path: f4, old_string: "EVICT ".repeat(5), new_string: "KEPT" })), "1 replacement");
+checkContains("evicted file requires re-read before edit", await dispatch("edit_file", JSON.stringify({ path: f4, old_string: "EVICT", new_string: "KEPT" })), "have not read");
+await dispatch("read_file", JSON.stringify({ path: f4 })); // re-reading unlocks it again
+checkContains("re-read unlocks editing", await dispatch("edit_file", JSON.stringify({ path: f4, old_string: "EVICT ".repeat(5), new_string: "KEPT" })), "1 replacement");
 
 finish();

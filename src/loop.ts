@@ -1,7 +1,7 @@
 import OpenAI from "openai"; // types + client for the chat completions API
 import chalk from "chalk"; // terminal colors for status lines
 import ora from "ora"; // the "thinking..." spinner while waiting for the first token
-import { toolDefinitions, dispatch, snapshotFileState, restoreFileState } from "./tools.js"; // the tool manuals + the executor + file-state isolation
+import { toolDefinitions, dispatch, snapshotFileState, restoreFileState, isReadOnlyTool } from "./tools.js"; // the tool manuals + the executor + file-state isolation
 import { classifyError, ApiErrorKind } from "./errors.js"; // failure taxonomy
 import { checkPermission } from "./permissions.js"; // the allow/ask/deny gate
 import { estimateHistoryTokens, compactHistory, COMPACT_AT, MAX_COMPACTIONS_PER_QUERY, MAX_COMPACT_FAILURES } from "./context.js"; // context management
@@ -191,10 +191,39 @@ async function streamModelCall(
   }
 }
 
+// Run one tool call end to end: log it, run it through the permission gate,
+// ask the human if needed, execute, and return the paired result. Read-only
+// calls (allow/deny only, never "ask") are safe to run via this from inside a
+// Promise.all batch; calls that can prompt must be awaited one at a time.
+async function runOneCall(call: AssembledCall, opts: LoopOptions): Promise<{ id: string; content: string }> {
+  const indent = opts.subAgent ? chalk.blue("  ⎿ ") : ""; // sub-agent activity is visually nested
+  if (!opts.quiet) console.log(indent + chalk.cyan(`🔧 ${call.name}`) + chalk.dim(` ${call.args.slice(0, 120)}`)); // show what the model wants to do
+
+  // The permission gate sits between the model's intent and execution.
+  const v = checkPermission(call.name, call.args);
+  emit("agent_tool_call", { tool: call.name }); // every attempt, allowed or not
+  let content: string; // what goes back to the model as the tool result
+  if (v.decision === "deny") {
+    emit("agent_tool_denied", { tool: call.name }); // hard blocks, per tool
+    if (!opts.quiet) console.log(chalk.red(`  ⛔ denied: ${v.reason}`)); // tell the user we blocked it
+    content = `[permission] Denied: ${v.reason}. This is a hard rule — do not try to work around it; pick a different approach or ask the user.`; // teach the model the boundary
+  } else if (v.decision === "ask") {
+    const ok = await opts.confirm(`${call.name} (${v.reason}):\n   ${v.summary}`); // pause and ask the human
+    if (!ok) emit("agent_tool_declined", { tool: call.name }); // the human said no — that is signal
+    if (!ok && !opts.quiet) console.log(chalk.yellow("  ✋ declined")); // make the refusal visible
+    content = ok
+      ? await execute(call, opts) // approved — actually run it
+      : `[permission] The user declined this action. Ask them how to proceed, or choose a safer alternative.`; // declined — tell the model
+  } else {
+    content = await execute(call, opts); // allow — run without ceremony
+  }
+  return { id: call.id, content }; // paired by id for the API
+}
+
 // Execute one approved tool call. The task tool is special — it is not in the
 // registry because running it needs the loop itself (it IS a loop).
 async function execute(call: AssembledCall, opts: LoopOptions): Promise<string> {
-  if (call.name !== "task") return dispatch(call.name, call.args); // ordinary tools go through the registry
+  if (call.name !== "task") return dispatch(call.name, call.args, opts.signal); // ordinary tools go through the registry (signal lets Ctrl+C kill run_bash)
   if (opts.subAgent) return "[error] Sub-agents cannot spawn sub-agents. Do the work yourself."; // one level of delegation only
   let description = ""; // the sub-task text
   try {
@@ -319,30 +348,25 @@ export async function runLoop(
         return { reason: TerminateReason.Done, finalText: out.content }; // no tool calls = final answer (already streamed to the screen)
       }
 
-      // Execute every tool call, each behind the permission gate.
-      for (const call of out.toolCalls) {
-        const indent = opts.subAgent ? chalk.blue("  ⎿ ") : ""; // sub-agent activity is visually nested
-        if (!opts.quiet) console.log(indent + chalk.cyan(`🔧 ${call.name}`) + chalk.dim(` ${call.args.slice(0, 120)}`)); // show what the model wants to do
-
-        // The permission gate sits between the model's intent and execution.
-        const v = checkPermission(call.name, call.args);
-        emit("agent_tool_call", { tool: call.name }); // every attempt, allowed or not
-        let content: string; // what goes back to the model as the tool result
-        if (v.decision === "deny") {
-          emit("agent_tool_denied", { tool: call.name }); // hard blocks, per tool
-          if (!opts.quiet) console.log(chalk.red(`  ⛔ denied: ${v.reason}`)); // tell the user we blocked it
-          content = `[permission] Denied: ${v.reason}. This is a hard rule — do not try to work around it; pick a different approach or ask the user.`; // teach the model the boundary
-        } else if (v.decision === "ask") {
-          const ok = await opts.confirm(`${call.name} (${v.reason}):\n   ${v.summary}`); // pause and ask the human
-          if (!ok) emit("agent_tool_declined", { tool: call.name }); // the human said no — that is signal
-          if (!ok && !opts.quiet) console.log(chalk.yellow("  ✋ declined")); // make the refusal visible
-          content = ok
-            ? await execute(call, opts) // approved — actually run it
-            : `[permission] The user declined this action. Ask them how to proceed, or choose a safer alternative.`; // declined — tell the model
-        } else {
-          content = await execute(call, opts); // allow — run without ceremony
+      // Execute the tool calls. Read-only calls (read_file/search) in a
+      // contiguous run are executed CONCURRENTLY — they cannot conflict and
+      // never need an interactive prompt. Anything that writes or executes runs
+      // ALONE and in order: writes can depend on each other, and we can only ask
+      // the human one question at a time. This greedy batching mirrors how
+      // Claude Code parallelizes safe reads while serializing risky work.
+      let i = 0; // index into out.toolCalls
+      while (i < out.toolCalls.length) {
+        const batch: AssembledCall[] = []; // a run of safe, parallelizable calls
+        while (i < out.toolCalls.length && isReadOnlyTool(out.toolCalls[i].name)) batch.push(out.toolCalls[i++]);
+        if (batch.length) {
+          // Run the whole read-only batch at once, preserving result order.
+          const results = await Promise.all(batch.map((c) => runOneCall(c, opts)));
+          for (const r of results) messages.push({ role: "tool", tool_call_id: r.id, content: r.content });
+          continue; // back to the top — the next call is non-read-only
         }
-        messages.push({ role: "tool", tool_call_id: call.id, content }); // feed the result back, paired by id
+        // A single non-read-only call: gate, maybe ask, execute — all serial.
+        const r = await runOneCall(out.toolCalls[i++], opts);
+        messages.push({ role: "tool", tool_call_id: r.id, content: r.content });
       }
       break; // round complete, move to the next one
     }

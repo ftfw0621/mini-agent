@@ -1,6 +1,7 @@
 import fs from "node:fs"; // filesystem reads and writes
+import os from "node:os"; // temp dir for spilled tool output
 import path from "node:path"; // path resolution and joining
-import { execSync } from "node:child_process"; // runs a shell command and waits for it
+import { spawn } from "node:child_process"; // async process execution (does NOT block the event loop)
 import type OpenAI from "openai"; // types only — no client is created here
 
 // ============ Session state ============
@@ -19,10 +20,17 @@ const READ_LIMIT = 16000; // read_file gets a larger cap of its own
 const SEARCH_MAX_MATCHES = 50; // max matches returned by search
 const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build"]); // directories search never enters
 
-// A tool = a manual for the model to read (definition) + code that does the work (run).
+const BASH_TIMEOUT_MS = 30_000; // a single command may run this long before we kill it
+const BASH_OUTPUT_LIMIT = 8_000; // chars of command output kept inline; beyond this we spill to a file
+const SPILL_NOTE_SLACK = 400; // room for the "[...saved to FILE]" note so dispatch's cap never eats it
+
+// A tool = a manual for the model to read (definition) + code that does the work
+// (run). Since Day 13, run may be async (run_bash spawns a process) and may
+// receive an AbortSignal so a long command dies with Ctrl+C instead of running
+// to its 30s timeout.
 export interface Tool {
   definition: OpenAI.ChatCompletionTool; // the machine-readable manual
-  run: (args: Record<string, string>) => string; // the implementation — always returns text
+  run: (args: Record<string, string>, signal?: AbortSignal) => string | Promise<string>; // returns text (or a promise of it)
 }
 
 // Errors are not exceptions — they are text that tells the model what to do next.
@@ -194,6 +202,17 @@ ALWAYS use this tool to search. NEVER run grep/rg/find via run_bash.`,
 };
 
 // ============ run_bash ============
+// Spill oversized output to a file and hand the model a preview + the path, so
+// it can read_file deeper if it wants. Returning megabytes inline would blow up
+// the context; truncating silently would hide the part that matters.
+function spillIfHuge(out: string, what: string): string {
+  if (out.length <= BASH_OUTPUT_LIMIT) return out; // fits inline — return as-is
+  const file = path.join(os.tmpdir(), `mini-agent-output-${Date.now()}.txt`); // a stable place to find it
+  fs.writeFileSync(file, out, "utf8"); // the full output lives on disk
+  const head = out.slice(0, BASH_OUTPUT_LIMIT); // a generous preview
+  return `${head}\n\n[...${what} truncated: ${out.length} chars total. Full output saved to ${file} — use read_file to inspect more.]`;
+}
+
 const runBash: Tool = {
   definition: def(
     "run_bash",
@@ -205,17 +224,48 @@ On error: failures return the error output — analyze it and try a different ap
     { command: { type: "string", description: "The bash command to run" } },
     ["command"],
   ),
-  run: (args) => {
-    try {
-      // stderr is piped (not inherited): it belongs in the tool result for the
-      // model to read, not splattered onto the user's terminal.
-      const out = execSync(args.command, { encoding: "utf8", timeout: 30_000, stdio: ["ignore", "pipe", "pipe"] });
-      return out || "(command succeeded, no output)"; // never return an empty string
-    } catch (err) {
-      const e = err as Error & { stderr?: string }; // execSync attaches the captured stderr on failure
-      return fail(`Command failed: ${e.message}${e.stderr ? `\nstderr: ${e.stderr.slice(0, 1000)}` : ""}`); // failure becomes guidance, not a crash
-    }
-  },
+  // Async + spawn: the event loop stays responsive while the command runs, so
+  // the spinner keeps spinning and Ctrl+C is heard. execSync would freeze
+  // everything — the whole process, the UI, the signal handler — until it
+  // returned. The AbortSignal lets the loop kill the child on interruption
+  // instead of waiting out the 30s timeout.
+  run: (args, signal) =>
+    new Promise<string>((resolve) => {
+      const child = spawn(args.command, { shell: true, stdio: ["ignore", "pipe", "pipe"] }); // shell:true → bash semantics
+      let stdout = ""; // captured stdout
+      let stderr = ""; // captured stderr (for the model, not the user's terminal)
+      let settled = false; // resolve exactly once
+      const done = (text: string) => {
+        if (settled) return; // guard against timeout/exit/abort racing
+        settled = true;
+        clearTimeout(timer); // stop the watchdog
+        signal?.removeEventListener("abort", onAbort); // unhook
+        resolve(text); // hand the result back
+      };
+      // Hard timeout: SIGKILL the whole process group, never hang the agent.
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        done(fail(`Command timed out after ${BASH_TIMEOUT_MS / 1000}s and was killed.${stdout ? `\npartial stdout:\n${stdout.slice(0, 2000)}` : ""}`));
+      }, BASH_TIMEOUT_MS);
+      // Ctrl+C while a command runs: kill the child immediately.
+      const onAbort = () => {
+        child.kill("SIGKILL");
+        done(fail("Command was interrupted by the user."));
+      };
+      signal?.addEventListener("abort", onAbort);
+      child.stdout.on("data", (d) => (stdout += d)); // accumulate
+      child.stderr.on("data", (d) => (stderr += d));
+      child.on("error", (err) => done(fail(`Could not start command: ${err.message}`))); // e.g. command not found at the spawn level
+      child.on("close", (code) => {
+        if (code === 0) {
+          done(spillIfHuge(stdout, "output") || "(command succeeded, no output)"); // success
+        } else {
+          // Non-zero exit: combine streams so the model sees the actual error.
+          const combined = [stdout && `stdout:\n${stdout}`, stderr && `stderr:\n${stderr}`].filter(Boolean).join("\n");
+          done(fail(`Command exited with code ${code}.\n${spillIfHuge(combined, "error output")}`));
+        }
+      });
+    }),
 };
 
 // ============ Registry & dispatch ============
@@ -231,9 +281,17 @@ export const tools: Record<string, Tool> = {
 // The list of manuals sent to the model on every API call.
 export const toolDefinitions = Object.values(tools).map((t) => t.definition);
 
+// Read-only tools never touch the filesystem in a conflicting way, so the loop
+// is free to run a batch of them concurrently. Anything that writes or executes
+// runs alone, in order. (See loop.ts for the batching.)
+const READ_ONLY_TOOLS = new Set(["read_file", "search"]);
+export const isReadOnlyTool = (name: string): boolean => READ_ONLY_TOOLS.has(name);
+
 // Single entry point: every failure becomes text fed back to the model.
-// It never throws — the main loop must never die because of a tool.
-export function dispatch(name: string, argsJson: string): string {
+// It never throws — the main loop must never die because of a tool. Async since
+// Day 13 so run_bash can spawn without blocking; the signal lets Ctrl+C kill a
+// running command.
+export async function dispatch(name: string, argsJson: string, signal?: AbortSignal): Promise<string> {
   const tool = tools[name]; // look the tool up by name
   if (!tool) return fail(`Unknown tool: ${name}. Available tools: ${Object.keys(tools).join(", ")}`); // model hallucinated a tool → list the real ones
   let args: Record<string, string>; // the parsed arguments
@@ -242,8 +300,14 @@ export function dispatch(name: string, argsJson: string): string {
   } catch {
     return fail(`Arguments are not valid JSON: ${argsJson.slice(0, 200)}`); // malformed JSON → show what we got
   }
+  // Each tool gets a result cap sized to its job. run_bash already manages its
+  // own output (preview + spill-to-disk via spillIfHuge); its cap must leave
+  // room for the spill note, or dispatch would chop off the very pointer the
+  // model needs to read the rest.
+  const cap = name === "read_file" ? READ_LIMIT + 100 : name === "run_bash" ? BASH_OUTPUT_LIMIT + SPILL_NOTE_SLACK : TOOL_RESULT_LIMIT;
   try {
-    return tool.run(args).slice(0, name === "read_file" ? READ_LIMIT + 100 : TOOL_RESULT_LIMIT); // run it, cap the result size
+    const result = await tool.run(args, signal); // await covers both sync and async tools
+    return result.slice(0, cap); // cap the result size
   } catch (err) {
     return fail(`Tool crashed: ${(err as Error).message}`); // even a crashing tool becomes a readable result
   }
