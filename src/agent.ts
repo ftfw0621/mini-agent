@@ -8,6 +8,8 @@ import { runLoop, TerminateReason, MAX_ROUNDS, MAX_RETRIES, type LoopResult } fr
 import { buildSystemMessage } from "./prompt.js"; // the constitution + optional AGENT.md project memory
 import { forgetFilesExcept } from "./tools.js"; // to reset file state on /clear
 import { compactHistory, estimateHistoryTokens, COMPACT_AT } from "./context.js"; // for the manual /compact command
+import { newSessionId, saveSession, latestSession } from "./session.js"; // conversation persistence (project-local)
+import { initTelemetry, emit, statsReport } from "./telemetry.js"; // local-only event log + /stats
 
 // package.json sits one level above both src/ (dev) and dist/ (built) — same path either way.
 const pkg = createRequire(import.meta.url)("../package.json") as { version: string };
@@ -19,6 +21,7 @@ const USAGE = `mini-agent ${pkg.version} — a Claude Code-style CLI agent (any 
 
 Usage:
   mini-agent                 interactive session (REPL)
+  mini-agent -r | --resume   continue the most recent session in this directory
   mini-agent -p "<task>"     one-shot: run a single task, print the result, exit
   mini-agent -v | --version  print the version
   mini-agent -h | --help     this text
@@ -48,6 +51,7 @@ const SESSION_HELP = `commands:
   /clear     wipe the conversation (and the file read-state) — fresh start
   /compact   compact the history into a summary right now (happens automatically near the limit)
   /model     show which model and endpoint this session is talking to
+  /stats     event counts for this session (local telemetry — nothing leaves this machine)
   exit       leave (Ctrl+C at the prompt does the same)`;
 
 async function main() {
@@ -84,6 +88,24 @@ async function main() {
   const systemMessage = buildSystemMessage();
   let messages: OpenAI.ChatCompletionMessageParam[] = [{ role: "system", content: systemMessage }]; // the whole conversation lives here, across turns
 
+  // ---- Session persistence ---------------------------------------------------------
+  // Every conversation is snapshotted to .mini-agent/sessions/ after each turn;
+  // -r / --resume picks up the most recent one. The system message is NOT
+  // restored from disk — it is rebuilt fresh, because AGENT.md may have changed.
+  let sessionId = newSessionId(); // this session's identity (and file name)
+  if (argv.includes("-r") || argv.includes("--resume")) {
+    const prev = latestSession(); // newest snapshot in this directory, if any
+    if (prev) {
+      messages.push(...prev.messages); // the old conversation joins the fresh constitution
+      sessionId = prev.id; // keep appending to the same session file
+      console.log(chalk.dim(`(resumed session ${prev.id} — ${prev.messages.length} messages; files must be re-read before editing)`));
+    } else {
+      console.log(chalk.dim("(no previous session here — starting fresh)")); // resume with nothing to resume is not an error
+    }
+  }
+  initTelemetry(sessionId); // arm the local event log (no-op under MINI_AGENT_NO_TELEMETRY=1)
+  emit("agent_session_start", { mode: printTask !== null ? "print" : "repl" }); // how this session was started
+
   // Per-task interrupt state. `running` decides what Ctrl+C means right now.
   let running = false; // is a task currently executing?
   let interrupted = false; // has the current task been interrupted?
@@ -113,6 +135,8 @@ async function main() {
         return false; // fail closed
       },
     });
+    saveSession(sessionId, CONFIG.model, messages); // print-mode runs are resumable too
+    emit("agent_session_end"); // close the books
     if (result.reason !== TerminateReason.Done) {
       console.error(chalk.yellow(EXIT_NOTES[result.reason])); // human note on stderr
       if (result.detail) console.error(chalk.dim(result.detail.slice(0, 300))); // raw detail on stderr
@@ -201,7 +225,11 @@ async function main() {
       case "/clear":
         messages = [{ role: "system", content: systemMessage }]; // drop everything but the constitution
         forgetFilesExcept([]); // the file read-state belongs to the conversation — clear it too
+        sessionId = newSessionId(); // a fresh conversation is a fresh session file
         console.log(chalk.dim("(history cleared)")); // confirm the reset
+        return true;
+      case "/stats":
+        console.log(chalk.dim(statsReport())); // local counters, busiest first
         return true;
       case "/model":
         console.log(chalk.dim(`model: ${CONFIG.model}\nendpoint: ${CONFIG.baseURL}\ncontext window: ${CONFIG.contextWindow} tokens (compaction at ~${COMPACT_AT})`)); // where this session points
@@ -248,6 +276,7 @@ async function main() {
       confirm, // for permission prompts
     });
     running = false; // back at the prompt — Ctrl+C means "exit" again
+    saveSession(sessionId, CONFIG.model, messages); // snapshot after every turn — crash-safe by construction
 
     // Done already streamed its answer to the screen; everything else gets a
     // one-line human explanation. The session continues either way — except a
@@ -259,6 +288,7 @@ async function main() {
     }
   }
 
+  emit("agent_session_end"); // close the books
   rl.close(); // release stdin
   console.log(chalk.dim("bye.")); // a clean goodbye
 }

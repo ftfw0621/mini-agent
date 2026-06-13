@@ -58,6 +58,7 @@ MINI_AGENT_MODEL=gpt-4.1-mini
 | `day9` | 教程本身:11 章中文教程开源进 [docs/](docs/README.md) |
 | `day10` | Bring your own model:三个环境变量换任意 OpenAI 兼容端点,`npm run eval` 兼职模型横评 |
 | `day11` | 工业级 CLI 表面:settings.json 双层配置(用户权限规则,deny 永远赢)、slash 命令(/help /model /compact)、`-p` 单发模式、`--version`、测试套件进仓库(`npm test`,60 例) |
+| `day12` | 会话持久化(`--resume`,快照式 + 原子写)+ 本地遥测(事件 JSONL + `/stats`,绝不出本机,`MINI_AGENT_NO_TELEMETRY=1` 关闭) |
 
 ## 📖 配套教程(免费开源)
 

@@ -6,6 +6,7 @@ import { classifyError, ApiErrorKind } from "./errors.js"; // failure taxonomy
 import { checkPermission } from "./permissions.js"; // the allow/ask/deny gate
 import { estimateHistoryTokens, compactHistory, COMPACT_AT, MAX_COMPACTIONS_PER_QUERY, MAX_COMPACT_FAILURES } from "./context.js"; // context management
 import { SUB_AGENT_PROMPT } from "./prompt.js"; // the sub-agent's own constitution
+import { emit } from "./telemetry.js"; // local-only event log (no-op unless the CLI armed it)
 
 export const MAX_ROUNDS = 15; // model→tool round cap per query
 export const MAX_RETRIES = 10; // total failed API calls per query, across all rounds
@@ -72,6 +73,7 @@ On error: a failed sub-agent returns [sub-agent failed: reason] — retry with a
 // Run one sub-agent: a fresh conversation, same tools minus task, same
 // permission gate, and the parent's file read-state protected by a snapshot.
 async function runSubAgent(description: string, opts: LoopOptions): Promise<string> {
+  emit("agent_subagent_spawn"); // delegation is worth counting
   if (!opts.quiet) console.log(chalk.blue(`  ⎿ sub-agent started: ${description.slice(0, 100)}`)); // show the delegation
   const snapshot = snapshotFileState(); // what the sub-agent reads, the parent has NOT seen
   try {
@@ -134,14 +136,18 @@ async function streamModelCall(
   // - stall (slow but alive for 30s) → log it and keep waiting
   const watchdog = setInterval(() => {
     const quietMs = Date.now() - lastEvent; // ms since the last event
-    if (quietMs > IDLE_TIMEOUT_MS) idleAbort.abort(); // dead — cut it
-    else if (quietMs > STALL_WARN_MS && !stallWarned) {
+    if (quietMs > IDLE_TIMEOUT_MS) {
+      emit("agent_watchdog_idle"); // record the cut — these should be rare
+      idleAbort.abort(); // dead — cut it
+    } else if (quietMs > STALL_WARN_MS && !stallWarned) {
       stallWarned = true; // don't repeat the warning every second
+      emit("agent_watchdog_stall"); // record the slowness — pattern-spotting data
       console.log(chalk.dim(`  [watchdog] stream quiet for ${Math.round(quietMs / 1000)}s — still waiting (slow ≠ dead)`));
     }
   }, 1000);
 
   try {
+    emit("agent_api_call"); // one event per attempt — retries show up as extra calls
     const stream = await opts.client.chat.completions.create(
       // Sub-agents do NOT get the task tool: one level of delegation only.
       // Nested spawning means orphan processes and debugging hell.
@@ -212,9 +218,11 @@ async function tryCompact(
     await compactHistory(messages, opts.client, opts.model, opts.signal); // do the actual work
     compaction.count++; // one more successful compaction this query
     compaction.failures = 0; // success resets the failure streak
+    emit("agent_compaction_ok"); // worth counting — frequent compaction means tasks are too big
     return true;
   } catch {
     compaction.failures++; // failed — count it against the breaker
+    emit("agent_compaction_failed"); // a failure streak here trips the breaker
     return false;
   }
 }
@@ -267,6 +275,7 @@ export async function runLoop(
         }
         if (!e.retryable) return { reason: TerminateReason.FatalApiError, detail: `${e.kind}: ${e.message}` }; // bad key etc. — stop now
 
+        emit("agent_api_error", { kind: e.kind, attempt: attempts.total + 1 }); // classified, greppable
         attempts.total++; // every failure consumes the overall budget
         attempts.consecutive++; // ...and the breaker counter
         if (e.kind === ApiErrorKind.RateLimited) attempts.rateLimited++; // 429s also consume their own budget
@@ -317,12 +326,15 @@ export async function runLoop(
 
         // The permission gate sits between the model's intent and execution.
         const v = checkPermission(call.name, call.args);
+        emit("agent_tool_call", { tool: call.name }); // every attempt, allowed or not
         let content: string; // what goes back to the model as the tool result
         if (v.decision === "deny") {
+          emit("agent_tool_denied", { tool: call.name }); // hard blocks, per tool
           if (!opts.quiet) console.log(chalk.red(`  ⛔ denied: ${v.reason}`)); // tell the user we blocked it
           content = `[permission] Denied: ${v.reason}. This is a hard rule — do not try to work around it; pick a different approach or ask the user.`; // teach the model the boundary
         } else if (v.decision === "ask") {
           const ok = await opts.confirm(`${call.name} (${v.reason}):\n   ${v.summary}`); // pause and ask the human
+          if (!ok) emit("agent_tool_declined", { tool: call.name }); // the human said no — that is signal
           if (!ok && !opts.quiet) console.log(chalk.yellow("  ✋ declined")); // make the refusal visible
           content = ok
             ? await execute(call, opts) // approved — actually run it

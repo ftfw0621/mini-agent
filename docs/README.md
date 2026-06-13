@@ -26,6 +26,7 @@
 | 章 | 标题 | 对应 tag |
 |---|---|---|
 | [Ch11](ch11-settings-and-cli.md) | 配置即权限:settings、slash 命令与一个真正的 CLI 表面 | `day11` |
+| [Ch12](ch12-sessions-and-telemetry.md) | 记得住自己干过什么:会话持久化与本地遥测 | `day12` |
 
 ## 怎么学
 
