@@ -14,6 +14,7 @@ import { runHooks } from "./hooks.js"; // SessionStart lifecycle hook
 import { connectMcpServers } from "./mcp.js"; // external tool servers (MCP)
 import { Judge } from "./judge.js"; // optional LLM permission classifier
 import { rememberTool, readMemory, MEMORY_PATH } from "./memory.js"; // long-term project memory
+import { initCostMeter, DEFAULT_PRICING } from "./cost.js"; // token & cost accounting for /cost
 
 // package.json sits one level above both src/ (dev) and dist/ (built) — same path either way.
 const pkg = createRequire(import.meta.url)("../package.json") as { version: string };
@@ -57,6 +58,7 @@ const SESSION_HELP = `commands:
   /model     show which model and endpoint this session is talking to
   /stats     event counts for this session (local telemetry — nothing leaves this machine)
   /memory    show the durable facts the agent remembers about this project
+  /cost      tokens, cache hit rate and estimated spend this session (local)
   exit       leave (Ctrl+C at the prompt does the same)`;
 
 async function main() {
@@ -126,6 +128,14 @@ async function main() {
   registerExternalTool(rememberTool);
   const memCount = readMemory().length;
   if (memCount) console.log(chalk.dim(`(long-term memory: ${memCount} facts loaded)`));
+
+  // Token/cost meter for this session. Prices come from settings, falling back
+  // to the defaults; the loop records usage into it from every stream.
+  const costMeter = initCostMeter({
+    inputPerM: CONFIG.pricing.inputPerM ?? DEFAULT_PRICING.inputPerM,
+    cachedInputPerM: CONFIG.pricing.cachedInputPerM ?? DEFAULT_PRICING.cachedInputPerM,
+    outputPerM: CONFIG.pricing.outputPerM ?? DEFAULT_PRICING.outputPerM,
+  });
 
   // SessionStart hooks run once, here. Their stdout is injected as context the
   // model sees on its first turn — e.g. inject the current git branch, an
@@ -265,6 +275,9 @@ async function main() {
         console.log(chalk.dim(facts.length ? `long-term memory (${MEMORY_PATH}):\n${facts.map((f) => `  - ${f}`).join("\n")}` : "(no long-term memory yet — the agent saves facts with the remember tool)"));
         return true;
       }
+      case "/cost":
+        console.log(chalk.dim(costMeter.report())); // tokens, cache hit rate, estimated spend (local)
+        return true;
       case "/model":
         console.log(chalk.dim(`model: ${CONFIG.model}\nendpoint: ${CONFIG.baseURL}\ncontext window: ${CONFIG.contextWindow} tokens (compaction at ~${COMPACT_AT})`)); // where this session points
         return true;

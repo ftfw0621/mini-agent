@@ -59,6 +59,11 @@ interface SettingsFile {
     enabled?: boolean; // run an LLM classifier on "ask" verdicts to auto-allow the clearly safe
     model?: string; // judge model (defaults to the main model); a cheaper one is ideal
   };
+  pricing?: {
+    inputPerM?: number; // $ per 1M uncached input tokens
+    cachedInputPerM?: number; // $ per 1M cached input tokens
+    outputPerM?: number; // $ per 1M output tokens
+  };
 }
 
 // Read one settings file. A broken settings file is a HARD error, not a warning:
@@ -122,6 +127,13 @@ export const CONFIG = {
   judge: {
     enabled: projectSettings.judge?.enabled ?? globalSettings.judge?.enabled ?? false,
     model: projectSettings.judge?.model || globalSettings.judge?.model || undefined, // undefined → use the main model
+  },
+  // Token prices for the /cost estimate (defaults applied in cost.ts). Project
+  // overrides global; either may set just the fields it cares about.
+  pricing: { ...(globalSettings.pricing ?? {}), ...(projectSettings.pricing ?? {}) } as {
+    inputPerM?: number;
+    cachedInputPerM?: number;
+    outputPerM?: number;
   },
 };
 

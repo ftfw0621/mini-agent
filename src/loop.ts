@@ -9,6 +9,7 @@ import { SUB_AGENT_PROMPT } from "./prompt.js"; // the sub-agent's own constitut
 import { emit } from "./telemetry.js"; // local-only event log (no-op unless the CLI armed it)
 import { runHooks } from "./hooks.js"; // user lifecycle hooks (PreToolUse / PostToolUse / Stop)
 import type { Judge } from "./judge.js"; // optional LLM permission classifier
+import { recordUsage } from "./cost.js"; // meter token usage from the stream
 
 export const MAX_ROUNDS = 15; // model→tool round cap per query
 export const MAX_RETRIES = 10; // total failed API calls per query, across all rounds
@@ -154,7 +155,9 @@ async function streamModelCall(
     const stream = await opts.client.chat.completions.create(
       // Sub-agents do NOT get the task tool: one level of delegation only.
       // Nested spawning means orphan processes and debugging hell.
-      { model: opts.model, messages, tools: opts.subAgent ? toolDefinitions() : [...toolDefinitions(), taskTool], stream: true },
+      // include_usage adds a final chunk carrying token counts — that is how we
+      // meter cost without a second (counting) request.
+      { model: opts.model, messages, tools: opts.subAgent ? toolDefinitions() : [...toolDefinitions(), taskTool], stream: true, stream_options: { include_usage: true } },
       { signal }, // abortable by user AND watchdog
     );
     let content = ""; // accumulated answer text
@@ -163,6 +166,7 @@ async function streamModelCall(
     for await (const chunk of stream) {
       lastEvent = Date.now(); // feed the watchdog
       stallWarned = false; // the stream spoke — reset the stall warning
+      if (chunk.usage) recordUsage(chunk.usage as unknown as Record<string, unknown>); // the final usage chunk — meter it
       const delta = chunk.choices[0]?.delta; // this chunk's increment
       if (!delta) continue; // keep-alive or usage chunk — nothing to do
       if (delta.content) {

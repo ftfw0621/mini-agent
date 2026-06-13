@@ -64,6 +64,7 @@ MINI_AGENT_MODEL=gpt-4.1-mini
 | `day15` | MCP 接入:stdio JSON-RPC 客户端(握手/行缓冲/id 配对),外部 server 工具注册成内置同款(同一 dispatch + 权限闸门,默认 ask);`npm test` 84 例 |
 | `day16` | 可选 LLM 权限裁判:只看规则判 ask 的灰色地带、只能 ask→allow、prompt 铁死格式、解析 fail closed、自带熔断、默认关闭;`npm test` 98 例 |
 | `day17` | 长期记忆:跨会话的 MEMORY.md(人类可读)+ remember 工具,作为「背景」注入(区别于 AGENT.md 的「命令」),有界 30 条/8KB 且自修复;`npm test` 114 例 |
+| `day18` | 成本核算:从流里捕获 usage(include_usage)、抹平 DeepSeek/OpenAI 格式差异、纯函数算成本与缓存命中率、`/cost` 看花销(命中率即缓存击穿预警);`npm test` 130 例 |
 
 ## 📖 配套教程(免费开源)
 
