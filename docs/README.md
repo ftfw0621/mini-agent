@@ -1,6 +1,6 @@
 # 教程:跟着 AI,从零搓一个自己的 Claude Code
 
-> 18 天,一天一章(主线 10 天 + 进阶 8 天),约 2600 行 TypeScript,用 DeepSeek API 从零写出一个工业级的命令行 Agent。
+> 19 天,一天一章(主线 10 天 + 进阶 9 天),约 2700 行 TypeScript,用 DeepSeek API 从零写出一个工业级的命令行 Agent。
 > 全部教程免费开源。代码与教程一一对应:每章对应一个 git tag,`git checkout dayN` 就是第 N 天对应的完整代码。
 
 ## 目录
