@@ -65,6 +65,7 @@ MINI_AGENT_MODEL=gpt-4.1-mini
 | `day16` | 可选 LLM 权限裁判:只看规则判 ask 的灰色地带、只能 ask→allow、prompt 铁死格式、解析 fail closed、自带熔断、默认关闭;`npm test` 98 例 |
 | `day17` | 长期记忆:跨会话的 MEMORY.md(人类可读)+ remember 工具,作为「背景」注入(区别于 AGENT.md 的「命令」),有界 30 条/8KB 且自修复;`npm test` 114 例 |
 | `day18` | 成本核算:从流里捕获 usage(include_usage)、抹平 DeepSeek/OpenAI 格式差异、纯函数算成本与缓存命中率、`/cost` 看花销(命中率即缓存击穿预警);`npm test` 130 例 |
+| `day19` | 工具调用校验:够用就好的 schema 校验(必填/类型/形状)、钉在 dispatch 唯一入口、批量返回精确修复指引、自动覆盖内置+MCP 工具(送出前拦下坏参数);`npm test` 146 例 |
 
 ## 📖 配套教程(免费开源)
 

@@ -33,6 +33,7 @@
 | [Ch16](ch16-llm-judge.md) | 让 AI 看门:LLM 权限裁判(减摩擦,不减安全) | `day16` |
 | [Ch17](ch17-long-term-memory.md) | 记住跨会话的事:长期记忆 | `day17` |
 | [Ch18](ch18-cost-accounting.md) | 账单看得见:token 与缓存成本核算 | `day18` |
+| [Ch19](ch19-tool-validation.md) | 把概率输出钉进结构:工具调用校验与修复 | `day19` |
 
 ## 怎么学
 

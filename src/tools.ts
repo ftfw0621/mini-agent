@@ -3,6 +3,7 @@ import os from "node:os"; // temp dir for spilled tool output
 import path from "node:path"; // path resolution and joining
 import { spawn } from "node:child_process"; // async process execution (does NOT block the event loop)
 import type OpenAI from "openai"; // types only — no client is created here
+import { validateArgs, type ParamSchema } from "./validate.js"; // schema validation for tool arguments
 
 // ============ Session state ============
 // The foundation of "read before edit": which files has this session actually read?
@@ -314,6 +315,14 @@ export async function dispatch(name: string, argsJson: string, signal?: AbortSig
     args = JSON.parse(argsJson); // arguments arrive as a raw JSON string
   } catch {
     return fail(`Arguments are not valid JSON: ${argsJson.slice(0, 200)}`); // malformed JSON → show what we got
+  }
+  // Validate against the tool's declared schema BEFORE running it. The model's
+  // arguments are probabilistic — a missing required field or a wrong type gets
+  // a precise repair message here instead of a cryptic crash inside the tool
+  // (or, for MCP tools, a wasted round-trip to the server).
+  const problems = validateArgs(tool.definition.function.parameters as ParamSchema | undefined, args);
+  if (problems.length) {
+    return fail(`Invalid arguments for ${name}: ${problems.join("; ")}. Fix and call again.`);
   }
   // Each tool gets a result cap sized to its job. run_bash already manages its
   // own output (preview + spill-to-disk via spillIfHuge); its cap must leave
