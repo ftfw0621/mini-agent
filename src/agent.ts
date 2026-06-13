@@ -10,6 +10,7 @@ import { forgetFilesExcept } from "./tools.js"; // to reset file state on /clear
 import { compactHistory, estimateHistoryTokens, COMPACT_AT } from "./context.js"; // for the manual /compact command
 import { newSessionId, saveSession, latestSession } from "./session.js"; // conversation persistence (project-local)
 import { initTelemetry, emit, statsReport } from "./telemetry.js"; // local-only event log + /stats
+import { runHooks } from "./hooks.js"; // SessionStart lifecycle hook
 
 // package.json sits one level above both src/ (dev) and dist/ (built) — same path either way.
 const pkg = createRequire(import.meta.url)("../package.json") as { version: string };
@@ -105,6 +106,13 @@ async function main() {
   }
   initTelemetry(sessionId); // arm the local event log (no-op under MINI_AGENT_NO_TELEMETRY=1)
   emit("agent_session_start", { mode: printTask !== null ? "print" : "repl" }); // how this session was started
+
+  // SessionStart hooks run once, here. Their stdout is injected as context the
+  // model sees on its first turn — e.g. inject the current git branch, an
+  // on-call rota, today's deploy freeze status. (exit 2 here is ignored: there
+  // is no tool to block, only context to add.)
+  const sessionStart = await runHooks("SessionStart", {});
+  if (sessionStart.stdout) messages.push({ role: "user", content: `[SessionStart hook]\n${sessionStart.stdout}` });
 
   // Per-task interrupt state. `running` decides what Ctrl+C means right now.
   let running = false; // is a task currently executing?

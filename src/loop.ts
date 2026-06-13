@@ -7,6 +7,7 @@ import { checkPermission } from "./permissions.js"; // the allow/ask/deny gate
 import { estimateHistoryTokens, compactHistory, COMPACT_AT, MAX_COMPACTIONS_PER_QUERY, MAX_COMPACT_FAILURES } from "./context.js"; // context management
 import { SUB_AGENT_PROMPT } from "./prompt.js"; // the sub-agent's own constitution
 import { emit } from "./telemetry.js"; // local-only event log (no-op unless the CLI armed it)
+import { runHooks } from "./hooks.js"; // user lifecycle hooks (PreToolUse / PostToolUse / Stop)
 
 export const MAX_ROUNDS = 15; // model→tool round cap per query
 export const MAX_RETRIES = 10; // total failed API calls per query, across all rounds
@@ -212,12 +213,40 @@ async function runOneCall(call: AssembledCall, opts: LoopOptions): Promise<{ id:
     if (!ok) emit("agent_tool_declined", { tool: call.name }); // the human said no — that is signal
     if (!ok && !opts.quiet) console.log(chalk.yellow("  ✋ declined")); // make the refusal visible
     content = ok
-      ? await execute(call, opts) // approved — actually run it
+      ? await runWithHooks(call, opts) // approved — run it (PreToolUse can still block)
       : `[permission] The user declined this action. Ask them how to proceed, or choose a safer alternative.`; // declined — tell the model
   } else {
-    content = await execute(call, opts); // allow — run without ceremony
+    content = await runWithHooks(call, opts); // allow — run it (PreToolUse can still block)
   }
   return { id: call.id, content }; // paired by id for the API
+}
+
+// Run an approved tool call, surrounded by the user's lifecycle hooks.
+// PreToolUse can block (exit 2) — its stderr is fed back to the model as the
+// reason, exactly like a permission denial, so the model adapts instead of
+// retrying. PostToolUse is observational; if it blocks, its message is appended
+// to the tool result as extra context (e.g. "lint failed on the file you just
+// wrote"). Sub-agents skip hooks: hooks are about the human's project policy,
+// not internal delegation.
+async function runWithHooks(call: AssembledCall, opts: LoopOptions): Promise<string> {
+  if (opts.subAgent) return execute(call, opts); // sub-agents run hook-free
+
+  const pre = await runHooks("PreToolUse", { tool: call.name, args: call.args }); // before
+  if (pre.block) {
+    emit("agent_hook_block", { event: "PreToolUse", tool: call.name }); // a hook said no
+    if (!opts.quiet) console.log(chalk.red(`  ⛔ blocked by PreToolUse hook`)); // make it visible
+    return `[hook] A PreToolUse hook blocked this call: ${pre.feedback}. Treat this as a hard boundary — adjust your approach.`;
+  }
+
+  const result = await execute(call, opts); // the actual work
+
+  const post = await runHooks("PostToolUse", { tool: call.name, args: call.args, result }); // after
+  if (post.block) {
+    // PostToolUse cannot undo the action, but it can tell the model something
+    // is wrong with the result — surface that as appended context.
+    return `${result}\n\n[hook] PostToolUse: ${post.feedback}`;
+  }
+  return result;
 }
 
 // Execute one approved tool call. The task tool is special — it is not in the
@@ -345,6 +374,20 @@ export async function runLoop(
       });
 
       if (!out.toolCalls.length) {
+        // The model wants to stop. A Stop hook gets the last word: if it exits
+        // 2, the agent is NOT done — its stderr becomes a new instruction and
+        // the loop continues. This is how you build test-driven AI: a Stop hook
+        // runs the tests, blocks while they fail, and the agent keeps fixing.
+        // Sub-agents are exempt — Stop hooks are the human's project policy.
+        if (!opts.subAgent) {
+          const stop = await runHooks("Stop", { finalText: out.content }); // give hooks the last word
+          if (stop.block) {
+            emit("agent_hook_block", { event: "Stop" }); // the agent was sent back to work
+            if (!opts.quiet) console.log(chalk.yellow(`\n↩ Stop hook: not done yet — ${stop.feedback.slice(0, 120)}`)); // show why
+            messages.push({ role: "user", content: `[Stop hook] You are not finished: ${stop.feedback}` }); // inject the instruction
+            break; // exit the inner while → advance the round counter (so a stubborn Stop hook is still bounded by MAX_ROUNDS)
+          }
+        }
         return { reason: TerminateReason.Done, finalText: out.content }; // no tool calls = final answer (already streamed to the screen)
       }
 

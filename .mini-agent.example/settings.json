@@ -1,0 +1,21 @@
+{
+  "_comment": "Copy this to .mini-agent/settings.json (project) or ~/.config/mini-agent/settings.json (global). Every field is optional. API keys never go here — keep them in the environment.",
+
+  "model": "deepseek-chat",
+  "baseURL": "https://api.deepseek.com",
+  "contextWindow": 1048565,
+
+  "permissions": {
+    "_comment": "allow widens what runs without asking; deny is a hard block. A deny from EITHER the global or project file always wins, and an allow can never override any deny.",
+    "allow": ["cargo", "pytest", "tool:edit_file"],
+    "deny": ["git push", "tool:run_bash"]
+  },
+
+  "hooks": {
+    "_comment": "Each hook is a shell command. It gets the event as JSON on stdin. exit 0 = allow, exit 2 = block (stderr is fed back to the model). 'match' filters PreToolUse/PostToolUse to one tool name.",
+    "SessionStart": [{ "command": "echo \"current git branch: $(git branch --show-current 2>/dev/null)\"" }],
+    "PreToolUse": [{ "match": "run_bash", "command": ".mini-agent/guard-bash.sh" }],
+    "PostToolUse": [{ "match": "edit_file", "command": "echo 'remember to run the linter' 1>&2; exit 0" }],
+    "Stop": [{ "command": "npm test >/dev/null 2>&1 || (echo 'tests are failing — keep fixing' 1>&2; exit 2)" }]
+  }
+}
