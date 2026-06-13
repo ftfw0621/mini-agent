@@ -6,13 +6,14 @@ import { createRequire } from "node:module"; // to read package.json for --versi
 import { CONFIG, requireApiKey, PROJECT_SETTINGS_PATH, GLOBAL_SETTINGS_PATH } from "./config.js"; // provider-agnostic settings (.env loaded there)
 import { runLoop, TerminateReason, MAX_ROUNDS, MAX_RETRIES, type LoopResult } from "./loop.js"; // the state machine
 import { buildSystemMessage } from "./prompt.js"; // the constitution + optional AGENT.md project memory
-import { forgetFilesExcept } from "./tools.js"; // to reset file state on /clear
+import { forgetFilesExcept, registerExternalTool } from "./tools.js"; // file-state reset + tool registration
 import { compactHistory, estimateHistoryTokens, COMPACT_AT } from "./context.js"; // for the manual /compact command
 import { newSessionId, saveSession, latestSession } from "./session.js"; // conversation persistence (project-local)
 import { initTelemetry, emit, statsReport } from "./telemetry.js"; // local-only event log + /stats
 import { runHooks } from "./hooks.js"; // SessionStart lifecycle hook
 import { connectMcpServers } from "./mcp.js"; // external tool servers (MCP)
 import { Judge } from "./judge.js"; // optional LLM permission classifier
+import { rememberTool, readMemory, MEMORY_PATH } from "./memory.js"; // long-term project memory
 
 // package.json sits one level above both src/ (dev) and dist/ (built) — same path either way.
 const pkg = createRequire(import.meta.url)("../package.json") as { version: string };
@@ -55,6 +56,7 @@ const SESSION_HELP = `commands:
   /compact   compact the history into a summary right now (happens automatically near the limit)
   /model     show which model and endpoint this session is talking to
   /stats     event counts for this session (local telemetry — nothing leaves this machine)
+  /memory    show the durable facts the agent remembers about this project
   exit       leave (Ctrl+C at the prompt does the same)`;
 
 async function main() {
@@ -118,6 +120,12 @@ async function main() {
   // The optional LLM permission judge, built once if a settings file enabled it.
   const judge = CONFIG.judge.enabled ? new Judge(client, CONFIG.judge.model || CONFIG.model) : undefined;
   if (judge) console.log(chalk.dim(`(permission judge on — model ${CONFIG.judge.model || CONFIG.model})`));
+
+  // The remember tool: let the model save durable facts to long-term memory.
+  // Registered like any tool, so it flows through the same permission gate.
+  registerExternalTool(rememberTool);
+  const memCount = readMemory().length;
+  if (memCount) console.log(chalk.dim(`(long-term memory: ${memCount} facts loaded)`));
 
   // SessionStart hooks run once, here. Their stdout is injected as context the
   // model sees on its first turn — e.g. inject the current git branch, an
@@ -252,6 +260,11 @@ async function main() {
       case "/stats":
         console.log(chalk.dim(statsReport())); // local counters, busiest first
         return true;
+      case "/memory": {
+        const facts = readMemory(); // the durable facts the agent carries across sessions
+        console.log(chalk.dim(facts.length ? `long-term memory (${MEMORY_PATH}):\n${facts.map((f) => `  - ${f}`).join("\n")}` : "(no long-term memory yet — the agent saves facts with the remember tool)"));
+        return true;
+      }
       case "/model":
         console.log(chalk.dim(`model: ${CONFIG.model}\nendpoint: ${CONFIG.baseURL}\ncontext window: ${CONFIG.contextWindow} tokens (compaction at ~${COMPACT_AT})`)); // where this session points
         return true;

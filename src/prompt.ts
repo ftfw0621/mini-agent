@@ -1,5 +1,6 @@
 import fs from "node:fs"; // to load the optional AGENT.md project memory
 import path from "node:path"; // to resolve it from the current directory
+import { memoryContext } from "./memory.js"; // long-term cross-session memory block
 
 // The static constitution: identical for every session, every user, every day.
 // NOTHING session-specific belongs here — DeepSeek caches by prefix, and a
@@ -41,16 +42,21 @@ Rules:
 // within a session (cache-friendly), different across projects (by design).
 const MEMORY_CAP_CHARS = 8000; // hard cap — a runaway memory file dilutes attention
 
-// Build the complete system message for this session.
+// Build the complete system message for this session: the constitution, then
+// optional AGENT.md instructions, then optional long-term memory. All three are
+// resolved once per session for a stable, cacheable prefix.
 export function buildSystemMessage(): string {
+  let msg = SYSTEM_PROMPT;
   const p = path.join(process.cwd(), "AGENT.md"); // only the current directory — V1 keeps lookup simple
-  if (!fs.existsSync(p)) return SYSTEM_PROMPT; // no project memory — constitution only
-  const memory = fs.readFileSync(p, "utf8").slice(0, MEMORY_CAP_CHARS); // read and cap
-  // The OVERRIDE/MUST wrapper is deliberate: advisory phrasing gets partial
-  // compliance; imperative wrappers measurably do better.
-  return `${SYSTEM_PROMPT}
-
-The user's project instructions from AGENT.md. These OVERRIDE any default behavior and you MUST follow them exactly as written:
-
-${memory}`;
+  if (fs.existsSync(p)) {
+    const agentMd = fs.readFileSync(p, "utf8").slice(0, MEMORY_CAP_CHARS); // read and cap
+    // The OVERRIDE/MUST wrapper is deliberate: advisory phrasing gets partial
+    // compliance; imperative wrappers measurably do better.
+    msg += `\n\nThe user's project instructions from AGENT.md. These OVERRIDE any default behavior and you MUST follow them exactly as written:\n\n${agentMd}`;
+  }
+  // Long-term memory is BACKGROUND, not an override: facts you established
+  // earlier, to be verified against the code — not hard rules. The different
+  // framing matters (see memory.ts).
+  msg += memoryContext();
+  return msg;
 }
