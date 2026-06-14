@@ -5,6 +5,7 @@ import { spawn } from "node:child_process"; // async process execution (does NOT
 import type OpenAI from "openai"; // types only — no client is created here
 import { validateArgs, type ParamSchema } from "./validate.js"; // schema validation for tool arguments
 import { setPlanMode } from "./permissions.js"; // plan mode (Day 20): exit_plan_mode flips it off on approval
+import { recordMutation } from "./undo.js"; // capture the before-state so /undo (Day 22) can restore it
 
 // ============ Session state ============
 // The foundation of "read before edit": which files has this session actually read?
@@ -97,6 +98,7 @@ On error: follow the error message — read the file first, then retry.`,
       return fail(`${p} already exists but you have not read it. Use read_file to check its current content before overwriting.`); // no blind overwrites
     }
     fs.mkdirSync(path.dirname(p), { recursive: true }); // create parent directories as needed
+    recordMutation(p); // snapshot the previous state (or "didn't exist") for /undo, before we overwrite
     fs.writeFileSync(p, args.content, "utf8"); // write the new content
     readFiles.set(p, ++touchCounter); // you wrote it, so you know its content — counts as read
     return `Wrote ${p} (${args.content.length} chars)`; // confirm with the size as a sanity check
@@ -136,6 +138,7 @@ ALWAYS use this tool to edit files. NEVER use sed/awk or shell redirection via r
     }
     // Note: content.replace(old, newStr) would expand $& $' etc. in newStr as special
     // replacement patterns — pass a function so the replacement is taken literally.
+    recordMutation(p); // snapshot the pre-edit content for /undo, before we change it
     fs.writeFileSync(p, content.replace(args.old_string, () => args.new_string), "utf8"); // apply the single replacement
     return `Edited ${p}: 1 replacement made.`; // confirm exactly what happened
   },

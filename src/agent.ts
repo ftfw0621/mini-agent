@@ -14,6 +14,8 @@ import { runHooks } from "./hooks.js"; // SessionStart lifecycle hook
 import { connectMcpServers } from "./mcp.js"; // external tool servers (MCP)
 import { Judge } from "./judge.js"; // optional LLM permission classifier
 import { isPlanMode, setPlanMode } from "./permissions.js"; // plan mode: research-only until the user approves a plan
+import { undoLast, clearUndo } from "./undo.js"; // /undo: take back the last file write
+import { renderDiff } from "./diff.js"; // show what /undo put back, reusing the Day 21 diff renderer
 import { rememberTool, readMemory, MEMORY_PATH } from "./memory.js"; // long-term project memory
 import { initCostMeter, DEFAULT_PRICING } from "./cost.js"; // token & cost accounting for /cost
 
@@ -61,6 +63,7 @@ const SESSION_HELP = `commands:
   /memory    show the durable facts the agent remembers about this project
   /cost      tokens, cache hit rate and estimated spend this session (local)
   /plan      toggle plan mode — research-only; the agent presents a plan you approve before any change
+  /undo      revert the most recent file write (write_file / edit_file) this session
   exit       leave (Ctrl+C at the prompt does the same)`;
 
 // Injected when the user turns plan mode on, so the model knows the rules of the
@@ -270,6 +273,7 @@ async function main() {
       case "/clear":
         messages = [{ role: "system", content: systemMessage }]; // drop everything but the constitution
         forgetFilesExcept([]); // the file read-state belongs to the conversation — clear it too
+        clearUndo(); // a fresh conversation should not undo the previous one's writes
         sessionId = newSessionId(); // a fresh conversation is a fresh session file
         console.log(chalk.dim("(history cleared)")); // confirm the reset
         return true;
@@ -284,6 +288,22 @@ async function main() {
       case "/cost":
         console.log(chalk.dim(costMeter.report())); // tokens, cache hit rate, estimated spend (local)
         return true;
+      case "/undo": {
+        // Revert the most recent write. This is a USER action on the filesystem,
+        // not a turn for the model — the conversation is untouched. If the model
+        // later edits a file it thinks it changed, edit_file's read-before-edit +
+        // exact-match guards will catch the staleness and ask it to re-read.
+        const undone = undoLast();
+        if (!undone) {
+          console.log(chalk.dim("(nothing to undo — no file writes recorded this session)"));
+          return true;
+        }
+        console.log(chalk.dim(`↩ ${undone.summary}`));
+        // Show the diff of what was put back (from the current state to the
+        // restored one), reusing the Day 21 renderer.
+        console.log(renderDiff(undone.after ?? "", undone.before ?? ""));
+        return true;
+      }
       case "/plan":
         // A toggle. Turning it on injects the rules of the mode as a user turn so
         // the model adopts them; the gate (permissions.ts) enforces them either way.
