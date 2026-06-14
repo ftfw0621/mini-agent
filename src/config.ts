@@ -34,9 +34,12 @@ export interface HookDef {
 // One MCP server: a process we spawn and speak JSON-RPC to over stdio. Its tools
 // are discovered at startup and exposed to the model as mcp__<server>__<tool>.
 export interface McpServerDef {
-  command: string; // executable, e.g. "npx"
-  args?: string[]; // arguments, e.g. ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
-  env?: Record<string, string>; // extra environment variables for the server
+  // A server is reached EITHER by spawning a subprocess (stdio) OR over HTTP.
+  command?: string; // stdio: executable, e.g. "npx"
+  args?: string[]; // stdio: arguments, e.g. ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+  env?: Record<string, string>; // stdio: extra environment variables for the server
+  url?: string; // http: the server endpoint, e.g. "https://example.com/mcp" — when set, HTTP transport is used
+  headers?: Record<string, string>; // http: extra request headers (e.g. an Authorization bearer token)
 }
 
 // What a settings file may contain. Unknown keys are ignored.
