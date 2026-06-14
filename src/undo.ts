@@ -18,6 +18,13 @@ export interface Mutation {
 const MAX_UNDO = 50; // remember at most this many writes — older ones drop off
 const stack: Mutation[] = []; // most recent change on top
 
+// The session-origin baseline: for each file touched this session, what it
+// looked like the FIRST time we changed it (null = it didn't exist yet). The
+// undo stack is bounded and popped, so it can't answer "what changed since we
+// started" — this map can. Set once per path, never overwritten, so it always
+// holds the true starting point even after many edits to the same file.
+const origin = new Map<string, string | null>();
+
 // Called BY the write/edit tools, just before they touch the disk. Captures the
 // current on-disk state so it can be restored later. Never throws — recording is
 // best-effort and must not break the write it is shadowing.
@@ -28,6 +35,7 @@ export function recordMutation(absPath: string): void {
   } catch {
     before = null; // unreadable → treat as "nothing to restore"
   }
+  if (!origin.has(absPath)) origin.set(absPath, before); // first touch this session = the baseline /diff compares against
   stack.push({ path: absPath, before });
   if (stack.length > MAX_UNDO) stack.shift(); // bound the history (drop the oldest)
 }
@@ -38,9 +46,37 @@ export function undoDepth(): number {
 }
 
 // Forget all recorded mutations (e.g. on /clear — a fresh conversation should
-// not be able to undo writes from the previous one).
+// not be able to undo writes from the previous one, nor report them in /diff).
 export function clearUndo(): void {
   stack.length = 0;
+  origin.clear();
+}
+
+// One file that changed since the session began, for /diff.
+export interface SessionChange {
+  path: string; // absolute path
+  status: "created" | "modified" | "deleted"; // relative to the session-origin baseline
+  baseline: string; // content at the start of the session ("" if it didn't exist)
+  current: string; // content now ("" if it has been deleted)
+}
+
+// Every file whose content differs from its session-origin baseline. Files that
+// were touched but ended up back at their starting content are NOT listed —
+// /diff shows the net effect of the session, not its history.
+export function sessionChanges(): SessionChange[] {
+  const changes: SessionChange[] = [];
+  for (const [p, base] of origin) {
+    let current: string | null = null;
+    try {
+      if (fs.existsSync(p)) current = fs.readFileSync(p, "utf8"); // where the file stands now
+    } catch {
+      current = null;
+    }
+    if ((base ?? null) === (current ?? null)) continue; // net-zero change → skip (e.g. edited then undone)
+    const status = base === null ? "created" : current === null ? "deleted" : "modified";
+    changes.push({ path: p, status, baseline: base ?? "", current: current ?? "" });
+  }
+  return changes;
 }
 
 // The result of an undo, for the REPL to render (it shows a diff of what was

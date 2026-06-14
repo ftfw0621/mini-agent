@@ -14,8 +14,9 @@ import { runHooks } from "./hooks.js"; // SessionStart lifecycle hook
 import { connectMcpServers } from "./mcp.js"; // external tool servers (MCP)
 import { Judge } from "./judge.js"; // optional LLM permission classifier
 import { isPlanMode, setPlanMode } from "./permissions.js"; // plan mode: research-only until the user approves a plan
-import { undoLast, clearUndo } from "./undo.js"; // /undo: take back the last file write
-import { renderDiff } from "./diff.js"; // show what /undo put back, reusing the Day 21 diff renderer
+import { undoLast, clearUndo, sessionChanges } from "./undo.js"; // /undo + /diff: take back, or review, this session's writes
+import { renderDiff } from "./diff.js"; // show what /undo put back / what /diff changed, reusing the Day 21 diff renderer
+import path from "node:path"; // shorten paths for the /diff summary
 import { rememberTool, readMemory, MEMORY_PATH } from "./memory.js"; // long-term project memory
 import { initCostMeter, DEFAULT_PRICING } from "./cost.js"; // token & cost accounting for /cost
 
@@ -64,6 +65,7 @@ const SESSION_HELP = `commands:
   /cost      tokens, cache hit rate and estimated spend this session (local)
   /plan      toggle plan mode — research-only; the agent presents a plan you approve before any change
   /undo      revert the most recent file write (write_file / edit_file) this session
+  /diff      show every file changed this session, as a diff from where it started
   exit       leave (Ctrl+C at the prompt does the same)`;
 
 // Injected when the user turns plan mode on, so the model knows the rules of the
@@ -303,6 +305,24 @@ async function main() {
         // Show the diff of what was put back (from the current state to the
         // restored one), reusing the Day 21 renderer.
         console.log(renderDiff(undone.after ?? "", undone.before ?? ""));
+        return true;
+      }
+      case "/diff": {
+        // A read-only review of the net effect of this session on the
+        // filesystem — every file whose content differs from where it started,
+        // shown as a diff from baseline → now. Reuses the Day 21 renderer.
+        const changes = sessionChanges();
+        if (!changes.length) {
+          console.log(chalk.dim("(no file changes this session)"));
+          return true;
+        }
+        const verb = { created: chalk.green("created"), modified: chalk.yellow("modified"), deleted: chalk.red("deleted") };
+        console.log(chalk.dim(`${changes.length} file${changes.length === 1 ? "" : "s"} changed this session:`));
+        for (const c of changes) {
+          const short = path.relative(process.cwd(), c.path) || c.path;
+          console.log(`\n${verb[c.status]} ${short}`);
+          console.log(renderDiff(c.baseline, c.current));
+        }
         return true;
       }
       case "/plan":

@@ -4,7 +4,7 @@
 
 人定方向、做决策、验收,AI 写大部分代码——这既是本仓库的诞生方式,也是这门课教你的工作方式。
 
-课程共 24 天——主线 10 天搓出一个能用的 agent,进阶 14 天打磨成工业级 CLI(MCP / 权限裁判 / 长期记忆 / 成本核算 / 调用校验 / 计划模式 / diff 预览 / 撤销 / 模型分级 / 远程 MCP);一天一个 commit、一晚一章的节奏跟做。**commit 历史就是课程目录**:`git log --oneline` 看大纲,`git checkout dayN` 拿到第 N 天对应的完整代码。
+课程共 25 天——主线 10 天搓出一个能用的 agent,进阶 15 天打磨成工业级 CLI(MCP / 权限裁判 / 长期记忆 / 成本核算 / 调用校验 / 计划模式 / diff 预览 / 撤销 / 模型分级 / 远程 MCP / 会话改动总览);一天一个 commit、一晚一章的节奏跟做。**commit 历史就是课程目录**:`git log --oneline` 看大纲,`git checkout dayN` 拿到第 N 天对应的完整代码。
 
 > **设计有出处,不是凭感觉搭的**:蓝本是《Harness Engineering:从 Claude Code 看 AI 编码工程》提炼的 22 个工程模式——博主在公众号用 30+ 篇拆完了全书(本仓库就是那次拆解的实践篇)。书的收官章,作者用 800 行 Rust 写了一个代码审查 Agent,验证这些模式能跨语言、跨场景活下来;**这个仓库是同一套模式的又一次迁移**:场景换成 Claude Code 式的 CLI 编码 agent,语言换成 TypeScript——不跟着用 Rust,是因为新手教程的第一原则是别让语言难度挡路。
 >
@@ -71,6 +71,7 @@ MINI_AGENT_MODEL=gpt-4.1-mini
 | `day22` | `/undo` 撤销上一次写入:写入前埋一行存「之前」快照(有界栈),`/undo` 还原内容或删掉新建文件、复用 Day 21 diff 画出撤销结果;`/clear` 同时清栈;`npm test` 204 例 |
 | `day23` | 子 agent 模型分级:`subAgentModel` 配置让委托跑在不同档位(便宜模型干杂活 / 强模型当顾问审查),纯函数 `subAgentModelFor` 定回落规则,首次用假 client 端到端验证「编排→委托→回归」真换了模型;`npm test` 212 例 |
 | `day24` | 远程 MCP(HTTP/SSE):把 Day 15 的传输从协议里剥成 Transport 接口,新增 HTTP 传输(POST→按 Content-Type 分 JSON/SSE 解析、回带 Mcp-Session-Id、AbortSignal 超时),配置 `url` 即走远程;协议层/发现/注册零改动;`npm test` 218 例 |
+| `day25` | `/diff` 会话改动总览:撤销账本旁加一张「会话起点基线」表(每个文件首次被碰的样子,只记一次),`/diff` 与磁盘现状逐个比、复用 Day 21 渲染净改动、净零跳过,三态 created/modified/deleted;`npm test` 227 例 |
 
 ## 📖 配套教程(免费开源)
 

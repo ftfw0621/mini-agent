@@ -1,6 +1,6 @@
 # 教程:跟着 AI,从零搓一个自己的 Claude Code
 
-> 24 天,一天一章(主线 10 天 + 进阶 14 天),约 3300 行 TypeScript,用 DeepSeek API 从零写出一个工业级的命令行 Agent。
+> 25 天,一天一章(主线 10 天 + 进阶 15 天),约 3400 行 TypeScript,用 DeepSeek API 从零写出一个工业级的命令行 Agent。
 > 全部教程免费开源。代码与教程一一对应:每章对应一个 git tag,`git checkout dayN` 就是第 N 天对应的完整代码。
 
 ## 目录
@@ -39,6 +39,7 @@
 | [Ch22](ch22-undo.md) | 给一颗后悔药:/undo 撤销上一次写入(改完也能反悔) | `day22` |
 | [Ch23](ch23-model-tiering.md) | 让杂活用便宜的模型:子 agent 模型分级(强模型当顾问) | `day23` |
 | [Ch24](ch24-mcp-http.md) | 同一个协议,两根管子:远程 MCP(HTTP/SSE 传输) | `day24` |
+| [Ch25](ch25-session-diff.md) | 这趟会话到底改了啥:/diff 会话改动总览 | `day25` |
 
 ## 怎么学
 
