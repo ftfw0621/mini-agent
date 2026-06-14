@@ -17,6 +17,7 @@ import { isPlanMode, setPlanMode } from "./permissions.js"; // plan mode: resear
 import { undoLast, clearUndo, sessionChanges } from "./undo.js"; // /undo + /diff: take back, or review, this session's writes
 import { renderDiff } from "./diff.js"; // show what /undo put back / what /diff changed, reusing the Day 21 diff renderer
 import path from "node:path"; // shorten paths for the /diff summary
+import { expandMentions } from "./mentions.js"; // @file mentions: pull referenced files into context (secret files refused)
 import { rememberTool, readMemory, MEMORY_PATH } from "./memory.js"; // long-term project memory
 import { initCostMeter, DEFAULT_PRICING } from "./cost.js"; // token & cost accounting for /cost
 
@@ -379,7 +380,16 @@ async function main() {
     if (line === "exit" || line === "quit") break; // explicit goodbye
     if (await handleCommand(line)) continue; // slash commands never reach the model
 
-    messages.push({ role: "user", content: line }); // the new turn joins the shared history
+    // @file mentions: if the line references files (@src/loop.ts), attach their
+    // content to the message so the model sees them directly. Secret files are
+    // refused here, exactly as read_file would refuse them.
+    const { augmented, mentions } = expandMentions(line);
+    const attached = mentions.filter((m) => m.status === "ok").map((m) => m.raw);
+    const refused = mentions.filter((m) => m.status === "denied").map((m) => m.raw);
+    if (attached.length) console.log(chalk.dim(`(attached ${attached.length} file${attached.length === 1 ? "" : "s"}: ${attached.join(", ")})`));
+    if (refused.length) console.log(chalk.yellow(`(refused secret file${refused.length === 1 ? "" : "s"}: ${refused.join(", ")})`));
+
+    messages.push({ role: "user", content: augmented }); // the new turn (with any attached files) joins the shared history
     running = true; // Ctrl+C now means "interrupt the task"
     interrupted = false; // fresh interrupt state for this task
     controller = new AbortController(); // fresh abort signal for this task
