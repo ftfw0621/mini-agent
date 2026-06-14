@@ -4,6 +4,7 @@ import ora from "ora"; // the "thinking..." spinner while waiting for the first 
 import { toolDefinitions, dispatch, snapshotFileState, restoreFileState, isReadOnlyTool } from "./tools.js"; // the tool manuals + the executor + file-state isolation
 import { classifyError, ApiErrorKind } from "./errors.js"; // failure taxonomy
 import { checkPermission } from "./permissions.js"; // the allow/ask/deny gate
+import { previewChange } from "./diff.js"; // show the diff before a write so approval is informed
 import { estimateHistoryTokens, compactHistory, COMPACT_AT, MAX_COMPACTIONS_PER_QUERY, MAX_COMPACT_FAILURES } from "./context.js"; // context management
 import { SUB_AGENT_PROMPT } from "./prompt.js"; // the sub-agent's own constitution
 import { emit } from "./telemetry.js"; // local-only event log (no-op unless the CLI armed it)
@@ -209,6 +210,14 @@ async function runOneCall(call: AssembledCall, opts: LoopOptions): Promise<{ id:
   // The permission gate sits between the model's intent and execution.
   const v = checkPermission(call.name, call.args);
   emit("agent_tool_call", { tool: call.name }); // every attempt, allowed or not
+
+  // For file-changing tools, show the diff BEFORE the gate decides. A filename
+  // ("edit_file: cart.js") is not enough to approve safely; the actual +/- lines
+  // are. Skipped for a hard deny (nothing will run) and in quiet sub-agent runs.
+  if (!opts.quiet && v.decision !== "deny" && (call.name === "write_file" || call.name === "edit_file")) {
+    const preview = previewChange(call.name, call.args);
+    if (preview) console.log(preview.replace(/^/gm, indent)); // nest under the sub-agent marker if any
+  }
   let content: string; // what goes back to the model as the tool result
   if (v.decision === "deny") {
     emit("agent_tool_denied", { tool: call.name }); // hard blocks, per tool
