@@ -42,6 +42,7 @@ export interface McpServerDef {
 // What a settings file may contain. Unknown keys are ignored.
 interface SettingsFile {
   model?: string; // which model to call
+  subAgentModel?: string; // model for delegated sub-agents (task tool); defaults to the main model
   baseURL?: string; // which OpenAI-compatible endpoint
   contextWindow?: number; // the model's context size in tokens
   permissions?: {
@@ -103,6 +104,11 @@ export const CONFIG = {
     process.env.DEEPSEEK_API_KEY || // ...over the back-compat one
     "", // empty = missing; requireApiKey() turns that into a helpful error
   model: process.env.MINI_AGENT_MODEL || projectSettings.model || globalSettings.model || "deepseek-chat", // must support function calling
+  // Sub-agents (the task tool) can run on a DIFFERENT model than the orchestrator:
+  // a cheap/fast one for grunt work (reading many files, broad search), or a
+  // strong one as an "advisor" to double-check. undefined → use the main model.
+  subAgentModel:
+    process.env.MINI_AGENT_SUBAGENT_MODEL || projectSettings.subAgentModel || globalSettings.subAgentModel || undefined,
   contextWindow:
     Number(process.env.MINI_AGENT_CONTEXT_WINDOW) || // env override first
     projectSettings.contextWindow || // then files

@@ -51,7 +51,15 @@ export interface LoopOptions {
   confirm: (question: string) => Promise<boolean>; // ask the human; resolves false in non-interactive sessions
   quiet?: boolean; // suppress all narration (used by the eval harness)
   subAgent?: boolean; // this loop IS a sub-agent: no task tool, no text streaming, indented tool logs
+  subAgentModel?: string; // model to run delegated sub-agents on; falls back to `model`
   judge?: Judge; // optional LLM classifier that auto-allows clearly-safe "ask" commands
+}
+
+// Which model should a delegated sub-agent run on? The configured sub-agent
+// model if set and non-blank, otherwise the same model as the orchestrator.
+// Pulled out as a pure function so the tiering rule is testable on its own.
+export function subAgentModelFor(opts: { model: string; subAgentModel?: string }): string {
+  return opts.subAgentModel?.trim() || opts.model;
 }
 
 // The task tool: the parent's handle on sub-agents. Defined here (not in
@@ -79,14 +87,20 @@ On error: a failed sub-agent returns [sub-agent failed: reason] — retry with a
 // permission gate, and the parent's file read-state protected by a snapshot.
 async function runSubAgent(description: string, opts: LoopOptions): Promise<string> {
   emit("agent_subagent_spawn"); // delegation is worth counting
-  if (!opts.quiet) console.log(chalk.blue(`  ⎿ sub-agent started: ${description.slice(0, 100)}`)); // show the delegation
+  const subModel = subAgentModelFor(opts); // the tier this delegated work runs on
+  // Show the delegation, and the model when it differs from the orchestrator's —
+  // the tiering should be visible, not a silent surprise on the bill.
+  if (!opts.quiet) {
+    const tier = subModel !== opts.model ? chalk.dim(` [${subModel}]`) : ""; // only annotate a real switch
+    console.log(chalk.blue(`  ⎿ sub-agent started:`) + tier + chalk.blue(` ${description.slice(0, 100)}`));
+  }
   const snapshot = snapshotFileState(); // what the sub-agent reads, the parent has NOT seen
   try {
     const subMessages: OpenAI.ChatCompletionMessageParam[] = [
       { role: "system", content: SUB_AGENT_PROMPT }, // its own, smaller constitution
       { role: "user", content: description }, // the task is its entire world
     ];
-    const result = await runLoop(subMessages, { ...opts, subAgent: true }); // recurse, flagged as sub-agent
+    const result = await runLoop(subMessages, { ...opts, subAgent: true, model: subModel }); // recurse as a sub-agent, on its own tier
     if (result.reason === TerminateReason.Done && result.finalText?.trim()) {
       // The framing matters: the parent must treat this as material to verify,
       // not as conclusions to copy — the most common multi-agent failure mode.

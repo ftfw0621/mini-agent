@@ -173,6 +173,7 @@ async function main() {
       model: CONFIG.model,
       signal: controller.signal,
       isInterrupted: () => interrupted,
+      subAgentModel: CONFIG.subAgentModel, // delegated work may run on a different tier
       judge, // auto-allow clearly-safe commands even unattended (safer than blanket AUTO_APPROVE)
       // Print mode never prompts: unattended means nobody can say yes.
       // MINI_AGENT_AUTO_APPROVE=1 still works for scripted use; hard denies
@@ -317,7 +318,13 @@ async function main() {
         }
         return true;
       case "/model":
-        console.log(chalk.dim(`model: ${CONFIG.model}\nendpoint: ${CONFIG.baseURL}\ncontext window: ${CONFIG.contextWindow} tokens (compaction at ~${COMPACT_AT})`)); // where this session points
+        console.log(
+          chalk.dim(
+            `model: ${CONFIG.model}\n` +
+              (CONFIG.subAgentModel ? `sub-agent model: ${CONFIG.subAgentModel} (delegated task work)\n` : "") +
+              `endpoint: ${CONFIG.baseURL}\ncontext window: ${CONFIG.contextWindow} tokens (compaction at ~${COMPACT_AT})`,
+          ),
+        ); // where this session points
         return true;
       case "/compact": {
         if (messages.length <= 1) {
@@ -363,6 +370,7 @@ async function main() {
       signal: controller.signal, // for aborting requests
       isInterrupted: () => interrupted, // for stopping between steps
       confirm, // for permission prompts
+      subAgentModel: CONFIG.subAgentModel, // delegated work may run on a different tier
       judge, // optional LLM classifier for the "ask" middle ground
     });
     running = false; // back at the prompt — Ctrl+C means "exit" again
