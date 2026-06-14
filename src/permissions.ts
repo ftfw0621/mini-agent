@@ -92,9 +92,52 @@ function checkBash(command: string): Verdict {
   return { decision: "ask", reason: "unrecognized command", summary };
 }
 
+// ---- Plan mode (Day 20) ------------------------------------------------------
+// A research-only mode. While it is on, the agent may observe — read files,
+// search, run safe read-only shell — but every tool that mutates the world is
+// blocked, until it presents a plan and the user approves it. The state lives
+// here because the gate is what enforces it; the REPL toggles it with /plan, and
+// the exit_plan_mode tool turns it off once the user approves a plan.
+let planMode = false; // off by default — most sessions never touch it
+export const isPlanMode = (): boolean => planMode; // the REPL reads this to mark its prompt
+export const setPlanMode = (on: boolean): void => { planMode = on; }; // /plan and exit_plan_mode flip it
+
+// In plan mode, is this call safe — i.e. does it only observe, never mutate?
+// run_bash is decided by its own classifier: a command the gate already rated
+// "allow" (ls, cat, git status) observes; "ask"/"deny" ones (rm, sudo) mutate.
+function planSafe(toolName: string, verdict: Verdict): boolean {
+  switch (toolName) {
+    case "read_file":
+    case "search":
+    case "task": // the sub-agent's own calls hit this same gate, still in plan mode
+    case "exit_plan_mode": // the way OUT of plan mode must never be blocked by plan mode
+      return true;
+    case "run_bash":
+      return verdict.decision === "allow"; // only the read-only commands the classifier cleared
+    default:
+      return false; // write_file, edit_file, MCP and unknown tools: all mutate-or-unknown
+  }
+}
+
 // ---- The single entry point ---------------------------------------------------
-// Called by the loop for EVERY tool call, before anything executes.
+// Called by the loop for EVERY tool call, before anything executes. Plan mode is
+// applied as an outer filter: it can only TIGHTEN the base decision (downgrade a
+// mutating allow/ask to deny), never loosen one — a base "deny" keeps its more
+// specific reason, because deny always wins.
 export function checkPermission(toolName: string, argsJson: string): Verdict {
+  const base = basePermission(toolName, argsJson);
+  if (planMode && base.decision !== "deny" && !planSafe(toolName, base)) {
+    return {
+      decision: "deny",
+      reason: "plan mode is on — investigate with read-only tools, then call exit_plan_mode to present a plan for the user to approve before you change anything",
+      summary: base.summary,
+    };
+  }
+  return base;
+}
+
+// The underlying rules, plan-mode-agnostic. Wrapped by checkPermission above.
+function basePermission(toolName: string, argsJson: string): Verdict {
   // A user-configured tool block beats everything, including built-in allows.
   if (CONFIG.permissions.deny.includes(`tool:${toolName}`)) {
     return { decision: "deny", reason: `tool blocked by your settings ("tool:${toolName}")`, summary: toolName };
@@ -137,6 +180,13 @@ export function checkPermission(toolName: string, argsJson: string): Verdict {
     }
     case "run_bash":
       return checkBash(args.command ?? ""); // bash gets input-aware analysis
+    case "exit_plan_mode": {
+      // Outside plan mode this tool does nothing — let it through silently. In
+      // plan mode it is the approval gate: ask the human, showing the plan, and
+      // only on yes does the tool run and flip plan mode off.
+      if (!planMode) return { decision: "allow", reason: "not in plan mode (no-op)", summary: "exit_plan_mode" };
+      return { decision: "ask", reason: "leave plan mode and start implementing", summary: args.plan ?? "(no plan provided)" };
+    }
     default:
       // Everything else — unknown tools and MCP tools (mcp__server__tool) —
       // gets the most suspicious treatment, not the least: ask. The user can

@@ -4,6 +4,7 @@ import path from "node:path"; // path resolution and joining
 import { spawn } from "node:child_process"; // async process execution (does NOT block the event loop)
 import type OpenAI from "openai"; // types only — no client is created here
 import { validateArgs, type ParamSchema } from "./validate.js"; // schema validation for tool arguments
+import { setPlanMode } from "./permissions.js"; // plan mode (Day 20): exit_plan_mode flips it off on approval
 
 // ============ Session state ============
 // The foundation of "read before edit": which files has this session actually read?
@@ -270,6 +271,28 @@ On error: failures return the error output — analyze it and try a different ap
     }),
 };
 
+// ============ exit_plan_mode ============
+// Plan mode (Day 20) makes the agent research-only: the permission gate blocks
+// every mutating tool until the model presents a plan the user approves. The
+// model calls this when its plan is ready; the gate turns it into an "ask", so
+// the user sees the plan first. run() executes ONLY after the user says yes —
+// so reaching this code IS the approval, and the one thing it does is leave plan
+// mode. Outside plan mode the gate makes it a harmless no-op allow.
+const exitPlanMode: Tool = {
+  definition: def(
+    "exit_plan_mode",
+    `Leave plan mode and start implementing. Call this ONLY when you are in plan mode and have finished investigating with read-only tools.
+Pass your plan as markdown in "plan"; the user is shown it and asked to approve. Do NOT call it to ask a question, and not before you have a concrete, ordered plan.
+On approval, plan mode turns off and writing/executing tools become available. If declined, you stay in plan mode — refine the plan and try again.`,
+    { plan: { type: "string", description: "The implementation plan, as concise ordered markdown steps" } },
+    ["plan"],
+  ),
+  run: () => {
+    setPlanMode(false); // run() only happens after the user approved — leave plan mode so implementation can begin
+    return "Plan approved by the user. Plan mode is OFF — implement the plan now; writing and executing tools are available again.";
+  },
+};
+
 // ============ Registry & dispatch ============
 // The built-in tools. External tools (MCP servers, Day 15) are registered into
 // the same record at startup, so they flow through the same dispatch and the
@@ -281,6 +304,7 @@ export const tools: Record<string, Tool> = {
   edit_file: editFile,
   search,
   run_bash: runBash,
+  exit_plan_mode: exitPlanMode,
 };
 
 // Register an external tool (e.g. one discovered from an MCP server). Kept in

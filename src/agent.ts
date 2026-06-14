@@ -13,6 +13,7 @@ import { initTelemetry, emit, statsReport } from "./telemetry.js"; // local-only
 import { runHooks } from "./hooks.js"; // SessionStart lifecycle hook
 import { connectMcpServers } from "./mcp.js"; // external tool servers (MCP)
 import { Judge } from "./judge.js"; // optional LLM permission classifier
+import { isPlanMode, setPlanMode } from "./permissions.js"; // plan mode: research-only until the user approves a plan
 import { rememberTool, readMemory, MEMORY_PATH } from "./memory.js"; // long-term project memory
 import { initCostMeter, DEFAULT_PRICING } from "./cost.js"; // token & cost accounting for /cost
 
@@ -59,7 +60,12 @@ const SESSION_HELP = `commands:
   /stats     event counts for this session (local telemetry — nothing leaves this machine)
   /memory    show the durable facts the agent remembers about this project
   /cost      tokens, cache hit rate and estimated spend this session (local)
+  /plan      toggle plan mode — research-only; the agent presents a plan you approve before any change
   exit       leave (Ctrl+C at the prompt does the same)`;
+
+// Injected when the user turns plan mode on, so the model knows the rules of the
+// mode it now lives in (the permission gate enforces them regardless).
+const PLAN_MODE_NOTICE = `[plan mode ON] Investigate this request using only read-only tools — read_file, search, and safe read-only shell (ls, cat, git status). Do NOT write files, edit, or run mutating commands; the permission gate will block them. When you have a concrete, ordered plan, call the exit_plan_mode tool with that plan. The user reviews and approves it before you make any change.`;
 
 async function main() {
   // ---- Flag handling, before anything touches the network -----------------------
@@ -278,6 +284,18 @@ async function main() {
       case "/cost":
         console.log(chalk.dim(costMeter.report())); // tokens, cache hit rate, estimated spend (local)
         return true;
+      case "/plan":
+        // A toggle. Turning it on injects the rules of the mode as a user turn so
+        // the model adopts them; the gate (permissions.ts) enforces them either way.
+        if (isPlanMode()) {
+          setPlanMode(false);
+          console.log(chalk.dim("(plan mode OFF — writing and executing tools enabled again)"));
+        } else {
+          setPlanMode(true);
+          messages.push({ role: "user", content: PLAN_MODE_NOTICE });
+          console.log(chalk.dim("(plan mode ON — read-only research; the agent will present a plan for you to approve)"));
+        }
+        return true;
       case "/model":
         console.log(chalk.dim(`model: ${CONFIG.model}\nendpoint: ${CONFIG.baseURL}\ncontext window: ${CONFIG.contextWindow} tokens (compaction at ~${COMPACT_AT})`)); // where this session points
         return true;
@@ -305,7 +323,11 @@ async function main() {
   // The session loop: ask → run → render → ask again. This is what makes it
   // a conversation instead of a one-shot command.
   while (true) {
-    const line = (await readUserLine(chalk.green("\n> "))).trim(); // next input, or "exit" on EOF
+    // The prompt itself shows the mode: a plain green ">" normally, a cyan
+    // "(plan) >" while plan mode is on, so the user is never surprised that
+    // writes are being blocked.
+    const promptStr = isPlanMode() ? chalk.cyan("\n(plan) > ") : chalk.green("\n> ");
+    const line = (await readUserLine(promptStr)).trim(); // next input, or "exit" on EOF
     if (!line) continue; // empty line — just re-prompt
     if (line === "exit" || line === "quit") break; // explicit goodbye
     if (await handleCommand(line)) continue; // slash commands never reach the model
