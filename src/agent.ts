@@ -227,7 +227,17 @@ async function main() {
   const pendingLines: string[] = []; // lines that arrived before anyone asked
   const lineWaiters: ((line: string) => void)[] = []; // askers waiting for a line
   let stdinDone = false; // has stdin ended?
+  // A status footer can be "pinned" just BELOW the prompt (Claude-Code style): we
+  // draw it under the ❯ and move the cursor back up, so readline keeps editing the
+  // line above an unmoving status bar. The instant a line is submitted we erase it
+  // (cursor is now on the footer's first row → clear from here down).
+  let footerDrawn = false;
+  const clearFooter = () => {
+    if (footerDrawn && process.stdin.isTTY) process.stdout.write("\x1b[0J"); // erase from the cursor to end of screen
+    footerDrawn = false;
+  };
   rl.on("line", (line) => {
+    clearFooter(); // a line was submitted — drop the pinned status bar before anything prints
     const waiter = lineWaiters.shift(); // is somebody waiting?
     if (waiter) waiter(line); // hand the line over directly
     else pendingLines.push(line); // nobody waiting — queue it
@@ -237,11 +247,18 @@ async function main() {
     while (lineWaiters.length) lineWaiters.shift()!("exit"); // wake every waiter with a polite "exit"
   });
   // Get the next line of user input, showing a prompt if we have to wait.
-  const readUserLine = (prompt: string): Promise<string> => {
+  const readUserLine = (prompt: string, footer?: string): Promise<string> => {
     if (pendingLines.length) return Promise.resolve(pendingLines.shift()!); // typed-ahead (or piped) line — use it
     if (stdinDone) return Promise.resolve("exit"); // stdin is gone — leave politely
     rl.setPrompt(prompt); // show the prompt the redraw-safe way
     rl.prompt();
+    // Pin a status bar below the prompt: save the cursor (sitting after ❯), print
+    // the footer underneath, then restore the cursor back onto the prompt line.
+    // readline now edits above an unmoving footer; 'line' wipes it on submit.
+    if (footer && process.stdin.isTTY) {
+      process.stdout.write("\x1b7" + "\n" + footer + "\x1b8"); // DECSC · footer · DECRC
+      footerDrawn = true;
+    }
     return new Promise((resolve) => lineWaiters.push(resolve)); // wait for the next line
   };
 
@@ -558,18 +575,20 @@ async function main() {
   }
 
   while (true) {
-    // The input area: a blank line + a separator rule, then the "❯". The status
-    // line (model · 📁 dir · 🌿 branch · ctx% · $ · time) goes UNDER the input —
-    // printed after you submit, so it sits as a thin footer above the answer
-    // rather than hovering awkwardly on top. Only in a TTY; piped input is clean.
-    if (process.stdin.isTTY) console.log("\n" + inputRule());
-    const line = (await readUserLine(framedPrompt(isPlanMode()))).trim(); // next input, or "exit" on EOF
-    if (!line) continue; // empty line — just re-prompt
-    if (line === "exit" || line === "quit") break; // explicit goodbye
+    // The input area, Claude-Code style: a top rule, the "❯" you type on, then a
+    // bottom rule + status line (model · 📁 dir · 🌿 branch · ctx% · $ · time)
+    // pinned BELOW the input. readUserLine draws the footer under the prompt and
+    // keeps the cursor on the ❯ line, so the status reads like a real bottom bar.
+    // Only in a TTY; piped input stays clean.
+    let footer: string | undefined;
     if (process.stdin.isTTY) {
       const ctxPct = Math.min(100, Math.round((estimateHistoryTokens(messages) / CONFIG.contextWindow) * 100));
-      console.log(statusLine(CONFIG.model, path.basename(process.cwd()), gitBranch(), ctxPct, costMeter.cost(), Date.now() - sessionStartedAt)); // footer under what you just typed
+      console.log("\n" + inputRule()); // top rule above the prompt
+      footer = inputRule() + "\n" + statusLine(CONFIG.model, path.basename(process.cwd()), gitBranch(), ctxPct, costMeter.cost(), Date.now() - sessionStartedAt); // bottom rule + status, pinned below
     }
+    const line = (await readUserLine(framedPrompt(isPlanMode()), footer)).trim(); // next input, or "exit" on EOF
+    if (!line) continue; // empty line — just re-prompt
+    if (line === "exit" || line === "quit") break; // explicit goodbye
     if (await handleCommand(line)) continue; // slash commands never reach the model
 
     // UserPromptSubmit hook: a chance to validate/inject before the model sees
