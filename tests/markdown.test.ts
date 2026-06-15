@@ -1,0 +1,50 @@
+import { renderMarkdown, MarkdownStream } from "../src/markdown.js"; // unit under test
+import { check, checkContains, finish } from "./helpers.js"; // assertions
+// chalk auto-disables color when stdout isn't a TTY (as under the test runner),
+// so these assertions see plain text — but box-drawing glyphs are always emitted.
+
+// ---- renderMarkdown: block + inline ---------------------------------------------------
+const heading = renderMarkdown("## Hello world", 80);
+checkContains("heading keeps its text", heading, "Hello world");
+check("heading strips the ## markup", !heading.includes("##"), `got: ${heading}`);
+
+const bold = renderMarkdown("this is **important** text", 80);
+checkContains("bold keeps its text", bold, "important");
+check("bold strips the ** markup", !bold.includes("**"), `got: ${bold}`);
+
+const code = renderMarkdown("call `doThing()` now", 80);
+checkContains("inline code keeps its text", code, "doThing()");
+check("inline code strips the backticks", !code.includes("`"), `got: ${code}`);
+
+// ---- renderMarkdown: a CJK table aligns into a box ------------------------------------
+const table = renderMarkdown(["| 主题 | 资源 |", "|------|------|", "| 控制论 | 维纳《控制论》 |"].join("\n"), 80);
+checkContains("table draws a box border", table, "│");
+checkContains("table keeps a header cell", table, "主题");
+checkContains("table keeps a CJK body cell", table, "维纳《控制论》");
+check("table drops the |---| separator row", !table.includes("---|"), `got: ${table}`);
+
+// ---- MarkdownStream: completed blocks flush before end() ------------------------------
+const out: string[] = [];
+const s = new MarkdownStream((x) => out.push(x), { firstPrefix: "> ", indent: "  " });
+s.push("first paragraph.\n\nsecond para"); // blank line ⇒ first block is complete
+check("a finished block flushes immediately", out.length === 1 && out[0].includes("first paragraph"), `out=${JSON.stringify(out)}`);
+check("the unfinished block waits", !out.join("").includes("second para"), `out=${JSON.stringify(out)}`);
+s.end(); // now the tail flushes
+check("end() flushes the final block", out.join("").includes("second para"), `out=${JSON.stringify(out)}`);
+
+// ---- MarkdownStream: the ⏺ prefix leads only the first line ---------------------------
+const out2: string[] = [];
+const s2 = new MarkdownStream((x) => out2.push(x), { firstPrefix: "P>", indent: "  " });
+s2.push("line one\n\nline two\n\n");
+const joined = out2.join("");
+check("firstPrefix leads the very first line", joined.startsWith("P>"), `got: ${JSON.stringify(joined.slice(0, 20))}`);
+check("the second block uses the indent, not the prefix", joined.indexOf("P>", 2) === -1, `got: ${JSON.stringify(joined)}`);
+
+// ---- MarkdownStream: a blank line INSIDE a fence is not a block boundary --------------
+const out3: string[] = [];
+const s3 = new MarkdownStream((x) => out3.push(x), {});
+s3.push("```\ncode line 1\n\ncode line 2\n```\n\ntrailing");
+check("fenced block with an inner blank line stays one block", out3.length === 1, `out=${JSON.stringify(out3)}`);
+checkContains("the fenced block kept both code lines", out3.join(""), "code line 2");
+
+finish();

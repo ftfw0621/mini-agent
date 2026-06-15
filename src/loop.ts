@@ -13,6 +13,7 @@ import type { Judge } from "./judge.js"; // optional LLM permission classifier
 import { recordUsage } from "./cost.js"; // meter token usage from the stream
 import { mark, thinkingWord, spinnerText } from "./ui.js"; // centralized terminal styling (markers, spinner)
 import { printToolSummary } from "./tui.js"; // collapsible tool output
+import { MarkdownStream } from "./markdown.js"; // render the streamed answer as terminal markdown
 
 export const MAX_RETRIES = 10; // total failed API calls per query, across all rounds
 export const MAX_RATE_LIMIT_RETRIES = 3; // 429s get their own, much smaller budget
@@ -216,6 +217,7 @@ async function streamModelCall(
     let content = ""; // accumulated answer text
     let printedPrefix = false; // have we printed the answer prefix yet?
     let printedThinking = false; // have we started printing the reasoning trace yet?
+    let md: MarkdownStream | null = null; // renders the streamed answer as markdown, block by block
     const calls: AssembledCall[] = []; // tool calls under assembly, indexed by delta.index
     for await (const chunk of stream) {
       lastEvent = Date.now(); // feed the watchdog
@@ -249,10 +251,14 @@ async function streamModelCall(
           // inner monologue would be mistaken for the answer.
           if (printedThinking && !printedPrefix) process.stdout.write("\n"); // end the thinking block before the answer
           if (!printedPrefix) {
-            process.stdout.write("\n" + mark.answer); // prefix once (⏺), then stream raw
+            // Stream the answer through the markdown renderer: it buffers a block
+            // (paragraph / heading / list / table) and prints it formatted the
+            // moment that block completes — still live, but no raw `##`/`|---|`.
+            // The ⏺ marker leads the first line; wrapped lines align under it.
+            md = new MarkdownStream((s) => process.stdout.write(s), { firstPrefix: "\n" + mark.answer, indent: "  " });
             printedPrefix = true;
           }
-          process.stdout.write(delta.content); // print the token immediately — this IS the streaming UX
+          md!.push(delta.content); // hand the token to the renderer (it decides when to paint)
         }
         content += delta.content; // always keep it for the history (the answer only, never the reasoning)
       }
@@ -264,6 +270,7 @@ async function streamModelCall(
         if (tc.function?.arguments) slot.args += tc.function.arguments; // arguments stream in fragments — concatenate
       }
     }
+    if (md) md.end(); // flush the final (un-terminated) block through the renderer
     if (printedPrefix) process.stdout.write("\n"); // end the streamed line cleanly
     return { content, toolCalls: calls.filter(Boolean) }; // sparse array → dense
   } finally {
