@@ -8,7 +8,7 @@ import { runLoop, TerminateReason, MAX_ROUNDS, MAX_RETRIES, type LoopResult } fr
 import { buildSystemMessage } from "./prompt.js"; // the constitution + optional AGENT.md project memory
 import { forgetFilesExcept, registerExternalTool } from "./tools.js"; // file-state reset + tool registration
 import { compactHistory, estimateHistoryTokens, COMPACT_AT } from "./context.js"; // for the manual /compact command
-import { newSessionId, saveSession, latestSession } from "./session.js"; // conversation persistence (project-local)
+import { newSessionId, saveSession, latestSession, listSessions, loadSession } from "./session.js"; // conversation persistence (project-local) + the /resume picker
 import { initTelemetry, emit, statsReport } from "./telemetry.js"; // local-only event log + /stats
 import { runHooks } from "./hooks.js"; // SessionStart lifecycle hook
 import { connectMcpServers } from "./mcp.js"; // external tool servers (MCP)
@@ -67,6 +67,7 @@ const SESSION_HELP = `commands:
   /plan      toggle plan mode — research-only; the agent presents a plan you approve before any change
   /undo      revert the most recent file write (write_file / edit_file) this session
   /diff      show every file changed this session, as a diff from where it started
+  /resume    list recent sessions in this project and continue one of them
   exit       leave (Ctrl+C at the prompt does the same)`;
 
 // Injected when the user turns plan mode on, so the model knows the rules of the
@@ -306,6 +307,43 @@ async function main() {
         // Show the diff of what was put back (from the current state to the
         // restored one), reusing the Day 21 renderer.
         console.log(renderDiff(undone.after ?? "", undone.before ?? ""));
+        return true;
+      }
+      case "/resume": {
+        // List recent sessions in this project and switch to the chosen one.
+        // Swapping mid-conversation is fine: we rebuild from the constitution +
+        // the saved messages, and reset the per-conversation state (read-state,
+        // undo history) so the resumed session behaves like a fresh start of it.
+        const sessions = listSessions(10);
+        if (!sessions.length) {
+          console.log(chalk.dim("(no saved sessions in this project yet)"));
+          return true;
+        }
+        console.log(chalk.dim("recent sessions in this project:"));
+        sessions.forEach((s, i) => {
+          const when = s.savedAt.slice(0, 16).replace("T", " "); // 2026-06-15 10:30
+          console.log(chalk.dim(`  ${i + 1}. ${when} · ${s.messageCount} msg · ${s.title.slice(0, 60)}`));
+        });
+        const answer = (await readUserLine("  resume which? [number, or Enter to cancel] ")).trim();
+        if (!answer) {
+          console.log(chalk.dim("(cancelled)"));
+          return true;
+        }
+        const idx = Number(answer) - 1;
+        if (!Number.isInteger(idx) || idx < 0 || idx >= sessions.length) {
+          console.log(chalk.dim("(not a valid choice — cancelled)"));
+          return true;
+        }
+        const chosen = loadSession(sessions[idx].id);
+        if (!chosen) {
+          console.log(chalk.yellow("(could not load that session — it may be corrupt)"));
+          return true;
+        }
+        messages = [{ role: "system", content: systemMessage }, ...chosen.messages]; // fresh constitution + saved turns
+        sessionId = chosen.id; // keep appending to the resumed session's file
+        forgetFilesExcept([]); // a resumed conversation must re-read files before editing them
+        clearUndo(); // the previous session's writes are not ours to undo
+        console.log(chalk.dim(`(resumed ${chosen.id} — ${chosen.messages.length} messages; files must be re-read before editing)`));
         return true;
       }
       case "/diff": {

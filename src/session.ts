@@ -5,7 +5,9 @@ import type OpenAI from "openai"; // message types
 // Sessions are project-local: .mini-agent/sessions/<id>.json under the cwd.
 // Project-local (not global) because a conversation is about a codebase —
 // resuming a refactor of project A from inside project B makes no sense.
-const SESSIONS_DIR = path.resolve(".mini-agent", "sessions");
+// Resolved lazily (a function, not a const) so it always reflects the current
+// working directory — and so tests can chdir into a scratch dir.
+const sessionsDir = () => path.resolve(".mini-agent", "sessions");
 const KEEP_SESSIONS = 20; // how many session files survive pruning
 
 // What one session file contains.
@@ -27,8 +29,9 @@ export function newSessionId(): string {
 // only representation that is always correct. Crash mid-write leaves the
 // previous snapshot intact.
 export function saveSession(id: string, model: string, messages: OpenAI.ChatCompletionMessageParam[]): void {
-  fs.mkdirSync(SESSIONS_DIR, { recursive: true }); // first save creates the directory
-  const file = path.join(SESSIONS_DIR, `${id}.json`); // the real destination
+  const dir = sessionsDir();
+  fs.mkdirSync(dir, { recursive: true }); // first save creates the directory
+  const file = path.join(dir, `${id}.json`); // the real destination
   const existing = fs.existsSync(file) ? (JSON.parse(fs.readFileSync(file, "utf8")) as SessionFile) : null; // to preserve startedAt
   const data: SessionFile = {
     id,
@@ -43,30 +46,79 @@ export function saveSession(id: string, model: string, messages: OpenAI.ChatComp
   prune(); // keep the directory bounded
 }
 
+// Session files on disk, newest (most recently saved) first. Shared by every
+// reader below. Skips tmp files and strangers.
+function sessionFilesNewestFirst(): { f: string; mtime: number }[] {
+  const dir = sessionsDir();
+  if (!fs.existsSync(dir)) return []; // nothing ever saved here
+  return fs
+    .readdirSync(dir)
+    .filter((f) => f.endsWith(".json")) // ignore tmp files and strangers
+    .map((f) => ({ f, mtime: fs.statSync(path.join(dir, f)).mtimeMs })) // newest by modification time
+    .sort((a, b) => b.mtime - a.mtime);
+}
+
 // Load the most recent session, or null if there is none (or it is unreadable —
 // a corrupt session file should not kill the CLI, just start fresh).
 export function latestSession(): SessionFile | null {
-  if (!fs.existsSync(SESSIONS_DIR)) return null; // nothing ever saved here
-  const files = fs
-    .readdirSync(SESSIONS_DIR)
-    .filter((f) => f.endsWith(".json")) // ignore tmp files and strangers
-    .map((f) => ({ f, mtime: fs.statSync(path.join(SESSIONS_DIR, f)).mtimeMs })) // newest by modification time
-    .sort((a, b) => b.mtime - a.mtime);
+  const files = sessionFilesNewestFirst();
   if (!files.length) return null; // empty directory
   try {
-    return JSON.parse(fs.readFileSync(path.join(SESSIONS_DIR, files[0].f), "utf8")) as SessionFile; // the newest snapshot
+    return JSON.parse(fs.readFileSync(path.join(sessionsDir(), files[0].f), "utf8")) as SessionFile; // the newest snapshot
   } catch {
     return null; // unreadable — treat as absent, never crash on resume
   }
 }
 
+// Load one session by id, or null if missing/corrupt.
+export function loadSession(id: string): SessionFile | null {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(sessionsDir(), `${id}.json`), "utf8")) as SessionFile;
+  } catch {
+    return null;
+  }
+}
+
+// A one-line, human-readable title for a session: the first thing the user
+// actually typed, with any @file attachment block stripped off and the text
+// flattened to a single trimmed line. This is what makes a session list
+// pickable instead of a wall of timestamps.
+export function sessionTitle(messages: OpenAI.ChatCompletionMessageParam[]): string {
+  const firstUser = messages.find((m) => m.role === "user");
+  let text = typeof firstUser?.content === "string" ? firstUser.content : "";
+  text = text.split("\n\n[Referenced files")[0]; // drop the @file attachment the REPL appended (Day 26)
+  const line = text.replace(/\s+/g, " ").trim(); // flatten to one line
+  return line || "(no prompt)";
+}
+
+// What the picker shows for each session: enough to recognize it at a glance.
+export interface SessionSummary {
+  id: string; // the session id (pass to loadSession)
+  savedAt: string; // ISO timestamp of the last save
+  model: string; // which model it ran on
+  messageCount: number; // how much conversation is in it
+  title: string; // the first user prompt, one line
+}
+
+// Recent sessions, newest first, summarized for a picker. Unreadable files are
+// skipped, never fatal.
+export function listSessions(limit = 10): SessionSummary[] {
+  const out: SessionSummary[] = [];
+  for (const { f } of sessionFilesNewestFirst()) {
+    if (out.length >= limit) break;
+    try {
+      const s = JSON.parse(fs.readFileSync(path.join(sessionsDir(), f), "utf8")) as SessionFile;
+      out.push({ id: s.id, savedAt: s.savedAt, model: s.model, messageCount: s.messages.length, title: sessionTitle(s.messages) });
+    } catch {
+      /* skip a corrupt file */
+    }
+  }
+  return out;
+}
+
 // Delete everything beyond the newest KEEP_SESSIONS files. A CLI that quietly
 // accumulates unbounded state in every project directory is not industrial.
 function prune(): void {
-  const files = fs
-    .readdirSync(SESSIONS_DIR)
-    .filter((f) => f.endsWith(".json"))
-    .map((f) => ({ f, mtime: fs.statSync(path.join(SESSIONS_DIR, f)).mtimeMs }))
-    .sort((a, b) => b.mtime - a.mtime); // newest first
-  for (const { f } of files.slice(KEEP_SESSIONS)) fs.rmSync(path.join(SESSIONS_DIR, f)); // drop the tail
+  const dir = sessionsDir();
+  for (const { f } of sessionFilesNewestFirst().slice(KEEP_SESSIONS)) fs.rmSync(path.join(dir, f)); // drop the tail beyond KEEP_SESSIONS
 }

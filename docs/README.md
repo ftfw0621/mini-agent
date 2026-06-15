@@ -1,6 +1,6 @@
 # 教程:跟着 AI,从零搓一个自己的 Claude Code
 
-> 26 天,一天一章(主线 10 天 + 进阶 16 天),约 3500 行 TypeScript,用 DeepSeek API 从零写出一个工业级的命令行 Agent。
+> 27 天,一天一章(主线 10 天 + 进阶 17 天),约 3600 行 TypeScript,用 DeepSeek API 从零写出一个工业级的命令行 Agent。
 > 全部教程免费开源。代码与教程一一对应:每章对应一个 git tag,`git checkout dayN` 就是第 N 天对应的完整代码。
 
 ## 目录
@@ -41,7 +41,8 @@
 | [Ch24](ch24-mcp-http.md) | 同一个协议,两根管子:远程 MCP(HTTP/SSE 传输) | `day24` |
 | [Ch25](ch25-session-diff.md) | 这趟会话到底改了啥:/diff 会话改动总览 | `day25` |
 | [Ch26](ch26-file-mentions.md) | 用 @ 把文件拽进对话:@file 引用(密钥文件拒绝) | `day26` |
-| [Ch27](ch27-architecture.md) | 进阶篇收尾:一张图看懂这台 agent(架构全景综述) | — |
+| [阶段综述](ch27-architecture.md) | 进阶篇阶段综述(截至 Day 26):一张图看懂这台 agent | — |
+| [Ch27](ch27-sessions.md) | 续上次的活:`/resume` 会话选择器 | `day27` |
 
 ## 怎么学
 
