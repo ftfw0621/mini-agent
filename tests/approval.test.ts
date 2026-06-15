@@ -13,9 +13,10 @@ checkContains("selection can be the second row", renderMenu(["Yes", "No"], 1), "
 
 // ---- promptSelect: arrow-key navigation (driven by a fake TTY) --------------------------
 function fakeStdin(): NodeJS.ReadStream {
-  const s = new EventEmitter() as unknown as { isTTY: boolean; setRawMode: (b: boolean) => void };
+  const s = new EventEmitter() as unknown as { isTTY: boolean; setRawMode: (b: boolean) => void; resume: () => void };
   s.isTTY = true;
   s.setRawMode = () => {}; // a fake stream can't really go raw — no-op
+  s.resume = () => {}; // promptSelect resumes the stream; stub it
   return s as unknown as NodeJS.ReadStream;
 }
 const rlStub = { pause() {}, resume() {} } as unknown as import("node:readline").Interface;
@@ -57,15 +58,18 @@ const key = (input: NodeJS.ReadStream, k: object) => (input as unknown as EventE
 {
   // Regression: the session readline keeps stdin raw; the menu must RESTORE that
   // (not force false), or readline closes and the REPL exits on the next prompt.
-  const input = new EventEmitter() as unknown as { isTTY: boolean; isRaw: boolean; setRawMode: (b: boolean) => void };
+  const input = new EventEmitter() as unknown as { isTTY: boolean; isRaw: boolean; setRawMode: (b: boolean) => void; resume: () => void };
   input.isTTY = true;
   input.isRaw = true; // as during a live terminal readline session
+  let resumed = false;
+  input.resume = () => (resumed = true);
   const rawCalls: boolean[] = [];
   input.setRawMode = (b: boolean) => rawCalls.push(b);
   const p = promptSelect(rlStub, ["Yes", "No"], input as unknown as NodeJS.ReadStream);
   (input as unknown as EventEmitter).emit("keypress", "", { name: "return" });
   await p;
   check("menu restores raw mode to its prior value (true), not false", rawCalls[rawCalls.length - 1] === true);
+  check("menu resumes the stdin stream (or keypresses never arrive)", resumed); // the real /model-exit fix
 }
 
 // ---- "don't ask again for run_bash" upgrades ask→allow, but deny still stands -----------

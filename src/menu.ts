@@ -73,9 +73,10 @@ export function promptSelect(
     };
 
     try {
-      rl.pause(); // stop the line reader from eating our keystrokes
+      rl.pause(); // stop the line reader from turning our keystrokes into lines
       if (input === process.stdin) readline.emitKeypressEvents(input); // turn raw bytes into named keys (real stdin only)
       input.setRawMode(true); // keys arrive immediately, no Enter needed
+      input.resume(); // CRUCIAL: rl.pause() paused the stream — resume it or no keypresses reach us (menu hangs)
       input.on("keypress", onKey);
       draw(true); // first paint
     } catch {
@@ -141,6 +142,7 @@ export function promptForm(
       rl.pause();
       if (input === process.stdin) readline.emitKeypressEvents(input);
       input.setRawMode(true);
+      input.resume(); // resume the stream rl.pause() paused, or no keypresses reach the form
       input.on("keypress", onKey);
       draw(true);
     } catch {

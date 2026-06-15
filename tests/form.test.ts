@@ -49,9 +49,10 @@ checkContains("render has a submit row", view, "Submit answers");
 
 // ---- end to end through promptForm (fake TTY) ------------------------------------------
 function fakeStdin(): NodeJS.ReadStream {
-  const s = new EventEmitter() as unknown as { isTTY: boolean; setRawMode: () => void };
+  const s = new EventEmitter() as unknown as { isTTY: boolean; setRawMode: () => void; resume: () => void };
   s.isTTY = true;
   s.setRawMode = () => {};
+  s.resume = () => {};
   return s as unknown as NodeJS.ReadStream;
 }
 const rlStub = { pause() {}, resume() {} } as unknown as import("node:readline").Interface;
