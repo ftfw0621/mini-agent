@@ -4,7 +4,7 @@
 
 人定方向、做决策、验收,AI 写大部分代码——这既是本仓库的诞生方式,也是这门课教你的工作方式。
 
-课程共 33 天——主线 10 天搓出一个能用的 agent,进阶 23 天打磨成工业级 CLI(MCP / 权限裁判 / 长期记忆 / 成本核算 / 调用校验 / 计划模式 / diff 预览 / 撤销 / 模型分级 / 远程 MCP / 会话改动总览 / @file 引用 / 会话选择器 / 终端 UI / 方向键审批 / 多问题表单 / 模型切换 / 推理流 / Skill 系统);一天一个 commit、一晚一章的节奏跟做。**commit 历史就是课程目录**:`git log --oneline` 看大纲,`git checkout dayN` 拿到第 N 天对应的完整代码。
+课程共 34 天——主线 10 天搓出一个能用的 agent,进阶 24 天打磨成工业级 CLI(MCP / 权限裁判 / 长期记忆 / 成本核算 / 调用校验 / 计划模式 / diff 预览 / 撤销 / 模型分级 / 远程 MCP / 会话改动总览 / @file 引用 / 会话选择器 / 终端 UI / 方向键审批 / 多问题表单 / 模型切换 / 推理流 / Skill 系统 / 记忆深化);一天一个 commit、一晚一章的节奏跟做。**commit 历史就是课程目录**:`git log --oneline` 看大纲,`git checkout dayN` 拿到第 N 天对应的完整代码。
 
 > **设计有出处,不是凭感觉搭的**:蓝本是《Harness Engineering:从 Claude Code 看 AI 编码工程》提炼的 22 个工程模式——博主在公众号用 30+ 篇拆完了全书(本仓库就是那次拆解的实践篇)。书的收官章,作者用 800 行 Rust 写了一个代码审查 Agent,验证这些模式能跨语言、跨场景活下来;**这个仓库是同一套模式的又一次迁移**:场景换成 Claude Code 式的 CLI 编码 agent,语言换成 TypeScript——不跟着用 Rust,是因为新手教程的第一原则是别让语言难度挡路。
 >
@@ -80,6 +80,7 @@ MINI_AGENT_MODEL=gpt-4.1-mini
 | `day31` | 运行时切换模型:`/model` 从只读升级成可切——`/model <name>` 直接设,裸 `/model` 拉端点 `/models` 列表用 Day 29 菜单选;切换只改 `CONFIG.model`、靠主循环每轮重读立即生效;`npm test` 314 例 |
 | `day32` | 让换模型看得见:流式循环多读 `reasoning_content`,把推理模型(R1)的思考灰着流出来(只渲染不进历史,绝不回传);spinner 显示当前模型作为切换生效的证明;`npm test` 324 例 |
 | `day33` | Skill 系统(Markdown 即插件):`SKILL.md`(frontmatter+正文)=一个插件、执行者是模型;渐进披露(列表进上下文/正文按需加载)、`skill` 工具说明书即列表、`disableModelInvocation` 分模型可调/仅用户、`/skills` `/skill <name>`;`npm test` 360 例 |
+| `day34` | 记忆深化:四类型(user/feedback/project/reference,feedback 最值钱)、每轮自动提取(便宜模型读对话存「用户纠正过的」,默认关、永不抛异常)、按类型分组注入、向后兼容旧格式;`npm test` 375 例 |
 
 ## 📖 配套教程(免费开源)
 

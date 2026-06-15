@@ -8,7 +8,7 @@ import { check, checkContains, finish } from "./helpers.js"; // assertions
 // so we chdir BEFORE importing memory.ts — done via a dynamic import below.)
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ma-test-mem-"));
 process.chdir(dir);
-const { rememberTool, readMemory, memoryContext, MEMORY_PATH } = await import("../src/memory.js");
+const { rememberTool, readMemory, readMemoryTyped, memoryContext, addFact, parseExtractedMemories, extractMemories, MEMORY_PATH } = await import("../src/memory.js");
 
 // ---- empty state ----------------------------------------------------------------------
 check("no memory file → no facts", readMemory().length === 0);
@@ -33,18 +33,59 @@ check("whitespace collapsed to one line", readMemory().some((f) => f === "tabs a
 checkContains("empty fact rejected", await rememberTool.run({ fact: "   " }), "[error]");
 
 // ---- the count cap drops the OLDEST -----------------------------------------------------
-for (let i = 0; i < 40; i++) await rememberTool.run({ fact: `fact number ${i}` });
+for (let i = 0; i < 50; i++) await rememberTool.run({ fact: `fact number ${i}` });
 const facts = readMemory();
-check("count capped at 30", facts.length <= 30, String(facts.length));
+check("count capped at 40", facts.length <= 40, String(facts.length));
 check("oldest dropped (fact 0 gone)", !facts.includes("fact number 0"));
-check("newest kept (fact 39 present)", facts.includes("fact number 39"));
+check("newest kept (fact 49 present)", facts.includes("fact number 49"));
 
 // ---- self-healing: a hand-edited huge file is shrunk on next write --------------------
 fs.writeFileSync(MEMORY_PATH, "# header\n" + Array.from({ length: 500 }, (_, i) => `- bloat line ${i}`).join("\n") + "\n");
-check("hand-edited file is over the cap before a write", readMemory().length > 30);
+check("hand-edited file is over the cap before a write", readMemory().length > 40);
 await rememberTool.run({ fact: "a fresh fact after bloat" });
-check("next write heals the count cap", readMemory().length <= 30, String(readMemory().length));
-check("byte cap enforced", Buffer.byteLength(fs.readFileSync(MEMORY_PATH, "utf8"), "utf8") <= 8200);
+check("next write heals the count cap", readMemory().length <= 40, String(readMemory().length));
+check("byte cap enforced", Buffer.byteLength(fs.readFileSync(MEMORY_PATH, "utf8"), "utf8") <= 12200);
 check("the fresh fact made it in", readMemory().includes("a fresh fact after bloat"));
+
+// ---- typed memories (Day 34) ----------------------------------------------------------
+fs.rmSync(MEMORY_PATH, { force: true }); // clean slate
+addFact("the user prefers spaces over tabs", "user");
+addFact("always run pants fmt before committing", "feedback");
+addFact("the build command is pnpm build", "project");
+{
+  const typed = readMemoryTyped();
+  check("type is parsed back", typed.find((e) => e.fact.includes("pants fmt"))?.type === "feedback");
+  check("readMemory still returns plain fact text (no prefix)", readMemory().includes("the build command is pnpm build"));
+}
+{
+  const ctx = memoryContext();
+  checkContains("context groups feedback under a heading", ctx, "Guidance & corrections");
+  checkContains("context includes the user fact", ctx, "prefers spaces over tabs");
+}
+// a bare (legacy) line parses as "project"
+fs.writeFileSync(MEMORY_PATH, "# h\n- a legacy untyped fact\n");
+check("legacy untyped line → project type", readMemoryTyped()[0].type === "project");
+check("an unknown type tag falls back to project", (addFact("x", "bogus" as never), readMemoryTyped().find((e) => e.fact === "x")?.type) === "project");
+
+// ---- parseExtractedMemories -----------------------------------------------------------
+check("parses a clean JSON array", parseExtractedMemories('[{"type":"feedback","fact":"do X"}]').length === 1);
+check("tolerates surrounding prose / fences", parseExtractedMemories('Here:\n```json\n[{"type":"user","fact":"likes Vim"}]\n```').length === 1);
+check("drops items with no fact", parseExtractedMemories('[{"type":"user"},{"fact":"keep me"}]').length === 1);
+check("unknown type → project", parseExtractedMemories('[{"type":"weird","fact":"f"}]')[0].type === "project");
+check("non-array → empty", parseExtractedMemories("not json at all").length === 0);
+check("empty array → empty", parseExtractedMemories("[]").length === 0);
+
+// ---- extractMemories end-to-end with a fake client ------------------------------------
+fs.rmSync(MEMORY_PATH, { force: true });
+const fakeClient = {
+  chat: { completions: { create: async () => ({ choices: [{ message: { content: '[{"type":"feedback","fact":"the user corrected the import order"}]' } }] }) } },
+} as never;
+const saved = await extractMemories(fakeClient, "m", [
+  { role: "user", content: "use spaces not tabs" },
+  { role: "assistant", content: "fixed" },
+]);
+check("extraction saved the fact", saved.length === 1 && saved[0].type === "feedback");
+check("the extracted fact is on disk", readMemory().some((f) => f.includes("corrected the import order")));
+check("extraction with an empty transcript saves nothing", (await extractMemories(fakeClient, "m", [])).length === 0);
 
 finish();

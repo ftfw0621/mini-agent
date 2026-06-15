@@ -21,7 +21,7 @@ import { expandMentions } from "./mentions.js"; // @file mentions: pull referenc
 import { banner, framedPrompt, formatModelChoices, statusLine, inputRule } from "./ui.js"; // welcome box, prompt, model labels, status line
 import { gitBranch, toggleLastCollapsed, cleanup as tuiCleanup } from "./tui.js"; // git branch for the status line + collapsible output
 import { promptSelect, promptForm } from "./menu.js"; // arrow-key approval menu + multi-question form
-import { rememberTool, readMemory, MEMORY_PATH } from "./memory.js"; // long-term project memory
+import { rememberTool, readMemory, readMemoryTyped, extractMemories, MEMORY_PATH } from "./memory.js"; // long-term project memory + auto-extract
 import { loadSkills, buildSkillTool, findSkill, skillInstructions, type Skill } from "./skills.js"; // Markdown-as-plugin skills
 import { initCostMeter, DEFAULT_PRICING } from "./cost.js"; // token & cost accounting for /cost
 
@@ -415,8 +415,14 @@ async function main() {
         console.log(chalk.dim(statsReport())); // local counters, busiest first
         return true;
       case "/memory": {
-        const facts = readMemory(); // the durable facts the agent carries across sessions
-        console.log(chalk.dim(facts.length ? `long-term memory (${MEMORY_PATH}):\n${facts.map((f) => `  - ${f}`).join("\n")}` : "(no long-term memory yet — the agent saves facts with the remember tool)"));
+        const entries = readMemoryTyped(); // the durable, typed facts carried across sessions
+        console.log(
+          chalk.dim(
+            entries.length
+              ? `long-term memory (${MEMORY_PATH}):\n${entries.map((e) => `  [${e.type}] ${e.fact}`).join("\n")}`
+              : `(no long-term memory yet — the model saves facts with the remember tool${CONFIG.memory.autoExtract ? "" : "; turn on settings.memory.autoExtract to capture them automatically"})`,
+          ),
+        );
         return true;
       }
       case "/cost":
@@ -577,6 +583,18 @@ async function main() {
     });
     running = false; // back at the prompt — Ctrl+C means "exit" again
     saveSession(sessionId, CONFIG.model, messages); // snapshot after every turn — crash-safe by construction
+
+    // Auto-extract memories (opt-in: settings.memory.autoExtract). A cheap pass
+    // that saves durable facts — especially user corrections — so memory
+    // captures itself instead of relying on the model to call `remember`.
+    if (CONFIG.memory.autoExtract && result.reason === TerminateReason.Done) {
+      try {
+        const got = await extractMemories(client, CONFIG.subAgentModel || CONFIG.model, messages);
+        if (got.length) console.log(chalk.dim(`(remembered ${got.length}: ${got.map((g) => g.fact.slice(0, 50)).join("; ")})`));
+      } catch {
+        /* memory extraction must never break the session */
+      }
+    }
 
     // Done already streamed its answer to the screen; everything else gets a
     // one-line human explanation. The session continues either way — except a

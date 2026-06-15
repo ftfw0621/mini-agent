@@ -68,6 +68,9 @@ interface SettingsFile {
     cachedInputPerM?: number; // $ per 1M cached input tokens
     outputPerM?: number; // $ per 1M output tokens
   };
+  memory?: {
+    autoExtract?: boolean; // after each turn, a cheap call extracts durable memories (off by default — it costs an extra call)
+  };
 }
 
 // Read one settings file. A broken settings file is a HARD error, not a warning:
@@ -143,6 +146,11 @@ export const CONFIG = {
     inputPerM?: number;
     cachedInputPerM?: number;
     outputPerM?: number;
+  },
+  // Long-term memory: auto-extract durable facts after each turn. Off by default
+  // — it costs an extra (cheap) model call per turn. Project overrides global.
+  memory: {
+    autoExtract: projectSettings.memory?.autoExtract ?? globalSettings.memory?.autoExtract ?? false,
   },
 };
 
