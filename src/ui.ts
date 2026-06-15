@@ -77,10 +77,8 @@ export function spinnerText(word: string, elapsedSec: number, subAgent: boolean,
 }
 
 // ---- the input area ---------------------------------------------------------
-// Like Claude Code: a thin horizontal rule as a separator above the prompt, then
-// a bare "❯" on the next line. No left bar, no bottom rule — the bottom rule used
-// to print only after you hit Enter, which looked like the box "closing late".
-// A single top rule cleanly divides the previous output from where you type.
+// Like Claude Code: two horizontal rules (top + bottom) with the user's input
+// between them. Long input is truncated to keep the box compact.
 function frameWidth(): number {
   return Math.max(8, Math.min(process.stdout.columns || 80, 100) - 1); // fit the terminal, but cap the rule
 }
@@ -90,6 +88,26 @@ export function inputRule(): string {
 // The prompt under the rule. Plan mode (Day 20) is marked so you know writes are blocked.
 export function framedPrompt(planMode: boolean): string {
   return planMode ? chalk.yellow.bold("⏸ plan ❯ ") : chalk.cyan.bold("❯ ");
+}
+
+// After the user hits Enter, redraw their input between two rules.
+// Long lines are replaced with a short placeholder so the output stays readable.
+const MAX_INPUT_DISPLAY = 76; // before truncation
+export function frameUserInput(line: string, planMode: boolean): string {
+  const prefix = planMode ? "⏸ plan ❯ " : "❯ ";
+  const prefixLen = planMode ? 10 : 2; // approximate visual width of the prefix
+  const available = frameWidth() - 2 - prefixLen; // box padding + prefix
+  let display = line;
+  if (display.length > available) {
+    display = display.slice(0, available - 3) + "..."; // truncate with ellipsis
+  }
+  const rule = chalk.dim("─".repeat(frameWidth()));
+  const promptStyle = planMode ? chalk.yellow.bold : chalk.cyan.bold;
+  return (
+    chalk.dim(`\x1b[2K\r┌${"─".repeat(frameWidth())}┐\n`) +
+    chalk.dim("│ ") + promptStyle(prefix) + chalk.reset(display) + chalk.dim(" │\n") +
+    chalk.dim(`└${"─".repeat(frameWidth())}┘`)
+  );
 }
 
 // ---- the selection menu -----------------------------------------------------

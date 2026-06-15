@@ -12,8 +12,8 @@ import { runHooks } from "./hooks.js"; // user lifecycle hooks (PreToolUse / Pos
 import type { Judge } from "./judge.js"; // optional LLM permission classifier
 import { recordUsage } from "./cost.js"; // meter token usage from the stream
 import { mark, thinkingWord, spinnerText } from "./ui.js"; // centralized terminal styling (markers, spinner)
+import { printToolSummary } from "./tui.js"; // collapsible tool output
 
-export const MAX_ROUNDS = 15; // model→tool round cap per query
 export const MAX_RETRIES = 10; // total failed API calls per query, across all rounds
 export const MAX_RATE_LIMIT_RETRIES = 3; // 429s get their own, much smaller budget
 export const MAX_CONSECUTIVE_FAILURES = 3; // the circuit breaker
@@ -26,7 +26,6 @@ const STALL_WARN_MS = 30_000; // events arriving slowly → log only. Slow is no
 // user-facing explanation and exit code, instead of a generic "error".
 export enum TerminateReason {
   Done = "done", // the model produced a final answer
-  RoundCap = "round_cap", // hit MAX_ROUNDS
   CircuitBreaker = "circuit_breaker", // N consecutive failures — stop burning money
   RetryBudgetExhausted = "retry_budget_exhausted", // too many failures overall
   RateLimitBudgetExhausted = "rate_limit_budget_exhausted", // the server keeps saying 429
@@ -274,7 +273,12 @@ async function streamModelCall(
 // Promise.all batch; calls that can prompt must be awaited one at a time.
 async function runOneCall(call: AssembledCall, opts: LoopOptions): Promise<{ id: string; content: string }> {
   const indent = opts.subAgent ? chalk.blue("  ⎿ ") : ""; // sub-agent activity is visually nested
-  if (!opts.quiet) console.log(indent + mark.tool(call.name, call.args.slice(0, 120))); // show what the model wants to do
+  if (!opts.quiet) {
+    // Compact one-line summary — long args are hidden behind Tab.
+    const summary = indent + mark.tool(call.name, call.args.length > 60 ? call.args.slice(0, 57) + "..." : call.args);
+    const full = `tool: ${call.name}\nargs: ${call.args}`;
+    printToolSummary(summary, full);
+  }
 
   // The permission gate sits between the model's intent and execution.
   const v = checkPermission(call.name, call.args);
@@ -415,7 +419,7 @@ export async function runLoop(
   const attempts = { total: 0, rateLimited: 0, consecutive: 0 };
   const compaction = { count: 0, failures: 0 }; // compaction score card for this query
 
-  for (let round = 1; round <= MAX_ROUNDS; round++) {
+  for (let round = 1; ; round++) {
     // One round = one successful model call + its tool results.
     // The inner loop retries the model call until it succeeds or a budget dies.
     while (true) {
@@ -505,7 +509,7 @@ export async function runLoop(
             emit("agent_hook_block", { event: "Stop" }); // the agent was sent back to work
             if (!opts.quiet) console.log(chalk.yellow(`\n↩ Stop hook: not done yet — ${stop.feedback.slice(0, 120)}`)); // show why
             messages.push({ role: "user", content: `[Stop hook] You are not finished: ${stop.feedback}` }); // inject the instruction
-            break; // exit the inner while → advance the round counter (so a stubborn Stop hook is still bounded by MAX_ROUNDS)
+            break; // exit the inner while → advance the round counter
           }
         }
         return { reason: TerminateReason.Done, finalText: out.content }; // no tool calls = final answer (already streamed to the screen)
@@ -534,5 +538,5 @@ export async function runLoop(
       break; // round complete, move to the next one
     }
   }
-  return { reason: TerminateReason.RoundCap }; // ran out of rounds before a final answer
+  // loop is unbounded — other safeguards (circuit breaker, retry budget, compaction guard) still apply
 }

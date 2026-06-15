@@ -3,8 +3,8 @@ import OpenAI from "openai"; // the API client
 import chalk from "chalk"; // terminal colors
 import readline from "node:readline/promises"; // promise-based terminal input
 import { createRequire } from "node:module"; // to read package.json for --version
-import { CONFIG, requireApiKey, PROJECT_SETTINGS_PATH, GLOBAL_SETTINGS_PATH } from "./config.js"; // provider-agnostic settings (.env loaded there)
-import { runLoop, TerminateReason, MAX_ROUNDS, MAX_RETRIES, type LoopResult } from "./loop.js"; // the state machine
+import { CONFIG, requireApiKey, saveGlobalSetting, PROJECT_SETTINGS_PATH, GLOBAL_SETTINGS_PATH } from "./config.js"; // provider-agnostic settings (.env loaded there)
+import { runLoop, TerminateReason, MAX_RETRIES, type LoopResult } from "./loop.js"; // the state machine
 import { buildSystemMessage } from "./prompt.js"; // the constitution + optional AGENT.md project memory
 import { forgetFilesExcept, registerExternalTool } from "./tools.js"; // file-state reset + tool registration
 import { compactHistory, estimateHistoryTokens, COMPACT_AT } from "./context.js"; // for the manual /compact command
@@ -18,7 +18,8 @@ import { undoLast, clearUndo, sessionChanges } from "./undo.js"; // /undo + /dif
 import { renderDiff } from "./diff.js"; // show what /undo put back / what /diff changed, reusing the Day 21 diff renderer
 import path from "node:path"; // shorten paths for the /diff summary
 import { expandMentions } from "./mentions.js"; // @file mentions: pull referenced files into context (secret files refused)
-import { banner, framedPrompt, inputRule, formatModelChoices } from "./ui.js"; // the welcome box, separator rule, prompt, model labels
+import { banner, framedPrompt, formatModelChoices } from "./ui.js"; // the welcome box, prompt, model labels
+import { drawBottomPrompt, frameInputAndRestore, toggleLastCollapsed, cleanup as tuiCleanup } from "./tui.js"; // terminal UI: bottom prompt, collapsible output
 import { promptSelect, promptForm } from "./menu.js"; // arrow-key approval menu + multi-question form
 import { rememberTool, readMemory, MEMORY_PATH } from "./memory.js"; // long-term project memory
 import { initCostMeter, DEFAULT_PRICING } from "./cost.js"; // token & cost accounting for /cost
@@ -47,7 +48,6 @@ In a session, type /help for the in-session commands.`;
 
 // What we tell the user for every way a query can end. No raw stack traces.
 const EXIT_NOTES: Record<Exclude<TerminateReason, TerminateReason.Done>, string> = {
-  [TerminateReason.RoundCap]: `Hit the ${MAX_ROUNDS}-round cap. The task may be too big for one go — try splitting it.`,
   [TerminateReason.CircuitBreaker]: "3 API failures in a row — stopping here instead of burning money.",
   [TerminateReason.RetryBudgetExhausted]: `${MAX_RETRIES} failed API calls in this query — giving up. Check your network and try again.`,
   [TerminateReason.RateLimitBudgetExhausted]: "The provider keeps rate-limiting us. Wait a minute, then try again.",
@@ -305,6 +305,7 @@ async function main() {
     if (arg) {
       const prev = CONFIG.model;
       CONFIG.model = arg; // any string — the API will error on an unknown one, and the error layer reports it
+      saveGlobalSetting("model", arg); // persists to global settings so the next session defaults to this
       console.log(chalk.dim(`(model: ${prev} → ${arg})`));
       return;
     }
@@ -329,6 +330,7 @@ async function main() {
     }
     const prev = CONFIG.model;
     CONFIG.model = models[choice];
+    saveGlobalSetting("model", models[choice]); // persists to global settings so the next session defaults to this
     console.log(chalk.dim(`(model: ${prev} → ${CONFIG.model})`));
   };
 
@@ -468,12 +470,25 @@ async function main() {
 
   // The session loop: ask → run → render → ask again. This is what makes it
   // a conversation instead of a one-shot command.
+
+  // Listen for Tab key on raw stdin — toggles expand/collapse of hidden tool output.
+  if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function") {
+    process.stdin.on("data", (buf: Buffer) => {
+      if (buf[0] === 0x09) { // Tab
+        if (!running) toggleLastCollapsed();
+      }
+    });
+  }
+
   while (true) {
-    // A separator rule, then the "❯" prompt on the next line (yellow "⏸ plan ❯"
-    // in plan mode) — clean, like Claude Code. Only in a TTY; piped input gets
-    // no decoration.
-    if (process.stdin.isTTY) console.log("\n" + inputRule());
-    const line = (await readUserLine(framedPrompt(isPlanMode()))).trim(); // next input, or "exit" on EOF
+    // Draw the separator + prompt at the bottom of the terminal. Only in a
+    // TTY; piped input gets no decoration.
+    if (process.stdin.isTTY) drawBottomPrompt();
+    const rawLine = (await readUserLine(framedPrompt(isPlanMode()))).trim(); // next input, or "exit" on EOF
+    const line = rawLine;
+    // Redraw the user's input as a framed box in the output area, then restore
+    // the bottom prompt. Long lines are truncated to keep the output compact.
+    if (process.stdin.isTTY && line) frameInputAndRestore(line, isPlanMode());
     if (!line) continue; // empty line — just re-prompt
     if (line === "exit" || line === "quit") break; // explicit goodbye
     if (await handleCommand(line)) continue; // slash commands never reach the model
@@ -517,6 +532,7 @@ async function main() {
 
   emit("agent_session_end"); // close the books
   rl.close(); // release stdin
+  tuiCleanup(); // restore terminal
   console.log(chalk.dim("bye.")); // a clean goodbye
 }
 

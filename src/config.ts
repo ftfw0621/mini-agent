@@ -146,6 +146,18 @@ export const CONFIG = {
   },
 };
 
+// Persist a single key to the global settings file, preserving all other keys.
+// Used by /model to remember the user's last choice across sessions.
+export function saveGlobalSetting(key: string, value: unknown): void {
+  const dir = path.dirname(GLOBAL_SETTINGS_PATH);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const current = fs.existsSync(GLOBAL_SETTINGS_PATH)
+    ? JSON.parse(fs.readFileSync(GLOBAL_SETTINGS_PATH, "utf8"))
+    : {};
+  current[key] = value;
+  fs.writeFileSync(GLOBAL_SETTINGS_PATH, JSON.stringify(current, null, 2) + "\n");
+}
+
 // No key, no point: fail with instructions instead of a stack trace later.
 export function requireApiKey(): void {
   if (CONFIG.apiKey) return; // all good
