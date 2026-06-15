@@ -22,6 +22,7 @@ import { banner, framedPrompt, formatModelChoices, statusLine, inputRule } from 
 import { gitBranch, toggleLastCollapsed, cleanup as tuiCleanup } from "./tui.js"; // git branch for the status line + collapsible output
 import { promptSelect, promptForm } from "./menu.js"; // arrow-key approval menu + multi-question form
 import { rememberTool, readMemory, MEMORY_PATH } from "./memory.js"; // long-term project memory
+import { loadSkills, buildSkillTool, findSkill, skillInstructions, type Skill } from "./skills.js"; // Markdown-as-plugin skills
 import { initCostMeter, DEFAULT_PRICING } from "./cost.js"; // token & cost accounting for /cost
 
 // package.json sits one level above both src/ (dev) and dist/ (built) — same path either way.
@@ -70,6 +71,8 @@ const SESSION_HELP = `commands:
   /undo      revert the most recent file write (write_file / edit_file) this session
   /diff      show every file changed this session, as a diff from where it started
   /resume    list recent sessions in this project and continue one of them
+  /skills    list the reusable skills available in this project
+  /skill <name>  run a skill yourself (works even for user-only skills)
   exit       leave (Ctrl+C at the prompt does the same)`;
 
 // Injected when the user turns plan mode on, so the model knows the rules of the
@@ -144,6 +147,13 @@ async function main() {
   registerExternalTool(rememberTool);
   const memCount = readMemory().length;
   if (memCount) console.log(chalk.dim(`(long-term memory: ${memCount} facts loaded)`));
+
+  // Skills: reusable Markdown procedures. The model-invocable ones are exposed
+  // through a single `skill` tool whose description lists them (progressive
+  // disclosure); user-only skills are reachable via /skill <name>.
+  const skills: Skill[] = loadSkills();
+  if (skills.some((s) => !s.disableModelInvocation)) registerExternalTool(buildSkillTool(skills));
+  if (skills.length) console.log(chalk.dim(`(skills: ${skills.length} loaded — ${skills.map((s) => s.name).join(", ")})`));
 
   // Token/cost meter for this session. Prices come from settings, falling back
   // to the defaults; the loop records usage into it from every stream.
@@ -354,7 +364,43 @@ async function main() {
       await handleModelCommand(line.slice("/model".length).trim());
       return true;
     }
+    // /skill <name> runs a skill on the user's behalf — inject its instructions
+    // as a turn so the model follows them. Works for user-only skills too.
+    if (line === "/skill" || line.startsWith("/skill ")) {
+      const name = line.slice("/skill".length).trim();
+      if (!name) {
+        console.log(chalk.dim(skills.length ? `usage: /skill <name> — available: ${skills.map((s) => s.name).join(", ")}` : "(no skills in this project — add one at .mini-agent/skills/<name>/SKILL.md)"));
+        return true;
+      }
+      const s = findSkill(skills, name);
+      if (!s) {
+        console.log(chalk.yellow(`(no skill named "${name}")`));
+        return true;
+      }
+      messages.push({ role: "user", content: `Run the "${s.name}" skill.\n\n${skillInstructions(s)}` });
+      console.log(chalk.dim(`(running skill: ${s.name})`));
+      running = true;
+      interrupted = false;
+      controller = new AbortController();
+      const r = await runLoop(messages, { client, model: CONFIG.model, signal: controller.signal, isInterrupted: () => interrupted, confirm, askUser, subAgentModel: CONFIG.subAgentModel, judge });
+      running = false;
+      saveSession(sessionId, CONFIG.model, messages);
+      if (r.reason !== TerminateReason.Done) console.log(chalk.yellow(`\n⚠️ ${EXIT_NOTES[r.reason]}`));
+      return true;
+    }
     switch (line) {
+      case "/skills": {
+        if (!skills.length) {
+          console.log(chalk.dim("(no skills — add one at .mini-agent/skills/<name>/SKILL.md or ~/.config/mini-agent/skills/)"));
+          return true;
+        }
+        console.log(chalk.dim(`skills in this project:`));
+        for (const s of skills) {
+          const who = s.disableModelInvocation ? chalk.yellow("user-only") : chalk.green("model+user");
+          console.log(chalk.dim(`  ${s.name} [${who}${chalk.dim("]")} — ${(s.whenToUse || s.description).slice(0, 70)}`));
+        }
+        return true;
+      }
       case "/help":
         console.log(chalk.dim(SESSION_HELP)); // the command reference
         return true;
