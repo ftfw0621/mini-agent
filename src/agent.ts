@@ -18,7 +18,7 @@ import { undoLast, clearUndo, sessionChanges } from "./undo.js"; // /undo + /dif
 import { renderDiff } from "./diff.js"; // show what /undo put back / what /diff changed, reusing the Day 21 diff renderer
 import path from "node:path"; // shorten paths for the /diff summary
 import { expandMentions } from "./mentions.js"; // @file mentions: pull referenced files into context (secret files refused)
-import { banner, framedPrompt, inputRule } from "./ui.js"; // the welcome box, separator rule, prompt
+import { banner, framedPrompt, inputRule, formatModelChoices } from "./ui.js"; // the welcome box, separator rule, prompt, model labels
 import { promptSelect, promptForm } from "./menu.js"; // arrow-key approval menu + multi-question form
 import { rememberTool, readMemory, MEMORY_PATH } from "./memory.js"; // long-term project memory
 import { initCostMeter, DEFAULT_PRICING } from "./cost.js"; // token & cost accounting for /cost
@@ -62,7 +62,7 @@ const SESSION_HELP = `commands:
   /help      this text
   /clear     wipe the conversation (and the file read-state) — fresh start
   /compact   compact the history into a summary right now (happens automatically near the limit)
-  /model     show which model and endpoint this session is talking to
+  /model     show the current model, or switch: "/model" to pick from a list, "/model <name>" to set directly
   /stats     event counts for this session (local telemetry — nothing leaves this machine)
   /memory    show the durable facts the agent remembers about this project
   /cost      tokens, cache hit rate and estimated spend this session (local)
@@ -285,8 +285,61 @@ async function main() {
     return promptForm(rl, questions);
   };
 
+  // Ask the endpoint what models it serves (the OpenAI-compatible /models API).
+  // Empty list on any failure — not every endpoint implements it, and a failed
+  // listing should never break the command.
+  const listModels = async (): Promise<string[]> => {
+    try {
+      const page = await client.models.list();
+      const ids = (page.data ?? []).map((m) => m.id).filter(Boolean);
+      return [...new Set(ids)].sort();
+    } catch {
+      return [];
+    }
+  };
+
+  // /model — show the current model, or switch. `/model <name>` sets it directly;
+  // bare `/model` lists the endpoint's models and lets you pick one (Day 29 menu).
+  // The switch takes effect next turn: the loop reads CONFIG.model each turn.
+  const handleModelCommand = async (arg: string): Promise<void> => {
+    if (arg) {
+      const prev = CONFIG.model;
+      CONFIG.model = arg; // any string — the API will error on an unknown one, and the error layer reports it
+      console.log(chalk.dim(`(model: ${prev} → ${arg})`));
+      return;
+    }
+    console.log(
+      chalk.dim(
+        `model: ${CONFIG.model}\n` +
+          (CONFIG.subAgentModel ? `sub-agent model: ${CONFIG.subAgentModel} (delegated task work)\n` : "") +
+          `endpoint: ${CONFIG.baseURL}\ncontext window: ${CONFIG.contextWindow} tokens (compaction at ~${COMPACT_AT})`,
+      ),
+    );
+    if (!process.stdin.isTTY) return; // no picker without a TTY — switch with: /model <name>
+    const models = await listModels();
+    if (!models.length) {
+      console.log(chalk.dim("(couldn't list models from this endpoint — switch with: /model <name>)"));
+      return;
+    }
+    console.log(chalk.dim("switch model:"));
+    const choice = await promptSelect(rl, formatModelChoices(models, CONFIG.model));
+    if (choice < 0 || models[choice] === CONFIG.model) {
+      console.log(chalk.dim("(model unchanged)"));
+      return;
+    }
+    const prev = CONFIG.model;
+    CONFIG.model = models[choice];
+    console.log(chalk.dim(`(model: ${prev} → ${CONFIG.model})`));
+  };
+
   // Handle a /slash command. Returns true if the line was a command.
   const handleCommand = async (line: string): Promise<boolean> => {
+    // /model takes an optional argument (/model <name>), so it can't be a plain
+    // switch case — handle it before the exact-match switch.
+    if (line === "/model" || line.startsWith("/model ")) {
+      await handleModelCommand(line.slice("/model".length).trim());
+      return true;
+    }
     switch (line) {
       case "/help":
         console.log(chalk.dim(SESSION_HELP)); // the command reference
@@ -391,15 +444,6 @@ async function main() {
           messages.push({ role: "user", content: PLAN_MODE_NOTICE });
           console.log(chalk.dim("(plan mode ON — read-only research; the agent will present a plan for you to approve)"));
         }
-        return true;
-      case "/model":
-        console.log(
-          chalk.dim(
-            `model: ${CONFIG.model}\n` +
-              (CONFIG.subAgentModel ? `sub-agent model: ${CONFIG.subAgentModel} (delegated task work)\n` : "") +
-              `endpoint: ${CONFIG.baseURL}\ncontext window: ${CONFIG.contextWindow} tokens (compaction at ~${COMPACT_AT})`,
-          ),
-        ); // where this session points
         return true;
       case "/compact": {
         if (messages.length <= 1) {

@@ -106,3 +106,9 @@ export function renderMenu(options: string[], selected: number): string {
 
 // The hint line under a menu — how to drive it.
 export const MENU_HINT = chalk.dim("↑↓ to move · Enter to select · Esc to cancel");
+
+// Label a model list for the picker, marking the one in use. Pure, so the "which
+// is current" logic is testable without hitting the network for the list.
+export function formatModelChoices(models: string[], current: string): string[] {
+  return models.map((m) => (m === current ? `${m}  (current)` : m));
+}
