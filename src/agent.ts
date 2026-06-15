@@ -535,11 +535,24 @@ async function main() {
   // The session loop: ask → run → render → ask again. This is what makes it
   // a conversation instead of a one-shot command.
 
-  // Listen for Tab key on raw stdin — toggles expand/collapse of hidden tool output.
+  // Raw-stdin key handling that applies while a task is running (readline isn't
+  // reading a line then, but keystrokes still arrive as data):
+  //   Esc → interrupt the current operation and return to the prompt (like the
+  //         first Ctrl+C, but without the "press again to force-quit" escalation).
+  //   Tab → toggle expand/collapse of the last tool block (only at the prompt).
+  // A LONE Esc is one byte (0x1b); arrow keys etc. are multi-byte escape
+  // sequences starting with 0x1b — the length check tells them apart.
   if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function") {
     process.stdin.on("data", (buf: Buffer) => {
-      if (buf[0] === 0x09) { // Tab
-        if (!running) toggleLastCollapsed();
+      if (buf.length === 1 && buf[0] === 0x1b) {
+        // Esc: stop the current operation, keep the session alive and typeable.
+        if (running && !interrupted) {
+          interrupted = true; // the loop polls this between steps
+          controller.abort(); // cancel the in-flight API request
+          console.log(chalk.yellow("\n(esc — interrupted; back at the prompt)"));
+        }
+      } else if (buf.length === 1 && buf[0] === 0x09) {
+        if (!running) toggleLastCollapsed(); // Tab at the prompt
       }
     });
   }

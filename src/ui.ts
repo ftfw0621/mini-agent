@@ -31,7 +31,7 @@ export function banner(version: string, model: string, host: string): string {
     { text: `mini-agent  v${version}`, style: chalk.bold.cyan },
     { text: `${model}  ·  ${host}`, style: chalk.dim },
     { text: "" },
-    { text: "/help  commands     @file  attach a file     Ctrl+C  interrupt", style: chalk.dim },
+    { text: "/help  commands     @file  attach     Esc  interrupt     Ctrl+C  quit", style: chalk.dim },
   ]);
 }
 
