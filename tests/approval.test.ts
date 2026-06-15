@@ -54,6 +54,19 @@ const key = (input: NodeJS.ReadStream, k: object) => (input as unknown as EventE
   notTty.setRawMode = () => {};
   check("a non-TTY stream returns -1 (caller falls back to typing)", (await promptSelect(rlStub, ["Yes", "No"], notTty as unknown as NodeJS.ReadStream)) === -1);
 }
+{
+  // Regression: the session readline keeps stdin raw; the menu must RESTORE that
+  // (not force false), or readline closes and the REPL exits on the next prompt.
+  const input = new EventEmitter() as unknown as { isTTY: boolean; isRaw: boolean; setRawMode: (b: boolean) => void };
+  input.isTTY = true;
+  input.isRaw = true; // as during a live terminal readline session
+  const rawCalls: boolean[] = [];
+  input.setRawMode = (b: boolean) => rawCalls.push(b);
+  const p = promptSelect(rlStub, ["Yes", "No"], input as unknown as NodeJS.ReadStream);
+  (input as unknown as EventEmitter).emit("keypress", "", { name: "return" });
+  await p;
+  check("menu restores raw mode to its prior value (true), not false", rawCalls[rawCalls.length - 1] === true);
+}
 
 // ---- "don't ask again for run_bash" upgrades ask→allow, but deny still stands -----------
 const ask = JSON.stringify({ command: "make build" }); // unrecognized → ask

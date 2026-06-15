@@ -23,6 +23,7 @@ export function promptSelect(
 
     let selected = 0;
     let done = false;
+    const wasRaw = input.isRaw === true; // the session's readline keeps stdin raw — restore THIS, don't force false
 
     // Redraw the menu in place: move the cursor back up over the previous
     // render (options + the one footer line), clear downward, reprint. The
@@ -38,7 +39,7 @@ export function promptSelect(
       done = true;
       input.off("keypress", onKey); // stop listening
       try {
-        input.setRawMode(false); // hand the terminal back
+        input.setRawMode(wasRaw); // restore the prior mode — forcing false breaks the live readline → it closes → the REPL exits
       } catch {
         /* not all streams support it; ignore */
       }
@@ -97,6 +98,7 @@ export function promptForm(
 
     let state = initFormState(questions);
     let done = false;
+    const wasRaw = input.isRaw === true; // restore this on exit, not false (see promptSelect)
     const lineCount = renderForm(questions, state).split("\n").length; // constant for these questions
 
     const draw = (first: boolean) => {
@@ -109,7 +111,7 @@ export function promptForm(
       done = true;
       input.off("keypress", onKey);
       try {
-        input.setRawMode(false);
+        input.setRawMode(wasRaw); // restore prior mode; forcing false breaks the live readline → REPL exits
       } catch {
         /* ignore */
       }
