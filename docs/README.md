@@ -41,6 +41,7 @@
 | [Ch24](ch24-mcp-http.md) | 同一个协议,两根管子:远程 MCP(HTTP/SSE 传输) | `day24` |
 | [Ch25](ch25-session-diff.md) | 这趟会话到底改了啥:/diff 会话改动总览 | `day25` |
 | [Ch26](ch26-file-mentions.md) | 用 @ 把文件拽进对话:@file 引用(密钥文件拒绝) | `day26` |
+| [Ch27](ch27-architecture.md) | 进阶篇收尾:一张图看懂这台 agent(架构全景综述) | — |
 
 ## 怎么学
 
