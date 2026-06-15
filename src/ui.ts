@@ -73,3 +73,39 @@ export function spinnerText(word: string, elapsedSec: number, subAgent: boolean)
   const head = subAgent ? "sub-agent" : word;
   return `${head}… ${chalk.dim(`(${elapsedSec}s · Ctrl+C to interrupt)`)}`;
 }
+
+// ---- the input frame --------------------------------------------------------
+// A left-barred, top/bottom-ruled frame around the prompt, so the input area
+// reads as "type here" instead of a bare ">". Open on the right — a fully closed
+// box would need a raw-mode line editor to keep the right border aligned as text
+// grows; this stays robust to any input length and any wrapping.
+function frameWidth(): number {
+  return Math.max(8, Math.min(process.stdout.columns || 80, 100) - 1); // fit the terminal, but cap the rule
+}
+export function inputFrameTop(): string {
+  return chalk.dim(`╭${"─".repeat(frameWidth())}`);
+}
+export function inputFrameBottom(): string {
+  return chalk.dim(`╰${"─".repeat(frameWidth())}`);
+}
+// The prompt that sits on the framed line. Plan mode (Day 20) is marked.
+export function framedPrompt(planMode: boolean): string {
+  return chalk.dim("│ ") + (planMode ? chalk.yellow.bold("⏸ plan ❯ ") : chalk.cyan.bold("❯ "));
+}
+
+// ---- the selection menu -----------------------------------------------------
+// Render a numbered list of options with one highlighted. The interactive part
+// (raw-mode arrow keys) lives in menu.ts; this is just the pure drawing, so it's
+// testable. Selecting beats typing: an approval is one keystroke, not "type y/N".
+// Numbered so the user can also see "option 2" at a glance, like Claude Code.
+export function renderMenu(options: string[], selected: number): string {
+  return options
+    .map((o, i) => {
+      const label = `${i + 1}. ${o}`;
+      return i === selected ? chalk.cyan.bold(`❯ ${label}`) : chalk.dim(`  ${label}`);
+    })
+    .join("\n");
+}
+
+// The hint line under a menu — how to drive it.
+export const MENU_HINT = chalk.dim("↑↓ to move · Enter to select · Esc to cancel");

@@ -178,8 +178,16 @@ function basePermission(toolName: string, argsJson: string): Verdict {
       }
       return { decision: "ask", reason: "writes to your filesystem", summary: p }; // normal writes need a human yes
     }
-    case "run_bash":
-      return checkBash(args.command ?? ""); // bash gets input-aware analysis
+    case "run_bash": {
+      const verdict = checkBash(args.command ?? ""); // bash gets input-aware analysis
+      // "Don't ask again for run_bash this session" (chosen in the approval menu)
+      // upgrades an ASK to ALLOW — but a hard DENY (rm -rf /, .git, .env…) always
+      // stands. Convenience never overrides the no-fly rules.
+      if (verdict.decision === "ask" && CONFIG.permissions.allow.includes("tool:run_bash")) {
+        return { decision: "allow", reason: "bash pre-approved for this session", summary: verdict.summary };
+      }
+      return verdict;
+    }
     case "exit_plan_mode": {
       // Outside plan mode this tool does nothing — let it through silently. In
       // plan mode it is the approval gate: ask the human, showing the plan, and

@@ -18,7 +18,8 @@ import { undoLast, clearUndo, sessionChanges } from "./undo.js"; // /undo + /dif
 import { renderDiff } from "./diff.js"; // show what /undo put back / what /diff changed, reusing the Day 21 diff renderer
 import path from "node:path"; // shorten paths for the /diff summary
 import { expandMentions } from "./mentions.js"; // @file mentions: pull referenced files into context (secret files refused)
-import { banner, promptString } from "./ui.js"; // the welcome box + the styled prompt
+import { banner, framedPrompt, inputFrameTop, inputFrameBottom } from "./ui.js"; // the welcome box, framed prompt
+import { promptSelect } from "./menu.js"; // arrow-key approval menu
 import { rememberTool, readMemory, MEMORY_PATH } from "./memory.js"; // long-term project memory
 import { initCostMeter, DEFAULT_PRICING } from "./cost.js"; // token & cost accounting for /cost
 
@@ -253,8 +254,8 @@ async function main() {
   // Fail closed: in a non-interactive session nobody can say yes, so the
   // answer is no. MINI_AGENT_AUTO_APPROVE=1 bypasses the QUESTION, but hard
   // denies were already enforced in permissions.ts before we get here.
-  const confirm = async (question: string): Promise<boolean> => {
-    console.log(chalk.yellow(`\n⚠️ approval needed — ${question}`)); // always show what is being asked
+  const confirm = async (question: string, toolName?: string): Promise<boolean> => {
+    console.log(chalk.yellow(`\n⚠ approval needed — ${question}`)); // always show what is being asked
     if (process.env.MINI_AGENT_AUTO_APPROVE === "1") {
       console.log(chalk.dim("  auto-approved (MINI_AGENT_AUTO_APPROVE=1)")); // bypass mode — say so out loud
       return true; // approve without asking
@@ -263,8 +264,17 @@ async function main() {
       console.log(chalk.dim("  non-interactive session — denied by default (fail closed)")); // nobody can answer — refuse
       return false; // fail closed
     }
-    const answer = await readUserLine("  Allow? [y/N] "); // wait for the human (shares the line queue)
-    return /^y(es)?$/i.test(answer.trim()); // anything but y/yes means no
+    // Selecting beats typing: ↑/↓ + Enter instead of "type y/N". The middle
+    // option lets the user stop being asked about this tool for the session.
+    const allowLabel = toolName ? `Yes, and don't ask again for ${toolName} this session` : "Yes, and don't ask again this session";
+    const choice = await promptSelect(rl, ["Yes", allowLabel, "No — let me tell the agent what to do instead"]);
+    const approved = choice === 0 || choice === 1;
+    if (choice === 1 && toolName) {
+      CONFIG.permissions.allow.push(`tool:${toolName}`); // remember the grant for the rest of the session
+      console.log(chalk.dim(`  won't ask again for ${toolName} this session`));
+    }
+    console.log(approved ? chalk.green("  ✓ approved") : chalk.yellow("  ✗ declined"));
+    return approved;
   };
 
   // Handle a /slash command. Returns true if the line was a command.
@@ -407,9 +417,14 @@ async function main() {
   // The session loop: ask → run → render → ask again. This is what makes it
   // a conversation instead of a one-shot command.
   while (true) {
-    // The prompt shows the mode: a cyan "❯" normally, a yellow "⏸ plan ❯" while
-    // plan mode is on, so the user is never surprised that writes are blocked.
-    const line = (await readUserLine(promptString(isPlanMode()))).trim(); // next input, or "exit" on EOF
+    // The input frame: a top rule, the framed "❯" prompt (yellow "⏸ plan ❯" in
+    // plan mode), then a bottom rule once you submit — so the input area reads as
+    // "type here". Only in a TTY; piped input gets no decoration.
+    const tty = !!process.stdin.isTTY;
+    if (tty) console.log("\n" + inputFrameTop());
+    const raw = await readUserLine(framedPrompt(isPlanMode())); // next input, or "exit" on EOF
+    if (tty) console.log(inputFrameBottom());
+    const line = raw.trim();
     if (!line) continue; // empty line — just re-prompt
     if (line === "exit" || line === "quit") break; // explicit goodbye
     if (await handleCommand(line)) continue; // slash commands never reach the model

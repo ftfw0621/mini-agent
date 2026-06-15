@@ -49,7 +49,7 @@ export interface LoopOptions {
   model: string; // which model to call
   signal: AbortSignal; // aborts the in-flight API request on Ctrl+C
   isInterrupted: () => boolean; // polled between steps for a clean stop
-  confirm: (question: string) => Promise<boolean>; // ask the human; resolves false in non-interactive sessions
+  confirm: (question: string, toolName?: string) => Promise<boolean>; // ask the human; resolves false in non-interactive sessions. toolName lets "don't ask again" target the right tool
   quiet?: boolean; // suppress all narration (used by the eval harness)
   subAgent?: boolean; // this loop IS a sub-agent: no task tool, no text streaming, indented tool logs
   subAgentModel?: string; // model to run delegated sub-agents on; falls back to `model`
@@ -254,7 +254,7 @@ async function runOneCall(call: AssembledCall, opts: LoopOptions): Promise<{ id:
         if (!opts.quiet) console.log(mark.judge); // visible — the user can see the judge worked
       }
     }
-    const ok = autoAllowed || (await opts.confirm(`${call.name} (${v.reason}):\n   ${v.summary}`)); // judge-allowed, or pause and ask the human
+    const ok = autoAllowed || (await opts.confirm(`${call.name} (${v.reason}):\n   ${v.summary}`, call.name)); // judge-allowed, or pause and ask the human
     if (!ok) emit("agent_tool_declined", { tool: call.name }); // the human said no — that is signal
     if (!ok && !opts.quiet) console.log(mark.declined); // make the refusal visible
     content = ok
