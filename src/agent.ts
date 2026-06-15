@@ -558,16 +558,18 @@ async function main() {
   }
 
   while (true) {
-    // Before each prompt, a status line (model · 📁 dir · 🌿 branch · ctx% · $ · time)
-    // then a separator rule, then the "❯". Only in a TTY; piped input is clean.
-    if (process.stdin.isTTY) {
-      const ctxPct = Math.min(100, Math.round((estimateHistoryTokens(messages) / CONFIG.contextWindow) * 100));
-      console.log("\n" + statusLine(CONFIG.model, path.basename(process.cwd()), gitBranch(), ctxPct, costMeter.cost(), Date.now() - sessionStartedAt));
-      console.log(inputRule());
-    }
+    // The input area: a blank line + a separator rule, then the "❯". The status
+    // line (model · 📁 dir · 🌿 branch · ctx% · $ · time) goes UNDER the input —
+    // printed after you submit, so it sits as a thin footer above the answer
+    // rather than hovering awkwardly on top. Only in a TTY; piped input is clean.
+    if (process.stdin.isTTY) console.log("\n" + inputRule());
     const line = (await readUserLine(framedPrompt(isPlanMode()))).trim(); // next input, or "exit" on EOF
     if (!line) continue; // empty line — just re-prompt
     if (line === "exit" || line === "quit") break; // explicit goodbye
+    if (process.stdin.isTTY) {
+      const ctxPct = Math.min(100, Math.round((estimateHistoryTokens(messages) / CONFIG.contextWindow) * 100));
+      console.log(statusLine(CONFIG.model, path.basename(process.cwd()), gitBranch(), ctxPct, costMeter.cost(), Date.now() - sessionStartedAt)); // footer under what you just typed
+    }
     if (await handleCommand(line)) continue; // slash commands never reach the model
 
     // UserPromptSubmit hook: a chance to validate/inject before the model sees
