@@ -52,12 +52,10 @@ interface SettingsFile {
     allow?: string[]; // bash first-words (e.g. "cargo") or "tool:<name>" to skip asking
     deny?: string[]; // substrings of bash commands (e.g. "git push") or "tool:<name>" to hard-block
   };
-  hooks?: {
-    PreToolUse?: HookDef[]; // before a tool runs — exit 2 blocks it
-    PostToolUse?: HookDef[]; // after a tool ran — observational only
-    SessionStart?: HookDef[]; // when a session begins — stdout goes to the model
-    Stop?: HookDef[]; // when the agent wants to finish — exit 2 sends it back to work
-  };
+  // Hooks keyed by lifecycle event (PreToolUse, PostToolUse, SessionStart, Stop,
+  // UserPromptSubmit, SessionEnd, PreCompact, PostCompact, SubagentStart,
+  // SubagentStop, …). A plain record so new events need no schema change.
+  hooks?: Record<string, HookDef[]>;
   mcpServers?: Record<string, McpServerDef>; // external tool servers, keyed by name
   judge?: {
     enabled?: boolean; // run an LLM classifier on "ask" verdicts to auto-allow the clearly safe
@@ -126,13 +124,15 @@ export const CONFIG = {
     allow: [...(globalSettings.permissions?.allow ?? []), ...(projectSettings.permissions?.allow ?? [])],
     deny: [...(globalSettings.permissions?.deny ?? []), ...(projectSettings.permissions?.deny ?? [])],
   } as PermissionRules,
-  hooks: {
-    // Hook lists also concatenate: global hooks run first, then project hooks.
-    PreToolUse: [...(globalSettings.hooks?.PreToolUse ?? []), ...(projectSettings.hooks?.PreToolUse ?? [])],
-    PostToolUse: [...(globalSettings.hooks?.PostToolUse ?? []), ...(projectSettings.hooks?.PostToolUse ?? [])],
-    SessionStart: [...(globalSettings.hooks?.SessionStart ?? []), ...(projectSettings.hooks?.SessionStart ?? [])],
-    Stop: [...(globalSettings.hooks?.Stop ?? []), ...(projectSettings.hooks?.Stop ?? [])],
-  },
+  // Hooks for every event, merged across layers (global first, then project) by
+  // a generic union so adding a new event needs no edit here.
+  hooks: ((): Record<string, HookDef[]> => {
+    const merged: Record<string, HookDef[]> = {};
+    for (const src of [globalSettings.hooks, projectSettings.hooks]) {
+      for (const [event, defs] of Object.entries(src ?? {})) merged[event] = [...(merged[event] ?? []), ...(defs ?? [])];
+    }
+    return merged;
+  })(),
   // MCP servers: project entries override global ones with the same name.
   mcpServers: { ...(globalSettings.mcpServers ?? {}), ...(projectSettings.mcpServers ?? {}) } as Record<string, McpServerDef>,
   // LLM permission judge: off unless a settings file turns it on. Project wins.

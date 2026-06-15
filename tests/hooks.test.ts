@@ -1,9 +1,9 @@
-import { runHooks } from "../src/hooks.js"; // the unit under test
+import { runHooks, type HookEvent } from "../src/hooks.js"; // the unit under test
 import { CONFIG } from "../src/config.js"; // mutated to inject hooks (the test seam)
 import { check, finish } from "./helpers.js"; // assertions
 
 // Helper: set the hooks for one event, run them, return the outcome.
-async function withHooks(event: "PreToolUse" | "PostToolUse" | "SessionStart" | "Stop", defs: { match?: string; command: string; timeoutMs?: number }[], payload: Record<string, unknown> = {}) {
+async function withHooks(event: HookEvent, defs: { match?: string; command: string; timeoutMs?: number }[], payload: Record<string, unknown> = {}) {
   CONFIG.hooks[event] = defs; // inject
   const out = await runHooks(event, payload); // run
   CONFIG.hooks[event] = []; // clean up for the next case
@@ -46,5 +46,27 @@ check("hook timeout kills fast", Date.now() - t0 < 2000 && !slow.block, `${Date.
 // ---- multiple hooks: any exit 2 blocks, all stdout collected ---------------------------------
 const many = await withHooks("PreToolUse", [{ command: "echo first" }, { command: "echo second 1>&2; exit 2" }], { tool: "run_bash" });
 check("one blocker among several → block", many.block && many.feedback.includes("second"), JSON.stringify(many));
+
+// ---- PreToolUse can REWRITE the tool arguments (the §14.3 "side road") -----------------------
+const rewritten = await withHooks(
+  "PreToolUse",
+  [{ command: `echo '{"toolInput":{"command":"git commit -m x --trailer Co-Authored-By:bot"}}'` }],
+  { tool: "run_bash", args: '{"command":"git commit -m x"}' },
+);
+check("PreToolUse rewrite is captured", !!rewritten.rewrite && rewritten.rewrite.includes("--trailer"), String(rewritten.rewrite));
+check("a rewrite does not block", !rewritten.block);
+const plainOut = await withHooks("PreToolUse", [{ command: "echo just a log line" }], { tool: "run_bash" });
+check("non-control stdout is NOT treated as a rewrite", plainOut.rewrite === undefined);
+
+// ---- new events run through the same machinery ----------------------------------------------
+const ups = await withHooks("UserPromptSubmit", [{ command: "echo blocked 1>&2; exit 2" }], { prompt: "do the thing" });
+check("UserPromptSubmit can block (caller drops the prompt)", ups.block && ups.feedback.includes("blocked"));
+const sub = await withHooks("SubagentStart", [{ command: "echo noted" }], { description: "explore" });
+check("SubagentStart runs (observational)", !sub.block && sub.stdout.includes("noted"));
+
+// ---- SessionEnd gets a TINY timeout (must exit fast on Ctrl+C) -------------------------------
+const tEnd = Date.now();
+const slowEnd = await withHooks("SessionEnd", [{ command: "sleep 5" }]); // no explicit timeoutMs → uses the SessionEnd default (1.5s)
+check("SessionEnd is killed at ~1.5s, not 10s", Date.now() - tEnd < 2500 && !slowEnd.block, `${Date.now() - tEnd}ms`);
 
 finish();

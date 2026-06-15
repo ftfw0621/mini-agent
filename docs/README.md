@@ -1,6 +1,6 @@
 # 教程:跟着 AI,从零搓一个自己的 Claude Code
 
-> 34 天,一天一章(主线 10 天 + 进阶 24 天),约 4600 行 TypeScript,用 DeepSeek API 从零写出一个工业级的命令行 Agent。
+> 35 天,一天一章(主线 10 天 + 进阶 25 天),约 4750 行 TypeScript,用 DeepSeek API 从零写出一个工业级的命令行 Agent。
 > 全部教程免费开源。代码与教程一一对应:每章对应一个 git tag,`git checkout dayN` 就是第 N 天对应的完整代码。
 
 ## 目录
@@ -50,6 +50,7 @@
 | [Ch32](ch32-reasoning.md) | 让换模型看得见:推理流与当前模型(R1 的思考) | `day32` |
 | [Ch33](ch33-skills.md) | Markdown 即插件:Skill 系统(写个 .md 就是扩展) | `day33` |
 | [Ch34](ch34-memory-extract.md) | 记忆会自己长出来:分类型 + 自动提取 | `day34` |
+| [Ch35](ch35-hooks-deep.md) | Hook 长全:更多时机 + 改写工具参数 | `day35` |
 
 ## 怎么学
 

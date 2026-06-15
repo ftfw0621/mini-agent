@@ -123,6 +123,7 @@ async function runSubAgent(description: string, opts: LoopOptions): Promise<stri
   // Show the delegation, and the model when it differs from the orchestrator's —
   // the tiering should be visible, not a silent surprise on the bill.
   if (!opts.quiet) console.log(mark.subAgentStart(description.slice(0, 100), subModel !== opts.model ? subModel : "")); // annotate the tier only on a real switch
+  await runHooks("SubagentStart", { description: description.slice(0, 200), model: subModel }); // lifecycle hook (observational)
   const snapshot = snapshotFileState(); // what the sub-agent reads, the parent has NOT seen
   try {
     const subMessages: OpenAI.ChatCompletionMessageParam[] = [
@@ -138,6 +139,7 @@ async function runSubAgent(description: string, opts: LoopOptions): Promise<stri
     return `[sub-agent failed: ${result.reason}]`; // any non-Done ending, compressed to one line
   } finally {
     restoreFileState(snapshot); // the parent's read-before-edit state, exactly as it was
+    await runHooks("SubagentStop", { description: description.slice(0, 200) }); // lifecycle hook (observational)
     if (!opts.quiet) console.log(mark.subAgentDone); // close the bracket
   }
 }
@@ -340,6 +342,18 @@ async function runWithHooks(call: AssembledCall, opts: LoopOptions): Promise<str
     if (!opts.quiet) console.log(mark.hookBlock("PreToolUse")); // make it visible
     return `[hook] A PreToolUse hook blocked this call: ${pre.feedback}. Treat this as a hard boundary — adjust your approach.`;
   }
+  // A PreToolUse hook may REWRITE the arguments (e.g. add a commit trailer). The
+  // permission gate already ran on the original args; the rewrite only narrows or
+  // annotates, never escalates past a deny. Validate it's parseable, then use it.
+  if (pre.rewrite) {
+    try {
+      JSON.parse(pre.rewrite); // must be valid JSON args
+      if (!opts.quiet) console.log(chalk.dim(`  ⎿ PreToolUse hook rewrote the arguments`));
+      call = { ...call, args: pre.rewrite };
+    } catch {
+      /* malformed rewrite — ignore, run the original args */
+    }
+  }
 
   const result = await execute(call, opts); // the actual work
 
@@ -400,10 +414,12 @@ async function tryCompact(
   compaction: { count: number; failures: number }, // the shared score card
 ): Promise<boolean> {
   try {
+    if (!opts.subAgent) await runHooks("PreCompact", {}); // lifecycle hook (top-level only; hooks are the human's project policy)
     await compactHistory(messages, opts.client, opts.model, opts.signal); // do the actual work
     compaction.count++; // one more successful compaction this query
     compaction.failures = 0; // success resets the failure streak
     emit("agent_compaction_ok"); // worth counting — frequent compaction means tasks are too big
+    if (!opts.subAgent) await runHooks("PostCompact", {}); // observational
     return true;
   } catch {
     compaction.failures++; // failed — count it against the breaker

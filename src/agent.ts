@@ -557,6 +557,16 @@ async function main() {
     if (line === "exit" || line === "quit") break; // explicit goodbye
     if (await handleCommand(line)) continue; // slash commands never reach the model
 
+    // UserPromptSubmit hook: a chance to validate/inject before the model sees
+    // the prompt. exit 2 DROPS the prompt entirely (e.g. block a forbidden ask);
+    // stdout becomes extra context for this turn (e.g. inject the current ticket).
+    const submit = await runHooks("UserPromptSubmit", { prompt: line });
+    if (submit.block) {
+      console.log(chalk.yellow(`(prompt blocked by a UserPromptSubmit hook: ${submit.feedback.slice(0, 150)})`));
+      continue; // the prompt is erased — never reaches the model
+    }
+    const injected = submit.stdout ? `\n\n[context added by a UserPromptSubmit hook]\n${submit.stdout}` : "";
+
     // @file mentions: if the line references files (@src/loop.ts), attach their
     // content to the message so the model sees them directly. Secret files are
     // refused here, exactly as read_file would refuse them.
@@ -566,7 +576,7 @@ async function main() {
     if (attached.length) console.log(chalk.dim(`(attached ${attached.length} file${attached.length === 1 ? "" : "s"}: ${attached.join(", ")})`));
     if (refused.length) console.log(chalk.yellow(`(refused secret file${refused.length === 1 ? "" : "s"}: ${refused.join(", ")})`));
 
-    messages.push({ role: "user", content: augmented }); // the new turn (with any attached files) joins the shared history
+    messages.push({ role: "user", content: augmented + injected }); // the new turn (with any attached files + hook context) joins the shared history
     running = true; // Ctrl+C now means "interrupt the task"
     interrupted = false; // fresh interrupt state for this task
     controller = new AbortController(); // fresh abort signal for this task
@@ -606,6 +616,7 @@ async function main() {
     }
   }
 
+  await runHooks("SessionEnd", {}); // cleanup hooks (tiny 1.5s budget — the user may be leaving via Ctrl+C)
   emit("agent_session_end"); // close the books
   rl.close(); // release stdin
   tuiCleanup(); // restore terminal
