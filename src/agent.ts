@@ -18,6 +18,7 @@ import { undoLast, clearUndo, sessionChanges } from "./undo.js"; // /undo + /dif
 import { renderDiff } from "./diff.js"; // show what /undo put back / what /diff changed, reusing the Day 21 diff renderer
 import path from "node:path"; // shorten paths for the /diff summary
 import { expandMentions } from "./mentions.js"; // @file mentions: pull referenced files into context (secret files refused)
+import { banner, promptString } from "./ui.js"; // the welcome box + the styled prompt
 import { rememberTool, readMemory, MEMORY_PATH } from "./memory.js"; // long-term project memory
 import { initCostMeter, DEFAULT_PRICING } from "./cost.js"; // token & cost accounting for /cost
 
@@ -199,11 +200,8 @@ async function main() {
   }
 
   // ---- Interactive session (REPL) -------------------------------------------------
-  // The banner: who am I, which model and host am I on, and how to get help.
-  console.log(
-    chalk.bold(`mini-agent ${pkg.version}`) +
-      chalk.dim(` — ${CONFIG.model} @ ${new URL(CONFIG.baseURL).host} | /help for commands · Ctrl+C interrupts a running task`),
-  );
+  // The welcome box: who am I, which model and host am I on, and the basics.
+  console.log(banner(pkg.version, CONFIG.model, new URL(CONFIG.baseURL).host));
 
   // ONE readline interface for the whole session — the task prompt and the
   // permission prompts share it. Two interfaces on one stdin fight each other.
@@ -409,11 +407,9 @@ async function main() {
   // The session loop: ask → run → render → ask again. This is what makes it
   // a conversation instead of a one-shot command.
   while (true) {
-    // The prompt itself shows the mode: a plain green ">" normally, a cyan
-    // "(plan) >" while plan mode is on, so the user is never surprised that
-    // writes are being blocked.
-    const promptStr = isPlanMode() ? chalk.cyan("\n(plan) > ") : chalk.green("\n> ");
-    const line = (await readUserLine(promptStr)).trim(); // next input, or "exit" on EOF
+    // The prompt shows the mode: a cyan "❯" normally, a yellow "⏸ plan ❯" while
+    // plan mode is on, so the user is never surprised that writes are blocked.
+    const line = (await readUserLine(promptString(isPlanMode()))).trim(); // next input, or "exit" on EOF
     if (!line) continue; // empty line — just re-prompt
     if (line === "exit" || line === "quit") break; // explicit goodbye
     if (await handleCommand(line)) continue; // slash commands never reach the model

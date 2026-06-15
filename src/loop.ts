@@ -11,6 +11,7 @@ import { emit } from "./telemetry.js"; // local-only event log (no-op unless the
 import { runHooks } from "./hooks.js"; // user lifecycle hooks (PreToolUse / PostToolUse / Stop)
 import type { Judge } from "./judge.js"; // optional LLM permission classifier
 import { recordUsage } from "./cost.js"; // meter token usage from the stream
+import { mark, thinkingWord, spinnerText } from "./ui.js"; // centralized terminal styling (markers, spinner)
 
 export const MAX_ROUNDS = 15; // model→tool round cap per query
 export const MAX_RETRIES = 10; // total failed API calls per query, across all rounds
@@ -90,10 +91,7 @@ async function runSubAgent(description: string, opts: LoopOptions): Promise<stri
   const subModel = subAgentModelFor(opts); // the tier this delegated work runs on
   // Show the delegation, and the model when it differs from the orchestrator's —
   // the tiering should be visible, not a silent surprise on the bill.
-  if (!opts.quiet) {
-    const tier = subModel !== opts.model ? chalk.dim(` [${subModel}]`) : ""; // only annotate a real switch
-    console.log(chalk.blue(`  ⎿ sub-agent started:`) + tier + chalk.blue(` ${description.slice(0, 100)}`));
-  }
+  if (!opts.quiet) console.log(mark.subAgentStart(description.slice(0, 100), subModel !== opts.model ? subModel : "")); // annotate the tier only on a real switch
   const snapshot = snapshotFileState(); // what the sub-agent reads, the parent has NOT seen
   try {
     const subMessages: OpenAI.ChatCompletionMessageParam[] = [
@@ -109,7 +107,7 @@ async function runSubAgent(description: string, opts: LoopOptions): Promise<stri
     return `[sub-agent failed: ${result.reason}]`; // any non-Done ending, compressed to one line
   } finally {
     restoreFileState(snapshot); // the parent's read-before-edit state, exactly as it was
-    if (!opts.quiet) console.log(chalk.blue("  ⎿ sub-agent done")); // close the bracket
+    if (!opts.quiet) console.log(mark.subAgentDone); // close the bracket
   }
 }
 
@@ -136,6 +134,8 @@ interface AssembledCall {
   args: string; // the JSON arguments (arrive in many small fragments)
 }
 
+let modelCallSeq = 0; // increments per model call — seeds the rotating spinner word
+
 // One streaming model call: prints text as it arrives, assembles tool calls
 // from their deltas, and guards the stream with a two-level watchdog.
 async function streamModelCall(
@@ -144,16 +144,20 @@ async function streamModelCall(
 ): Promise<{ content: string; toolCalls: AssembledCall[] }> {
   const idleAbort = new AbortController(); // the watchdog's own kill switch
   const signal = AbortSignal.any([opts.signal, idleAbort.signal]); // either the user or the watchdog can abort
+  const word = thinkingWord(modelCallSeq++); // a rotating "thinking" word for this call
+  const startedAt = Date.now(); // for the spinner's live elapsed counter
   const spinner = opts.quiet
     ? null // the eval harness wants silence
-    : ora({ text: opts.subAgent ? "sub-agent working..." : "thinking...", discardStdin: false }).start(); // discardStdin:false — ora would otherwise eat Ctrl+C
+    : ora({ text: spinnerText(word, 0, !!opts.subAgent), discardStdin: false }).start(); // discardStdin:false — ora would otherwise eat Ctrl+C
   let lastEvent = Date.now(); // when did we last hear ANYTHING from the stream?
   let stallWarned = false; // only warn once per quiet stretch
 
   // The two-level watchdog, checked once per second:
   // - idle (nothing at all for 90s) → cut the stream, let the retry layer handle it
   // - stall (slow but alive for 30s) → log it and keep waiting
+  // It also ticks the spinner's elapsed-seconds counter so a wait looks alive.
   const watchdog = setInterval(() => {
+    if (spinner?.isSpinning) spinner.text = spinnerText(word, Math.floor((Date.now() - startedAt) / 1000), !!opts.subAgent);
     const quietMs = Date.now() - lastEvent; // ms since the last event
     if (quietMs > IDLE_TIMEOUT_MS) {
       emit("agent_watchdog_idle"); // record the cut — these should be rare
@@ -190,7 +194,7 @@ async function streamModelCall(
           // Only the top-level agent streams to the screen — a sub-agent's
           // inner monologue would be mistaken for the answer.
           if (!printedPrefix) {
-            process.stdout.write("\n🤖 "); // prefix once, then stream raw
+            process.stdout.write("\n" + mark.answer); // prefix once (⏺), then stream raw
             printedPrefix = true;
           }
           process.stdout.write(delta.content); // print the token immediately — this IS the streaming UX
@@ -219,7 +223,7 @@ async function streamModelCall(
 // Promise.all batch; calls that can prompt must be awaited one at a time.
 async function runOneCall(call: AssembledCall, opts: LoopOptions): Promise<{ id: string; content: string }> {
   const indent = opts.subAgent ? chalk.blue("  ⎿ ") : ""; // sub-agent activity is visually nested
-  if (!opts.quiet) console.log(indent + chalk.cyan(`🔧 ${call.name}`) + chalk.dim(` ${call.args.slice(0, 120)}`)); // show what the model wants to do
+  if (!opts.quiet) console.log(indent + mark.tool(call.name, call.args.slice(0, 120))); // show what the model wants to do
 
   // The permission gate sits between the model's intent and execution.
   const v = checkPermission(call.name, call.args);
@@ -235,7 +239,7 @@ async function runOneCall(call: AssembledCall, opts: LoopOptions): Promise<{ id:
   let content: string; // what goes back to the model as the tool result
   if (v.decision === "deny") {
     emit("agent_tool_denied", { tool: call.name }); // hard blocks, per tool
-    if (!opts.quiet) console.log(chalk.red(`  ⛔ denied: ${v.reason}`)); // tell the user we blocked it
+    if (!opts.quiet) console.log(mark.denied(v.reason)); // tell the user we blocked it
     content = `[permission] Denied: ${v.reason}. This is a hard rule — do not try to work around it; pick a different approach or ask the user.`; // teach the model the boundary
   } else if (v.decision === "ask") {
     // Optional LLM judge: for a run_bash command the rules couldn't classify,
@@ -247,12 +251,12 @@ async function runOneCall(call: AssembledCall, opts: LoopOptions): Promise<{ id:
       try { cmd = (JSON.parse(call.args) as { command?: string }).command ?? ""; } catch { /* leave empty → judge will ask */ }
       if (cmd && (await opts.judge.classify(cmd)) === "allow") {
         autoAllowed = true;
-        if (!opts.quiet) console.log(chalk.dim("  ⚖ judge: clearly safe, auto-allowed")); // visible — the user can see the judge worked
+        if (!opts.quiet) console.log(mark.judge); // visible — the user can see the judge worked
       }
     }
     const ok = autoAllowed || (await opts.confirm(`${call.name} (${v.reason}):\n   ${v.summary}`)); // judge-allowed, or pause and ask the human
     if (!ok) emit("agent_tool_declined", { tool: call.name }); // the human said no — that is signal
-    if (!ok && !opts.quiet) console.log(chalk.yellow("  ✋ declined")); // make the refusal visible
+    if (!ok && !opts.quiet) console.log(mark.declined); // make the refusal visible
     content = ok
       ? await runWithHooks(call, opts) // approved — run it (PreToolUse can still block)
       : `[permission] The user declined this action. Ask them how to proceed, or choose a safer alternative.`; // declined — tell the model
@@ -275,7 +279,7 @@ async function runWithHooks(call: AssembledCall, opts: LoopOptions): Promise<str
   const pre = await runHooks("PreToolUse", { tool: call.name, args: call.args }); // before
   if (pre.block) {
     emit("agent_hook_block", { event: "PreToolUse", tool: call.name }); // a hook said no
-    if (!opts.quiet) console.log(chalk.red(`  ⛔ blocked by PreToolUse hook`)); // make it visible
+    if (!opts.quiet) console.log(mark.hookBlock("PreToolUse")); // make it visible
     return `[hook] A PreToolUse hook blocked this call: ${pre.feedback}. Treat this as a hard boundary — adjust your approach.`;
   }
 

@@ -1,6 +1,6 @@
 # 教程:跟着 AI,从零搓一个自己的 Claude Code
 
-> 27 天,一天一章(主线 10 天 + 进阶 17 天),约 3600 行 TypeScript,用 DeepSeek API 从零写出一个工业级的命令行 Agent。
+> 28 天,一天一章(主线 10 天 + 进阶 18 天),约 3700 行 TypeScript,用 DeepSeek API 从零写出一个工业级的命令行 Agent。
 > 全部教程免费开源。代码与教程一一对应:每章对应一个 git tag,`git checkout dayN` 就是第 N 天对应的完整代码。
 
 ## 目录
@@ -43,6 +43,7 @@
 | [Ch26](ch26-file-mentions.md) | 用 @ 把文件拽进对话:@file 引用(密钥文件拒绝) | `day26` |
 | [阶段综述](ch27-architecture.md) | 进阶篇阶段综述(截至 Day 26):一张图看懂这台 agent | — |
 | [Ch27](ch27-sessions.md) | 续上次的活:`/resume` 会话选择器 | `day27` |
+| [Ch28](ch28-terminal-ui.md) | 让它看起来像个正经工具:终端 UI(欢迎框 / ❯ / 走秒 spinner) | `day28` |
 
 ## 怎么学
 
