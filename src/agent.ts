@@ -62,7 +62,7 @@ const SESSION_HELP = `commands:
   /help      this text
   /clear     wipe the conversation (and the file read-state) — fresh start
   /compact   compact the history into a summary right now (happens automatically near the limit)
-  /model     show the current model, or switch: "/model" to pick from a list, "/model <name>" to set directly
+  /model     switch model for THIS session: "/model" to pick from a list, "/model <name>" to set; "/model save <name>" to make it your default
   /stats     event counts for this session (local telemetry — nothing leaves this machine)
   /memory    show the durable facts the agent remembers about this project
   /cost      tokens, cache hit rate and estimated spend this session (local)
@@ -303,13 +303,27 @@ async function main() {
   // bare `/model` lists the endpoint's models and lets you pick one (Day 29 menu).
   // The switch takes effect next turn: the loop reads CONFIG.model each turn.
   const handleModelCommand = async (arg: string): Promise<void> => {
-    if (arg) {
+    // Switching is SESSION-ONLY by default — a quick "/model <name>" to try a
+    // model must never permanently change your default. "/model save <name>"
+    // (or save after picking) writes it to the global settings file.
+    const save = arg === "save" || arg.startsWith("save ");
+    const name = save ? arg.slice(4).trim() : arg;
+    const apply = (next: string) => {
       const prev = CONFIG.model;
-      CONFIG.model = arg; // any string — the API will error on an unknown one, and the error layer reports it
-      saveGlobalSetting("model", arg); // persists to global settings so the next session defaults to this
-      console.log(chalk.dim(`(model: ${prev} → ${arg})`));
+      CONFIG.model = next; // any string — the API errors on an unknown one, and the error layer reports it
+      if (save) {
+        saveGlobalSetting("model", next); // persist as the new default
+        console.log(chalk.dim(`(model: ${prev} → ${next} · saved as your default)`));
+      } else {
+        console.log(chalk.dim(`(model: ${prev} → ${next} · this session only — use "/model save ${next}" to keep it)`));
+      }
+    };
+
+    if (name) {
+      apply(name);
       return;
     }
+    // No name: show the current model and a picker.
     console.log(
       chalk.dim(
         `model: ${CONFIG.model}\n` +
@@ -323,16 +337,13 @@ async function main() {
       console.log(chalk.dim("(couldn't list models from this endpoint — switch with: /model <name>)"));
       return;
     }
-    console.log(chalk.dim("switch model:"));
+    console.log(chalk.dim("switch model (this session):"));
     const choice = await promptSelect(rl, formatModelChoices(models, CONFIG.model));
     if (choice < 0 || models[choice] === CONFIG.model) {
       console.log(chalk.dim("(model unchanged)"));
       return;
     }
-    const prev = CONFIG.model;
-    CONFIG.model = models[choice];
-    saveGlobalSetting("model", models[choice]); // persists to global settings so the next session defaults to this
-    console.log(chalk.dim(`(model: ${prev} → ${CONFIG.model})`));
+    apply(models[choice]); // picker is session-only too; "/model save <name>" to persist
   };
 
   // Handle a /slash command. Returns true if the line was a command.
