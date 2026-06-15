@@ -68,10 +68,12 @@ export function thinkingWord(seed: number): string {
   return WORDS[((seed % WORDS.length) + WORDS.length) % WORDS.length];
 }
 
-// The live spinner text: word + elapsed seconds + how to bail out.
-export function spinnerText(word: string, elapsedSec: number, subAgent: boolean): string {
+// The live spinner text: the model (so you can SEE which one is answering — proof
+// a /model switch took effect) + a thinking word + elapsed seconds + how to bail.
+export function spinnerText(word: string, elapsedSec: number, subAgent: boolean, model?: string): string {
   const head = subAgent ? "sub-agent" : word;
-  return `${head}… ${chalk.dim(`(${elapsedSec}s · Ctrl+C to interrupt)`)}`;
+  const tag = model && !subAgent ? chalk.dim(`${model} · `) : ""; // show the model on top-level calls
+  return `${tag}${head}… ${chalk.dim(`(${elapsedSec}s · Ctrl+C to interrupt)`)}`;
 }
 
 // ---- the input area ---------------------------------------------------------

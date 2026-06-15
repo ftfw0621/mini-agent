@@ -180,7 +180,7 @@ async function streamModelCall(
   const startedAt = Date.now(); // for the spinner's live elapsed counter
   const spinner = opts.quiet
     ? null // the eval harness wants silence
-    : ora({ text: spinnerText(word, 0, !!opts.subAgent), discardStdin: false }).start(); // discardStdin:false — ora would otherwise eat Ctrl+C
+    : ora({ text: spinnerText(word, 0, !!opts.subAgent, opts.model), discardStdin: false }).start(); // discardStdin:false — ora would otherwise eat Ctrl+C
   let lastEvent = Date.now(); // when did we last hear ANYTHING from the stream?
   let stallWarned = false; // only warn once per quiet stretch
 
@@ -189,7 +189,7 @@ async function streamModelCall(
   // - stall (slow but alive for 30s) → log it and keep waiting
   // It also ticks the spinner's elapsed-seconds counter so a wait looks alive.
   const watchdog = setInterval(() => {
-    if (spinner?.isSpinning) spinner.text = spinnerText(word, Math.floor((Date.now() - startedAt) / 1000), !!opts.subAgent);
+    if (spinner?.isSpinning) spinner.text = spinnerText(word, Math.floor((Date.now() - startedAt) / 1000), !!opts.subAgent, opts.model);
     const quietMs = Date.now() - lastEvent; // ms since the last event
     if (quietMs > IDLE_TIMEOUT_MS) {
       emit("agent_watchdog_idle"); // record the cut — these should be rare
@@ -212,7 +212,8 @@ async function streamModelCall(
       { signal }, // abortable by user AND watchdog
     );
     let content = ""; // accumulated answer text
-    let printedPrefix = false; // have we printed the 🤖 prefix yet?
+    let printedPrefix = false; // have we printed the answer prefix yet?
+    let printedThinking = false; // have we started printing the reasoning trace yet?
     const calls: AssembledCall[] = []; // tool calls under assembly, indexed by delta.index
     for await (const chunk of stream) {
       lastEvent = Date.now(); // feed the watchdog
@@ -220,18 +221,36 @@ async function streamModelCall(
       if (chunk.usage) recordUsage(chunk.usage as unknown as Record<string, unknown>); // the final usage chunk — meter it
       const delta = chunk.choices[0]?.delta; // this chunk's increment
       if (!delta) continue; // keep-alive or usage chunk — nothing to do
+
+      // Reasoning models (e.g. deepseek-reasoner / R1) stream their thinking in a
+      // separate `reasoning_content` field BEFORE the answer. Show it dimly so a
+      // switch to a reasoning model is visibly different — but do NOT keep it:
+      // the reasoning is not the answer and must not be replayed in later turns.
+      const reasoning = (delta as { reasoning_content?: string }).reasoning_content;
+      if (reasoning) {
+        if (spinner?.isSpinning) spinner.stop();
+        if (!opts.quiet && !opts.subAgent) {
+          if (!printedThinking) {
+            process.stdout.write("\n" + chalk.dim("💭 thinking: ")); // label the trace once
+            printedThinking = true;
+          }
+          process.stdout.write(chalk.dim(reasoning)); // stream the thinking, dimmed
+        }
+      }
+
       if (delta.content) {
         if (spinner?.isSpinning) spinner.stop(); // first token: replace the spinner with real output
         if (!opts.quiet && !opts.subAgent) {
           // Only the top-level agent streams to the screen — a sub-agent's
           // inner monologue would be mistaken for the answer.
+          if (printedThinking && !printedPrefix) process.stdout.write("\n"); // end the thinking block before the answer
           if (!printedPrefix) {
             process.stdout.write("\n" + mark.answer); // prefix once (⏺), then stream raw
             printedPrefix = true;
           }
           process.stdout.write(delta.content); // print the token immediately — this IS the streaming UX
         }
-        content += delta.content; // always keep it for the history
+        content += delta.content; // always keep it for the history (the answer only, never the reasoning)
       }
       for (const tc of delta.tool_calls ?? []) {
         if (spinner?.isSpinning) spinner.stop(); // tool call starting — spinner served its purpose
