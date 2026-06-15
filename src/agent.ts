@@ -18,8 +18,8 @@ import { undoLast, clearUndo, sessionChanges } from "./undo.js"; // /undo + /dif
 import { renderDiff } from "./diff.js"; // show what /undo put back / what /diff changed, reusing the Day 21 diff renderer
 import path from "node:path"; // shorten paths for the /diff summary
 import { expandMentions } from "./mentions.js"; // @file mentions: pull referenced files into context (secret files refused)
-import { banner, framedPrompt, formatModelChoices } from "./ui.js"; // the welcome box, prompt, model labels
-import { drawBottomPrompt, frameInputAndRestore, toggleLastCollapsed, cleanup as tuiCleanup } from "./tui.js"; // terminal UI: bottom prompt, collapsible output
+import { banner, framedPrompt, formatModelChoices, statusLine, inputRule } from "./ui.js"; // welcome box, prompt, model labels, status line
+import { gitBranch, toggleLastCollapsed, cleanup as tuiCleanup } from "./tui.js"; // git branch for the status line + collapsible output
 import { promptSelect, promptForm } from "./menu.js"; // arrow-key approval menu + multi-question form
 import { rememberTool, readMemory, MEMORY_PATH } from "./memory.js"; // long-term project memory
 import { initCostMeter, DEFAULT_PRICING } from "./cost.js"; // token & cost accounting for /cost
@@ -115,6 +115,7 @@ async function main() {
   // -r / --resume picks up the most recent one. The system message is NOT
   // restored from disk — it is rebuilt fresh, because AGENT.md may have changed.
   let sessionId = newSessionId(); // this session's identity (and file name)
+  const sessionStartedAt = Date.now(); // for the status line's elapsed clock
   if (argv.includes("-r") || argv.includes("--resume")) {
     const prev = latestSession(); // newest snapshot in this directory, if any
     if (prev) {
@@ -481,14 +482,14 @@ async function main() {
   }
 
   while (true) {
-    // Draw the separator + prompt at the bottom of the terminal. Only in a
-    // TTY; piped input gets no decoration.
-    if (process.stdin.isTTY) drawBottomPrompt();
-    const rawLine = (await readUserLine(framedPrompt(isPlanMode()))).trim(); // next input, or "exit" on EOF
-    const line = rawLine;
-    // Redraw the user's input as a framed box in the output area, then restore
-    // the bottom prompt. Long lines are truncated to keep the output compact.
-    if (process.stdin.isTTY && line) frameInputAndRestore(line, isPlanMode());
+    // Before each prompt, a status line (model · 📁 dir · 🌿 branch · ctx% · $ · time)
+    // then a separator rule, then the "❯". Only in a TTY; piped input is clean.
+    if (process.stdin.isTTY) {
+      const ctxPct = Math.min(100, Math.round((estimateHistoryTokens(messages) / CONFIG.contextWindow) * 100));
+      console.log("\n" + statusLine(CONFIG.model, path.basename(process.cwd()), gitBranch(), ctxPct, costMeter.cost(), Date.now() - sessionStartedAt));
+      console.log(inputRule());
+    }
+    const line = (await readUserLine(framedPrompt(isPlanMode()))).trim(); // next input, or "exit" on EOF
     if (!line) continue; // empty line — just re-prompt
     if (line === "exit" || line === "quit") break; // explicit goodbye
     if (await handleCommand(line)) continue; // slash commands never reach the model

@@ -90,6 +90,17 @@ export class CostMeter {
     this.calls++;
   }
 
+  // Numbers for the status line: estimated spend so far and total tokens.
+  cost(): number {
+    return costOf(this.total, this.pricing);
+  }
+  inputTokens(): number {
+    return this.total.inputUncached + this.total.inputCached;
+  }
+  outputTokens(): number {
+    return this.total.output;
+  }
+
   // The /cost report. Estimated, local-only.
   report(): string {
     const t = this.total;

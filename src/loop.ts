@@ -177,6 +177,7 @@ async function streamModelCall(
   const signal = AbortSignal.any([opts.signal, idleAbort.signal]); // either the user or the watchdog can abort
   const word = thinkingWord(modelCallSeq++); // a rotating "thinking" word for this call
   const startedAt = Date.now(); // for the spinner's live elapsed counter
+  let streamedChars = 0; // bytes of content+reasoning streamed this call → a live token estimate
   const spinner = opts.quiet
     ? null // the eval harness wants silence
     : ora({ text: spinnerText(word, 0, !!opts.subAgent, opts.model), discardStdin: false }).start(); // discardStdin:false — ora would otherwise eat Ctrl+C
@@ -186,9 +187,9 @@ async function streamModelCall(
   // The two-level watchdog, checked once per second:
   // - idle (nothing at all for 90s) → cut the stream, let the retry layer handle it
   // - stall (slow but alive for 30s) → log it and keep waiting
-  // It also ticks the spinner's elapsed-seconds counter so a wait looks alive.
+  // It also ticks the spinner: elapsed seconds + a live token estimate (~chars/4).
   const watchdog = setInterval(() => {
-    if (spinner?.isSpinning) spinner.text = spinnerText(word, Math.floor((Date.now() - startedAt) / 1000), !!opts.subAgent, opts.model);
+    if (spinner?.isSpinning) spinner.text = spinnerText(word, Math.floor((Date.now() - startedAt) / 1000), !!opts.subAgent, opts.model, Math.round(streamedChars / 4));
     const quietMs = Date.now() - lastEvent; // ms since the last event
     if (quietMs > IDLE_TIMEOUT_MS) {
       emit("agent_watchdog_idle"); // record the cut — these should be rare
@@ -227,6 +228,7 @@ async function streamModelCall(
       // the reasoning is not the answer and must not be replayed in later turns.
       const reasoning = (delta as { reasoning_content?: string }).reasoning_content;
       if (reasoning) {
+        streamedChars += reasoning.length; // count reasoning toward the live token estimate
         if (spinner?.isSpinning) spinner.stop();
         if (!opts.quiet && !opts.subAgent) {
           if (!printedThinking) {
@@ -238,6 +240,7 @@ async function streamModelCall(
       }
 
       if (delta.content) {
+        streamedChars += delta.content.length; // count the answer toward the live token estimate
         if (spinner?.isSpinning) spinner.stop(); // first token: replace the spinner with real output
         if (!opts.quiet && !opts.subAgent) {
           // Only the top-level agent streams to the screen — a sub-agent's

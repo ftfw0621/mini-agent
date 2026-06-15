@@ -68,12 +68,45 @@ export function thinkingWord(seed: number): string {
   return WORDS[((seed % WORDS.length) + WORDS.length) % WORDS.length];
 }
 
+// Compact a token count: 1234 → "1.2k", 980 → "980".
+export function formatTokens(n: number): string {
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+}
+
+// Human elapsed time: 7s / 1m32s / 1h05m.
+export function formatElapsed(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m${String(s % 60).padStart(2, "0")}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h${String(m % 60).padStart(2, "0")}m`;
+}
+
 // The live spinner text: the model (so you can SEE which one is answering — proof
-// a /model switch took effect) + a thinking word + elapsed seconds + how to bail.
-export function spinnerText(word: string, elapsedSec: number, subAgent: boolean, model?: string): string {
+// a /model switch took effect) + a thinking word + elapsed + tokens streamed so
+// far + how to bail. Mirrors Claude Code's "Mulling… (1m32s · ↓ 4.0k tokens)".
+export function spinnerText(word: string, elapsedSec: number, subAgent: boolean, model?: string, tokens?: number): string {
   const head = subAgent ? "sub-agent" : word;
   const tag = model && !subAgent ? chalk.dim(`${model} · `) : ""; // show the model on top-level calls
-  return `${tag}${head}… ${chalk.dim(`(${elapsedSec}s · Ctrl+C to interrupt)`)}`;
+  const bits = [`${elapsedSec}s`];
+  if (tokens && tokens > 0) bits.push(`↓ ${formatTokens(tokens)} tokens`);
+  bits.push("Ctrl+C to interrupt");
+  return `${tag}${head}… ${chalk.dim(`(${bits.join(" · ")})`)}`;
+}
+
+// The persistent status line — model, project, branch, context use, spend, time.
+// Pure (dir + branch passed in) so it's testable without a filesystem or git.
+export function statusLine(model: string, dir: string, branch: string | null, ctxPct: number, costUsd: number, elapsedMs: number): string {
+  const parts = [
+    chalk.cyan(`[${model}]`),
+    chalk.dim(`📁 ${dir}`),
+    branch ? chalk.green(`🌿 ${branch}`) : "",
+    chalk.dim(`ctx ${ctxPct}%`),
+    chalk.yellow(`$${costUsd.toFixed(costUsd < 1 ? 4 : 2)}`),
+    chalk.dim(`⏱ ${formatElapsed(elapsedMs)}`),
+  ].filter(Boolean);
+  return parts.join(chalk.dim("  ·  "));
 }
 
 // ---- the input area ---------------------------------------------------------
@@ -90,25 +123,6 @@ export function framedPrompt(planMode: boolean): string {
   return planMode ? chalk.yellow.bold("⏸ plan ❯ ") : chalk.cyan.bold("❯ ");
 }
 
-// After the user hits Enter, redraw their input between two rules.
-// Long lines are replaced with a short placeholder so the output stays readable.
-const MAX_INPUT_DISPLAY = 76; // before truncation
-export function frameUserInput(line: string, planMode: boolean): string {
-  const prefix = planMode ? "⏸ plan ❯ " : "❯ ";
-  const prefixLen = planMode ? 10 : 2; // approximate visual width of the prefix
-  const available = frameWidth() - 2 - prefixLen; // box padding + prefix
-  let display = line;
-  if (display.length > available) {
-    display = display.slice(0, available - 3) + "..."; // truncate with ellipsis
-  }
-  const rule = chalk.dim("─".repeat(frameWidth()));
-  const promptStyle = planMode ? chalk.yellow.bold : chalk.cyan.bold;
-  return (
-    chalk.dim(`\x1b[2K\r┌${"─".repeat(frameWidth())}┐\n`) +
-    chalk.dim("│ ") + promptStyle(prefix) + chalk.reset(display) + chalk.dim(" │\n") +
-    chalk.dim(`└${"─".repeat(frameWidth())}┘`)
-  );
-}
 
 // ---- the selection menu -----------------------------------------------------
 // Render a numbered list of options with one highlighted. The interactive part

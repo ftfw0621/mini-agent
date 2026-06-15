@@ -1,4 +1,4 @@
-import { banner, promptString, mark, thinkingWord, spinnerText } from "../src/ui.js"; // unit under test
+import { banner, promptString, mark, thinkingWord, spinnerText, statusLine, formatTokens, formatElapsed } from "../src/ui.js"; // unit under test
 import { check, checkContains, finish } from "./helpers.js"; // assertions
 // chalk auto-disables color when stdout isn't a TTY (as under the test runner),
 // so these assertions see plain text.
@@ -35,5 +35,24 @@ checkContains("spinner shows the word", st, "Pondering");
 checkContains("spinner shows elapsed seconds", st, "3s");
 checkContains("spinner says how to bail", st, "interrupt");
 checkContains("sub-agent spinner is labeled", spinnerText("Pondering", 1, true), "sub-agent");
+checkContains("spinner shows streamed tokens", spinnerText("Mulling", 90, false, "deepseek-chat", 4000), "↓ 4.0k tokens");
+check("spinner omits tokens when zero", !spinnerText("Mulling", 1, false, "m", 0).includes("↓"));
+
+// ---- formatters ----------------------------------------------------------------------
+check("formatTokens compacts thousands", formatTokens(4000) === "4.0k");
+check("formatTokens keeps small counts", formatTokens(980) === "980");
+check("formatElapsed seconds", formatElapsed(7000) === "7s");
+check("formatElapsed minutes", formatElapsed(92000) === "1m32s");
+check("formatElapsed hours", formatElapsed(3811000) === "1h03m");
+
+// ---- status line ---------------------------------------------------------------------
+const status = statusLine("deepseek-chat", "mini-agent", "main", 9, 1.95, 33 * 60000 + 31000);
+checkContains("status shows the model", status, "[deepseek-chat]");
+checkContains("status shows the dir", status, "mini-agent");
+checkContains("status shows the branch", status, "main");
+checkContains("status shows context %", status, "ctx 9%");
+checkContains("status shows spend", status, "$1.95");
+checkContains("status shows elapsed", status, "33m31s");
+check("status without a branch omits the branch glyph", !statusLine("m", "d", null, 0, 0, 0).includes("🌿"));
 
 finish();
