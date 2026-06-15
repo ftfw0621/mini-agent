@@ -74,23 +74,20 @@ export function spinnerText(word: string, elapsedSec: number, subAgent: boolean)
   return `${head}… ${chalk.dim(`(${elapsedSec}s · Ctrl+C to interrupt)`)}`;
 }
 
-// ---- the input frame --------------------------------------------------------
-// A left-barred, top/bottom-ruled frame around the prompt, so the input area
-// reads as "type here" instead of a bare ">". Open on the right — a fully closed
-// box would need a raw-mode line editor to keep the right border aligned as text
-// grows; this stays robust to any input length and any wrapping.
+// ---- the input area ---------------------------------------------------------
+// Like Claude Code: a thin horizontal rule as a separator above the prompt, then
+// a bare "❯" on the next line. No left bar, no bottom rule — the bottom rule used
+// to print only after you hit Enter, which looked like the box "closing late".
+// A single top rule cleanly divides the previous output from where you type.
 function frameWidth(): number {
   return Math.max(8, Math.min(process.stdout.columns || 80, 100) - 1); // fit the terminal, but cap the rule
 }
-export function inputFrameTop(): string {
-  return chalk.dim(`╭${"─".repeat(frameWidth())}`);
+export function inputRule(): string {
+  return chalk.dim("─".repeat(frameWidth())); // a plain separator line
 }
-export function inputFrameBottom(): string {
-  return chalk.dim(`╰${"─".repeat(frameWidth())}`);
-}
-// The prompt that sits on the framed line. Plan mode (Day 20) is marked.
+// The prompt under the rule. Plan mode (Day 20) is marked so you know writes are blocked.
 export function framedPrompt(planMode: boolean): string {
-  return chalk.dim("│ ") + (planMode ? chalk.yellow.bold("⏸ plan ❯ ") : chalk.cyan.bold("❯ "));
+  return planMode ? chalk.yellow.bold("⏸ plan ❯ ") : chalk.cyan.bold("❯ ");
 }
 
 // ---- the selection menu -----------------------------------------------------

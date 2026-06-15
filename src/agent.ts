@@ -18,8 +18,8 @@ import { undoLast, clearUndo, sessionChanges } from "./undo.js"; // /undo + /dif
 import { renderDiff } from "./diff.js"; // show what /undo put back / what /diff changed, reusing the Day 21 diff renderer
 import path from "node:path"; // shorten paths for the /diff summary
 import { expandMentions } from "./mentions.js"; // @file mentions: pull referenced files into context (secret files refused)
-import { banner, framedPrompt, inputFrameTop, inputFrameBottom } from "./ui.js"; // the welcome box, framed prompt
-import { promptSelect } from "./menu.js"; // arrow-key approval menu
+import { banner, framedPrompt, inputRule } from "./ui.js"; // the welcome box, separator rule, prompt
+import { promptSelect, promptForm } from "./menu.js"; // arrow-key approval menu + multi-question form
 import { rememberTool, readMemory, MEMORY_PATH } from "./memory.js"; // long-term project memory
 import { initCostMeter, DEFAULT_PRICING } from "./cost.js"; // token & cost accounting for /cost
 
@@ -277,6 +277,14 @@ async function main() {
     return approved;
   };
 
+  // The model's handle on the user: present a multi-question form and return the
+  // selections. Null in a non-interactive session — the model is told to ask in
+  // plain text instead.
+  const askUser = async (questions: { question: string; options: string[] }[]) => {
+    if (!process.stdin.isTTY) return null;
+    return promptForm(rl, questions);
+  };
+
   // Handle a /slash command. Returns true if the line was a command.
   const handleCommand = async (line: string): Promise<boolean> => {
     switch (line) {
@@ -417,14 +425,11 @@ async function main() {
   // The session loop: ask → run → render → ask again. This is what makes it
   // a conversation instead of a one-shot command.
   while (true) {
-    // The input frame: a top rule, the framed "❯" prompt (yellow "⏸ plan ❯" in
-    // plan mode), then a bottom rule once you submit — so the input area reads as
-    // "type here". Only in a TTY; piped input gets no decoration.
-    const tty = !!process.stdin.isTTY;
-    if (tty) console.log("\n" + inputFrameTop());
-    const raw = await readUserLine(framedPrompt(isPlanMode())); // next input, or "exit" on EOF
-    if (tty) console.log(inputFrameBottom());
-    const line = raw.trim();
+    // A separator rule, then the "❯" prompt on the next line (yellow "⏸ plan ❯"
+    // in plan mode) — clean, like Claude Code. Only in a TTY; piped input gets
+    // no decoration.
+    if (process.stdin.isTTY) console.log("\n" + inputRule());
+    const line = (await readUserLine(framedPrompt(isPlanMode()))).trim(); // next input, or "exit" on EOF
     if (!line) continue; // empty line — just re-prompt
     if (line === "exit" || line === "quit") break; // explicit goodbye
     if (await handleCommand(line)) continue; // slash commands never reach the model
@@ -449,6 +454,7 @@ async function main() {
       signal: controller.signal, // for aborting requests
       isInterrupted: () => interrupted, // for stopping between steps
       confirm, // for permission prompts
+      askUser, // the multi-question form the model can pop
       subAgentModel: CONFIG.subAgentModel, // delegated work may run on a different tier
       judge, // optional LLM classifier for the "ask" middle ground
     });

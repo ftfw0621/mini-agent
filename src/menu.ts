@@ -1,5 +1,6 @@
 import readline from "node:readline"; // raw-mode keypress events + the interface to pause
 import { renderMenu, MENU_HINT } from "./ui.js"; // the pure drawing + the footer hint
+import { initFormState, reduceForm, renderForm, collectAnswers, type FormQuestion, type FormAnswer } from "./form.js"; // the multi-question form
 
 // An arrow-key selection menu. The whole point: an approval is one keystroke
 // (↑/↓ then Enter), not "type y, then N, then realize you meant the other".
@@ -78,6 +79,70 @@ export function promptSelect(
       draw(true); // first paint
     } catch {
       finish(-1); // anything unexpected in setup → cancel, caller falls back to typing
+    }
+  });
+}
+
+// The multi-question form (Day 30): the agent asks several questions at once,
+// the user answers each and submits, and we hand back organized answers. Same
+// raw-mode borrow/return dance as promptSelect; the state machine is in form.ts.
+// Returns the answers, or null if cancelled / not a TTY.
+export function promptForm(
+  rl: readline.Interface,
+  questions: FormQuestion[],
+  input: NodeJS.ReadStream = process.stdin,
+): Promise<FormAnswer[] | null> {
+  return new Promise((resolve) => {
+    if (!input.isTTY || !questions.length) return resolve(null); // no form without a terminal or questions
+
+    let state = initFormState(questions);
+    let done = false;
+    const lineCount = renderForm(questions, state).split("\n").length; // constant for these questions
+
+    const draw = (first: boolean) => {
+      if (!first) process.stdout.write(`\x1b[${lineCount}A`); // up over the whole form
+      process.stdout.write(`\x1b[J${renderForm(questions, state)}\n`); // clear down, repaint
+    };
+
+    const finish = (result: FormAnswer[] | null) => {
+      if (done) return;
+      done = true;
+      input.off("keypress", onKey);
+      try {
+        input.setRawMode(false);
+      } catch {
+        /* ignore */
+      }
+      rl.resume();
+      resolve(result);
+    };
+
+    const onKey = (_str: string, key: { name?: string; ctrl?: boolean } | undefined) => {
+      if (!key || done) return;
+      if (key.name === "up" || key.name === "k") {
+        state = reduceForm(questions, state, "up").state;
+        draw(false);
+      } else if (key.name === "down" || key.name === "j" || key.name === "tab") {
+        state = reduceForm(questions, state, "down").state;
+        draw(false);
+      } else if (key.name === "return" || key.name === "enter" || key.name === "space") {
+        const next = reduceForm(questions, state, "select");
+        state = next.state;
+        if (next.done) finish(collectAnswers(questions, state)); // submitted with all answered
+        else draw(false);
+      } else if (key.name === "escape" || (key.ctrl && key.name === "c")) {
+        finish(null); // cancel
+      }
+    };
+
+    try {
+      rl.pause();
+      if (input === process.stdin) readline.emitKeypressEvents(input);
+      input.setRawMode(true);
+      input.on("keypress", onKey);
+      draw(true);
+    } catch {
+      finish(null);
     }
   });
 }

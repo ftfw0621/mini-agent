@@ -110,6 +110,7 @@ function planSafe(toolName: string, verdict: Verdict): boolean {
     case "read_file":
     case "search":
     case "task": // the sub-agent's own calls hit this same gate, still in plan mode
+    case "ask_user": // asking the user a question is safe in plan mode — it doesn't change anything
     case "exit_plan_mode": // the way OUT of plan mode must never be blocked by plan mode
       return true;
     case "run_bash":
@@ -158,6 +159,10 @@ function basePermission(toolName: string, argsJson: string): Verdict {
       // Spawning a sub-agent is orchestration, not action: every tool the
       // sub-agent uses goes through this same gate individually.
       return { decision: "allow", reason: "sub-agent tools are gated individually", summary: "task" };
+    case "ask_user":
+      // Asking the user a question has no side effects — it's the safest thing
+      // the model can do. Never gate it behind an approval prompt.
+      return { decision: "allow", reason: "asks the user, no side effects", summary: "ask_user" };
     case "read_file": {
       const p = args.path ?? ""; // the file the model wants to read
       if (SECRET_FILE_RE.test(path.resolve(p))) {

@@ -54,6 +54,7 @@ export interface LoopOptions {
   subAgent?: boolean; // this loop IS a sub-agent: no task tool, no text streaming, indented tool logs
   subAgentModel?: string; // model to run delegated sub-agents on; falls back to `model`
   judge?: Judge; // optional LLM classifier that auto-allows clearly-safe "ask" commands
+  askUser?: (questions: { question: string; options: string[] }[]) => Promise<{ question: string; answer: string }[] | null>; // present a multi-question form (Day 30); null if cancelled/non-interactive
 }
 
 // Which model should a delegated sub-agent run on? The configured sub-agent
@@ -80,6 +81,37 @@ On error: a failed sub-agent returns [sub-agent failed: reason] — retry with a
         description: { type: "string", description: "The complete, self-contained task for the sub-agent" },
       },
       required: ["description"],
+    },
+  },
+};
+
+// The ask_user tool: the model's handle on the user. When it needs the human to
+// choose between options, it calls this instead of asking in prose — and gets
+// back clean, structured selections rather than a free-text paragraph to parse.
+const askUserTool: OpenAI.ChatCompletionTool = {
+  type: "function",
+  function: {
+    name: "ask_user",
+    description: `Ask the user one or more multiple-choice questions and get back their selections. Use this WHENEVER you need the user to make a decision between options (which approach, which file, yes/no/which) — it is easier for them to pick than to type, and the answers come back unambiguous.
+Provide each question with 2–4 concrete options. Do NOT use it for open-ended input that has no clear options; ask in prose for that.
+If the user cancels, you'll be told — then proceed with your best judgment or ask again.`,
+    parameters: {
+      type: "object",
+      properties: {
+        questions: {
+          type: "array",
+          description: "The questions to ask, each with a list of options",
+          items: {
+            type: "object",
+            properties: {
+              question: { type: "string", description: "The question text" },
+              options: { type: "array", items: { type: "string" }, description: "2–4 concrete choices" },
+            },
+            required: ["question", "options"],
+          },
+        },
+      },
+      required: ["questions"],
     },
   },
 };
@@ -176,7 +208,7 @@ async function streamModelCall(
       // Nested spawning means orphan processes and debugging hell.
       // include_usage adds a final chunk carrying token counts — that is how we
       // meter cost without a second (counting) request.
-      { model: opts.model, messages, tools: opts.subAgent ? toolDefinitions() : [...toolDefinitions(), taskTool], stream: true, stream_options: { include_usage: true } },
+      { model: opts.model, messages, tools: opts.subAgent ? toolDefinitions() : [...toolDefinitions(), taskTool, askUserTool], stream: true, stream_options: { include_usage: true } },
       { signal }, // abortable by user AND watchdog
     );
     let content = ""; // accumulated answer text
@@ -297,6 +329,10 @@ async function runWithHooks(call: AssembledCall, opts: LoopOptions): Promise<str
 // Execute one approved tool call. The task tool is special — it is not in the
 // registry because running it needs the loop itself (it IS a loop).
 async function execute(call: AssembledCall, opts: LoopOptions): Promise<string> {
+  // ask_user is special like task: running it needs the CLI's prompt, not the
+  // tool registry. It presents a form and feeds the selections back to the model.
+  if (call.name === "ask_user") return runAskUser(call, opts);
+
   if (call.name !== "task") return dispatch(call.name, call.args, opts.signal); // ordinary tools go through the registry (signal lets Ctrl+C kill run_bash)
   if (opts.subAgent) return "[error] Sub-agents cannot spawn sub-agents. Do the work yourself."; // one level of delegation only
   let description = ""; // the sub-task text
@@ -307,6 +343,26 @@ async function execute(call: AssembledCall, opts: LoopOptions): Promise<string> 
   }
   if (!description) return "[error] task requires a non-empty description argument.";
   return runSubAgent(description, opts); // spawn the worker
+}
+
+// Present the ask_user form and turn the selections into a tool result. The
+// model called this to get a decision; we give it clean question→answer pairs.
+async function runAskUser(call: AssembledCall, opts: LoopOptions): Promise<string> {
+  if (opts.subAgent) return "[error] Sub-agents cannot ask the user. Decide yourself, or report back to the parent."; // only the top-level agent talks to the human
+  if (!opts.askUser) return "[error] No interactive prompt is available in this session — ask in plain text instead.";
+  let questions: { question: string; options: string[] }[] = [];
+  try {
+    questions = (JSON.parse(call.args) as { questions?: typeof questions }).questions ?? [];
+  } catch {
+    /* fall through */
+  }
+  // Keep only well-formed questions (text + at least two options).
+  questions = (questions ?? []).filter((q) => q && typeof q.question === "string" && Array.isArray(q.options) && q.options.length >= 2);
+  if (!questions.length) return "[error] ask_user needs at least one question with two or more options.";
+
+  const answers = await opts.askUser(questions);
+  if (!answers) return "The user dismissed the question form without answering. Proceed with your best judgment, or ask again if you truly need their input."; // cancelled / non-interactive
+  return `The user answered:\n${answers.map((a) => `- ${a.question} → ${a.answer}`).join("\n")}`; // organized, unambiguous
 }
 
 // Run one compaction attempt and keep score. Returns true on success.
