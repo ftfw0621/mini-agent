@@ -1,6 +1,6 @@
 # Ch2 · 给 AI 一双手:工具系统
 
-> 本章完整代码:`git checkout day2`。昨天的 50 行保留在 `src/raw-loop.ts`,今天起主角换成 `src/agent.ts` + `src/tools.ts`。
+> 本章完整代码:`git checkout day2`。**今天的 `src/agent.ts` 不是新东西——它就是昨天那 50 行长大的**:同一套「调模型 → 跑工具 → 喂回结果」的循环原样保留,只是把工具从 1 个扩成 5 个、把工具实现抽进 `src/tools.ts`。(Day 1 那份单独的 `raw-loop.ts` 已退役、由 `agent.ts` 接棒;想回看最初骨架 `git checkout day1`。)
 
 ## 这一章做完,你会得到什么
 
@@ -23,6 +23,24 @@ What should the AI do?
 📷(此处放运行截图)
 
 一条指令,它自己完成了「读文件 → 定位 bug → 精确修改 → 跑起来验证」四步。注意它修文件用的不是 sed、不是重写整个文件,而是一个叫 `edit_file` 的专用工具——这是今天的重点。
+
+### 先认个门:今天的代码是昨天那份长大的,不是另起炉灶
+
+新手最容易在这里迷糊:「昨天看的是 `raw-loop.ts`,今天怎么冒出个 `agent.ts`?」——它俩是**同一个东西**。把昨天的 `main()` 和今天的 `agent.ts` 并排看,骨架一模一样:
+
+```
+raw-loop.ts(Day1)                 agent.ts(Day2)
+─────────────────────────────     ─────────────────────────────
+new OpenAI({...})              →   new OpenAI({...})            原样
+rl.question(...)               →   rl.question(...)            原样
+for 轮次循环 {                  →   for 轮次循环 {              原样
+  chat.completions.create        →   chat.completions.create    原样
+  if 没有 tool_calls → 结束       →   if 没有 tool_calls → 结束   原样
+  执行那 1 个工具                 →   dispatch 那 5 个工具        ← 唯一变化
+}                                  }
+```
+
+变的只有两处:工具从 1 个变 5 个;工具的实现从内联挪进了 `src/tools.ts`(循环不该关心某个工具具体怎么跑)。**循环本身一行没动。** 这门课从今天起就是这个节奏——每天 `git diff` 上一天,你看到的永远是「同一份代码长出新能力」,而不是一堆互不相干的新文件。(所以昨天那份 `raw-loop.ts` 今天起删掉了:它的活已经由 `agent.ts` 接走,留着只会让人以为有两套循环。)
 
 ## 跟着写
 
