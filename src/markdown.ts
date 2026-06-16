@@ -1,6 +1,9 @@
-import { Marked } from "marked"; // the parser
+import { Marked, type Tokens } from "marked"; // the parser
 import { markedTerminal } from "marked-terminal"; // the ANSI renderer
+import Table from "cli-table3"; // box-drawing table (borders + padding)
+import wrapAnsi from "wrap-ansi"; // ANSI- and CJK-aware line wrapping
 import chalk from "chalk"; // our one color source — keep the theme consistent with ui.ts
+import { displayWidth } from "./editor.js"; // CJK-/ANSI-aware display width (shared with the line editor)
 
 // Why a library here, not hand-rolled? Markdown→terminal is a solved, fiddly
 // problem (CJK-aware table widths, nested lists, code fences, link rewriting).
@@ -8,6 +11,45 @@ import chalk from "chalk"; // our one color source — keep the theme consistent
 // we lean on `marked` + `marked-terminal` and spend our effort on the streaming
 // glue instead. The model speaks markdown; without this the screen shows raw
 // `##`, `**`, and `|---|` — exactly the ugliness this module removes.
+
+// ---- responsive tables ------------------------------------------------------
+// marked-terminal's `width` does NOT size tables — a wide table overflows and the
+// terminal hard-wraps it into garbage. So we render tables ourselves: shrink the
+// columns to fit the window, wrap each cell (CJK-aware, no truncation), and let
+// cli-table3 draw the box. This is what makes a table adapt to the window size.
+
+// Per-column CONTENT widths that fit `maxWidth` once borders/padding are paid for.
+// Start from each column's natural width, then repeatedly shave the widest until
+// the row fits — so narrow columns keep their size and the roomy ones give first.
+function tableColumnWidths(header: string[], rows: string[][], maxWidth: number): number[] {
+  const n = header.length;
+  const natural = header.map((h, i) => Math.max(displayWidth(h), ...rows.map((r) => displayWidth(r[i] ?? ""))));
+  const budget = maxWidth - (n + 1) - 2 * n; // n+1 borders, 2 cols of padding per column
+  const widths = natural.slice();
+  const MIN = 4; // never shrink a column below this many content columns
+  while (widths.reduce((a, b) => a + b, 0) > budget) {
+    const widest = widths.indexOf(Math.max(...widths));
+    if (widths[widest] <= MIN) break; // can't shrink further — let it overflow rather than vanish
+    widths[widest]--;
+  }
+  return widths;
+}
+
+// Draw one table, wrapped to fit `maxWidth`. Cells are pre-wrapped with wrap-ansi
+// (which counts CJK as 2 and keeps ANSI styles intact across line breaks), then
+// handed to cli-table3 with wordWrap OFF — cli-table3's own wrap mis-measures CJK.
+function renderTable(header: string[], rows: string[][], maxWidth: number): string {
+  const content = tableColumnWidths(header, rows, maxWidth);
+  const wrapRow = (cells: string[]): string[] => cells.map((c, i) => wrapAnsi(c ?? "", content[i], { hard: true, trim: false }));
+  const t = new Table({
+    head: wrapRow(header),
+    colWidths: content.map((w) => w + 2), // cli-table3 widths include the 2 padding columns
+    wordWrap: false, // we already wrapped — cli-table3 would mis-wrap CJK
+    style: { head: [], border: [] }, // no extra colour; keep the dim theme from the caller
+  });
+  for (const r of rows) t.push(wrapRow(r));
+  return t.toString();
+}
 
 // The terminal theme, matched to ui.ts (cyan headers, yellow code, dim borders).
 function renderer(width: number) {
@@ -34,8 +76,20 @@ function renderer(width: number) {
 // can assert on the output without a real terminal. A fresh Marked per call
 // keeps width overridable and avoids leaking global parser state.
 export function renderMarkdown(md: string, width = termWidth()): string {
+  const w = Math.max(20, width);
   const m = new Marked();
-  m.use(renderer(Math.max(20, width)));
+  m.use(renderer(w));
+  // Override the table renderer AFTER marked-terminal so ours wins: render each
+  // cell's inline markdown to ANSI (parseInline), then lay the table out to fit w.
+  m.use({
+    renderer: {
+      table(this: { parser: { parseInline(tokens: Tokens.Generic[]): string } }, token: Tokens.Table): string {
+        const header = token.header.map((c) => this.parser.parseInline(c.tokens));
+        const rows = token.rows.map((r) => r.map((c) => this.parser.parseInline(c.tokens)));
+        return renderTable(header, rows, w) + "\n";
+      },
+    },
+  });
   const out = m.parse(md, { async: false }) as string;
   return out.replace(/\s+$/g, ""); // trim the trailing blank lines marked-terminal adds
 }

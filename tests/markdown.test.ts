@@ -1,4 +1,5 @@
 import { renderMarkdown, MarkdownStream } from "../src/markdown.js"; // unit under test
+import { displayWidth } from "../src/editor.js"; // to assert table fits the window
 import { check, checkContains, finish } from "./helpers.js"; // assertions
 // chalk auto-disables color when stdout isn't a TTY (as under the test runner),
 // so these assertions see plain text — but box-drawing glyphs are always emitted.
@@ -22,6 +23,21 @@ checkContains("table draws a box border", table, "│");
 checkContains("table keeps a header cell", table, "主题");
 checkContains("table keeps a CJK body cell", table, "维纳《控制论》");
 check("table drops the |---| separator row", !table.includes("---|"), `got: ${table}`);
+
+// ---- responsive table: adapts to the window width ------------------------------------
+const wide = [
+  "| 主题 | 内容 |",
+  "|------|------|",
+  "| 反馈与系统思维 | 开环 vs 闭环、正/负反馈、稳态误差、超调量、阻尼比、相位裕度 |",
+  "| 必读 | 现代控制工程 (Ogata)、Feedback Control of Dynamic Systems (Franklin) |",
+].join("\n");
+for (const w of [88, 60, 40]) {
+  const out = renderMarkdown(wide, w);
+  const widest = Math.max(...out.split("\n").map((l) => displayWidth(l)));
+  check(`table fits width ${w}`, widest <= w, `widest line = ${widest} > ${w}`);
+  check(`table at width ${w} doesn't truncate with an ellipsis`, !out.includes("…"), `got ellipsis at width ${w}`);
+}
+checkContains("narrow table still keeps the CJK content (wrapped, not dropped)", renderMarkdown(wide, 40), "相位裕度");
 
 // ---- MarkdownStream: completed blocks flush before end() ------------------------------
 const out: string[] = [];
