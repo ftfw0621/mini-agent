@@ -213,6 +213,12 @@ export function editLine(rl: Pausable, opts: EditOptions): Promise<EditResult> {
     let prevCursorRow = 0; // where the caret sits within the block, to climb back next repaint
     const wasRaw = input.isRaw === true; // restore THIS on exit (forcing false would close the live readline)
     const cols = () => out.columns || 80;
+    // The session's readline keeps its OWN 'keypress' handler on stdin. Once
+    // readline has been activated (after the first resume), that handler fires on
+    // every key alongside ours and fights us for the cursor — the line stacks
+    // instead of redrawing in place. Detach the other keypress listeners while we
+    // own the input, and restore them exactly on exit (menu/confirm still need them).
+    let otherKeypress: ((...a: unknown[]) => void)[] = [];
 
     // Repaint the whole block in place: climb to its top, clear downward, reprint
     // input rows + footer, then drop the caret onto its computed (row, col).
@@ -238,6 +244,7 @@ export function editLine(rl: Pausable, opts: EditOptions): Promise<EditResult> {
       if (done) return;
       done = true;
       input.off("keypress", onKey);
+      for (const l of otherKeypress) input.on("keypress", l); // give readline its keypress handler back
       // Leave the typed command on screen, drop the footer, land on a fresh line.
       const { rows } = layout(state.buffer, state.cursor, promptW, cols());
       if (prevCursorRow > 0) out.write(`\x1b[${prevCursorRow}A`);
@@ -292,6 +299,8 @@ export function editLine(rl: Pausable, opts: EditOptions): Promise<EditResult> {
     try {
       rl.pause(); // stop the session reader from turning our keystrokes into lines
       if (input === process.stdin) readline.emitKeypressEvents(input); // decode raw bytes into named keys
+      otherKeypress = input.listeners("keypress") as ((...a: unknown[]) => void)[]; // readline's handler(s)…
+      for (const l of otherKeypress) input.off("keypress", l); // …detached so only we drive the cursor
       input.setRawMode(true);
       input.resume(); // rl.pause() also paused the stream — resume it or no keys arrive
       input.on("keypress", onKey);
