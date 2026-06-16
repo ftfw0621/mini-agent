@@ -35,7 +35,6 @@ PASS sub-agent-count (9.1s)
 10/10 passed — above the 8/10 bar
 ```
 
-📷(此处放运行截图)
 
 ## 跟着写:子 agent
 

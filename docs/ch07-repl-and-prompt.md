@@ -24,7 +24,6 @@ mini-agent — deepseek-chat | "exit" to quit · "/clear" to reset · Ctrl+C int
 
 回答是逐字流出来的(不再盯着光标干等),等首 token 时有 spinner,任务跑一半 Ctrl+C 会**回到提示符**而不是杀进程——再问它「我刚才让你干什么来着」,它还答得上来。
 
-📷(此处放 30 秒录屏 gif——这是小红书 demo 的素材)
 
 ## 跟着写
 
