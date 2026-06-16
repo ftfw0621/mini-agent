@@ -1,4 +1,4 @@
-import { reduceEditor, layout, displayWidth, type EditorState } from "../src/editor.js"; // unit under test
+import { reduceEditor, layout, displayWidth, truncateToWidth, type EditorState } from "../src/editor.js"; // unit under test
 import { check, finish } from "./helpers.js"; // assertions
 
 const st = (buffer: string, cursor: number): EditorState => ({ buffer, cursor });
@@ -73,5 +73,13 @@ check("wrap: cursor follows onto row 1", L.cursorRow === 1 && L.cursorCol === 2,
 
 L = layout("中文字", 3, 0, 4); // each CJK is 2 wide, width 4 → 2 per row
 check("wrap: CJK respects double width", L.rows[0] === "中文" && L.rows[1] === "字", JSON.stringify(L));
+
+// ---- truncateToWidth (stops the footer from wrapping) ----------------------
+check("short string is unchanged", truncateToWidth("hello", 10) === "hello");
+check("ascii is clipped to width", displayWidth(truncateToWidth("hello world", 5)) <= 5);
+check("CJK clip respects double width", displayWidth(truncateToWidth("你好世界", 5)) <= 5);
+const styled = truncateToWidth("\x1b[36m[deepseek-v4-pro] · 📁 dir · ⏱ 2m42s\x1b[39m", 12);
+check("styled status clipped to width", displayWidth(styled) <= 12, `width=${displayWidth(styled)}`);
+check("clip keeps ANSI codes (zero width) and never exceeds", displayWidth(truncateToWidth("\x1b[33m$0.0099\x1b[39m abcdefgh", 7)) <= 7);
 
 finish();

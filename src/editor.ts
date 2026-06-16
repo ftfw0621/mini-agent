@@ -138,6 +138,35 @@ function charWidth(cp: number): number {
   return 1;
 }
 
+// Clip a (possibly ANSI-styled) string to a display width: keep escape codes
+// (zero width) intact, never split a wide glyph. This stops a long status footer
+// from wrapping — a wrapped footer row occupies TWO physical rows, which would
+// desync the editor's row math and drop the caret a line too low (and then every
+// repaint clears from the wrong row, stacking a fresh prompt each keystroke).
+export function truncateToWidth(s: string, width: number): string {
+  let w = 0;
+  let out = "";
+  let i = 0;
+  while (i < s.length) {
+    if (s[i] === "\x1b") {
+      const m = /^\x1b\[[0-9;]*m/.exec(s.slice(i)); // an SGR colour code — copy it, it has no width
+      if (m) {
+        out += m[0];
+        i += m[0].length;
+        continue;
+      }
+    }
+    const cp = s.codePointAt(i)!;
+    const ch = String.fromCodePoint(cp);
+    const cw = charWidth(cp);
+    if (w + cw > width) return out + "\x1b[0m"; // would overflow → stop, closing any open colour
+    out += ch;
+    w += cw;
+    i += ch.length;
+  }
+  return out;
+}
+
 // Wrap the input across the terminal width and find where the cursor lands.
 // Row 0 begins after the prompt (promptW columns); continuation rows start at 0.
 // Returns the buffer text per row (the driver prepends the prompt to row 0) plus
@@ -230,9 +259,12 @@ export function editLine(rl: Pausable, opts: EditOptions): Promise<EditResult> {
       }
       out.write("\x1b[0J"); // clear from the top of the block to end of screen
       const inputRows = rows.map((r, i) => (i === 0 ? opts.prompt + r : r));
-      const all = [...inputRows, ...footerRows];
+      // Truncate each footer row so it can't wrap — otherwise its extra physical
+      // row throws off the cursor math below (caret lands low → prompts stack).
+      const fr = footerRows.map((f) => truncateToWidth(f, Math.max(1, cols() - 1)));
+      const all = [...inputRows, ...fr];
       out.write(all.join("\r\n"));
-      const lastRow = all.length - 1;
+      const lastRow = all.length - 1; // every row is now exactly one physical line
       if (lastRow > cursorRow) out.write(`\x1b[${lastRow - cursorRow}A`); // up from the last footer row
       out.write("\r");
       if (cursorCol > 0) out.write(`\x1b[${cursorCol}C`); // right to the caret column
