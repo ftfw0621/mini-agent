@@ -43,7 +43,7 @@ MINI_AGENT_MODEL=gpt-4.1-mini
 
 各家 base URL 见 [.env.example](.env.example)。两个注意:模型必须支持 function calling;窗口比 DeepSeek 小的话设 `MINI_AGENT_CONTEXT_WINDOW`(单位 token)。换完跑一遍 `npm run eval`——同样 10 道题,正好当模型横评。
 
-## Progress
+## 进度
 
 | Tag | What it adds |
 |---|---|
@@ -85,7 +85,7 @@ MINI_AGENT_MODEL=gpt-4.1-mini
 
 ## 📖 配套教程(免费开源)
 
-**[完整教程在 docs/ 目录](docs/README.md)**——主线 + 进阶共十几章,每章对应一个 tag:为什么这么写、Claude Code 原版怎么做、你会踩的坑。每章五段结构:做完长什么样 → 跟着写 → 为什么 → 坑 → 小结。
+**[完整教程在 docs/ 目录](docs/README.md)**——主线 + 进阶共三十多章,每章对应一个 tag:为什么这么写、Claude Code 原版怎么做、你会踩的坑。每章五段结构:做完长什么样 → 跟着写 → 为什么 → 坑 → 小结。
 
 想看更深的「为什么」:公众号的 **Harness Engineering 拆书系列**(30+ 篇)逐章拆了《Harness Engineering:从 Claude Code 看 AI 编码工程》——本仓库每个设计决策背后的原理、数据和事故案例都在那里。公众号 @老李是谁。
 
