@@ -21,6 +21,7 @@ import { expandMentions } from "./mentions.js"; // @file mentions: pull referenc
 import { banner, framedPrompt, formatModelChoices, statusLine, inputRule } from "./ui.js"; // welcome box, prompt, model labels, status line
 import { gitBranch, toggleLastCollapsed, cleanup as tuiCleanup } from "./tui.js"; // git branch for the status line + collapsible output
 import { promptSelect, promptForm } from "./menu.js"; // arrow-key approval menu + multi-question form
+import { editLine } from "./editor.js"; // our own line editor (keeps the status footer pinned even when input wraps)
 import { rememberTool, readMemory, readMemoryTyped, extractMemories, MEMORY_PATH } from "./memory.js"; // long-term project memory + auto-extract
 import { loadSkills, buildSkillTool, findSkill, skillInstructions, type Skill } from "./skills.js"; // Markdown-as-plugin skills
 import { initCostMeter, DEFAULT_PRICING } from "./cost.js"; // token & cost accounting for /cost
@@ -218,6 +219,7 @@ async function main() {
   // ONE readline interface for the whole session — the task prompt and the
   // permission prompts share it. Two interfaces on one stdin fight each other.
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  rl.setPrompt(""); // a TTY edits via our editor (not rl), so blank readline's default "> " — it would otherwise flash on resume()
 
   // Input plumbing: a line QUEUE instead of rl.question(). With piped stdin
   // all lines arrive at once — question() would catch the first and lose the
@@ -227,17 +229,11 @@ async function main() {
   const pendingLines: string[] = []; // lines that arrived before anyone asked
   const lineWaiters: ((line: string) => void)[] = []; // askers waiting for a line
   let stdinDone = false; // has stdin ended?
-  // A status footer can be "pinned" just BELOW the prompt (Claude-Code style): we
-  // draw it under the ❯ and move the cursor back up, so readline keeps editing the
-  // line above an unmoving status bar. The instant a line is submitted we erase it
-  // (cursor is now on the footer's first row → clear from here down).
-  let footerDrawn = false;
-  const clearFooter = () => {
-    if (footerDrawn && process.stdin.isTTY) process.stdout.write("\x1b[0J"); // erase from the cursor to end of screen
-    footerDrawn = false;
-  };
+  const history: string[] = []; // past prompts, for ↑/↓ recall in the editor
+  let editing = false; // true while our line editor owns stdin (so the running-key handler stands down)
   rl.on("line", (line) => {
-    clearFooter(); // a line was submitted — drop the pinned status bar before anything prints
+    // Only fires for NON-TTY (piped) input — a TTY goes through editLine, which
+    // doesn't emit readline 'line' events. Piped input has no footer to clear.
     const waiter = lineWaiters.shift(); // is somebody waiting?
     if (waiter) waiter(line); // hand the line over directly
     else pendingLines.push(line); // nobody waiting — queue it
@@ -247,18 +243,32 @@ async function main() {
     while (lineWaiters.length) lineWaiters.shift()!("exit"); // wake every waiter with a polite "exit"
   });
   // Get the next line of user input, showing a prompt if we have to wait.
-  const readUserLine = (prompt: string, footer?: string): Promise<string> => {
-    if (pendingLines.length) return Promise.resolve(pendingLines.shift()!); // typed-ahead (or piped) line — use it
-    if (stdinDone) return Promise.resolve("exit"); // stdin is gone — leave politely
-    rl.setPrompt(prompt); // show the prompt the redraw-safe way
-    rl.prompt();
-    // Pin a status bar below the prompt: save the cursor (sitting after ❯), print
-    // the footer underneath, then restore the cursor back onto the prompt line.
-    // readline now edits above an unmoving footer; 'line' wipes it on submit.
-    if (footer && process.stdin.isTTY) {
-      process.stdout.write("\x1b7" + "\n" + footer + "\x1b8"); // DECSC · footer · DECRC
-      footerDrawn = true;
+  const readUserLine = async (prompt: string, footer?: string): Promise<string> => {
+    if (pendingLines.length) return pendingLines.shift()!; // typed-ahead (or piped) line — use it
+    if (stdinDone) return "exit"; // stdin is gone — leave politely
+    if (process.stdin.isTTY) {
+      // Our editor owns the whole input block (prompt + wrapped input + footer),
+      // so the status bar stays pinned below however the line wraps.
+      editing = true;
+      try {
+        const res = await editLine(rl, { prompt, footer, history, onTab: () => toggleLastCollapsed() });
+        if (res.type === "line") {
+          if (res.value.trim()) history.push(res.value); // remember non-empty entries for ↑/↓
+          return res.value;
+        }
+        if (res.type === "cancel") {
+          // Ctrl+C at the prompt: exit the session (standard REPL behavior).
+          console.log();
+          process.exit(0);
+        }
+        return "exit"; // eof (Ctrl+D)
+      } finally {
+        editing = false;
+      }
     }
+    // Non-TTY (piped): the readline line queue, no prompt frame, no footer.
+    rl.setPrompt(prompt);
+    rl.prompt();
     return new Promise((resolve) => lineWaiters.push(resolve)); // wait for the next line
   };
 
@@ -552,15 +562,16 @@ async function main() {
   // The session loop: ask → run → render → ask again. This is what makes it
   // a conversation instead of a one-shot command.
 
-  // Raw-stdin key handling that applies while a task is running (readline isn't
-  // reading a line then, but keystrokes still arrive as data):
+  // Raw-stdin key handling that applies while a task is RUNNING. At the prompt
+  // the line editor owns stdin (and handles its own keys, incl. Tab → collapse),
+  // so we stand down whenever `editing` is true to avoid double-processing.
   //   Esc → interrupt the current operation and return to the prompt (like the
   //         first Ctrl+C, but without the "press again to force-quit" escalation).
-  //   Tab → toggle expand/collapse of the last tool block (only at the prompt).
   // A LONE Esc is one byte (0x1b); arrow keys etc. are multi-byte escape
   // sequences starting with 0x1b — the length check tells them apart.
   if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function") {
     process.stdin.on("data", (buf: Buffer) => {
+      if (editing) return; // the editor is in charge of these keys
       if (buf.length === 1 && buf[0] === 0x1b) {
         // Esc: stop the current operation, keep the session alive and typeable.
         if (running && !interrupted) {
@@ -568,8 +579,6 @@ async function main() {
           controller.abort(); // cancel the in-flight API request
           console.log(chalk.yellow("\n(esc — interrupted; back at the prompt)"));
         }
-      } else if (buf.length === 1 && buf[0] === 0x09) {
-        if (!running) toggleLastCollapsed(); // Tab at the prompt
       }
     });
   }
