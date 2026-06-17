@@ -15,6 +15,7 @@ import { connectMcpServers } from "./mcp.js"; // external tool servers (MCP)
 import { Judge } from "./judge.js"; // optional LLM permission classifier
 import { isPlanMode, setPlanMode } from "./permissions.js"; // plan mode: research-only until the user approves a plan
 import { undoLast, clearUndo, sessionChanges } from "./undo.js"; // /undo + /diff: take back, or review, this session's writes
+import { clearTodos, getTodos, renderTodos } from "./todos.js"; // the agent's plan: /todos to view, cleared with the conversation
 import { renderDiff } from "./diff.js"; // show what /undo put back / what /diff changed, reusing the Day 21 diff renderer
 import path from "node:path"; // shorten paths for the /diff summary
 import { expandMentions } from "./mentions.js"; // @file mentions: pull referenced files into context (secret files refused)
@@ -69,6 +70,7 @@ const SESSION_HELP = `commands:
   /memory    show the durable facts the agent remembers about this project
   /cost      tokens, cache hit rate and estimated spend this session (local)
   /plan      toggle plan mode — research-only; the agent presents a plan you approve before any change
+  /todos     show the agent's current task plan (it maintains one with todo_write on multi-step work)
   /undo      revert the most recent file write (write_file / edit_file) this session
   /diff      show every file changed this session, as a diff from where it started
   /resume    list recent sessions in this project and continue one of them
@@ -435,9 +437,15 @@ async function main() {
         messages = [{ role: "system", content: systemMessage }]; // drop everything but the constitution
         forgetFilesExcept([]); // the file read-state belongs to the conversation — clear it too
         clearUndo(); // a fresh conversation should not undo the previous one's writes
+        clearTodos(); // the plan belonged to the old task — drop it
         sessionId = newSessionId(); // a fresh conversation is a fresh session file
         console.log(chalk.dim("(history cleared)")); // confirm the reset
         return true;
+      case "/todos": {
+        const todos = getTodos(); // the agent's current checklist for this task
+        console.log(todos.length ? renderTodos(todos) : chalk.dim("(no plan yet — the agent writes one with todo_write on multi-step tasks)"));
+        return true;
+      }
       case "/stats":
         console.log(chalk.dim(statsReport())); // local counters, busiest first
         return true;
@@ -505,6 +513,7 @@ async function main() {
         sessionId = chosen.id; // keep appending to the resumed session's file
         forgetFilesExcept([]); // a resumed conversation must re-read files before editing them
         clearUndo(); // the previous session's writes are not ours to undo
+        clearTodos(); // the resumed task starts without the old session's stale plan
         console.log(chalk.dim(`(resumed ${chosen.id} — ${chosen.messages.length} messages; files must be re-read before editing)`));
         return true;
       }

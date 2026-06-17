@@ -82,6 +82,7 @@ MINI_AGENT_MODEL=gpt-4.1-mini
 | `day33` | Skill system (Markdown as a plugin): a `SKILL.md` (frontmatter + body) = one plugin, executed by the model; progressive disclosure (the listing in context / the body loaded on demand), the `skill` tool manual is the listing, `disableModelInvocation` splits model-callable vs user-only, `/skills` `/skill <name>`; `npm test` 360 cases |
 | `day34` | Deeper memory: four types (user/feedback/project/reference, feedback the most valuable), auto-extraction each turn (a cheap model reads the conversation and stores "what the user corrected", off by default, never throws), grouped injection by type, backward-compatible with the old format; `npm test` 375 cases |
 | `day35` | Deeper hooks: 4→10 events (adding UserPromptSubmit/SessionEnd/Pre·PostCompact/Subagent*), config becomes an open record, exit-2 meaning interpreted per-event by the caller, an extra-short SessionEnd timeout; **`PreToolUse` can rewrite a tool's arguments** (the "side road" the three-state permission can't do, strictly after the safety check); `npm test` 381 cases |
+| `day36` | TodoWrite: a `todo_write` tool that lets the agent keep its own checklist (whole-list replace, at most one in_progress, ✓/▶/○ render, `/todos` to view) — planning, not new powers; plus a nag that injects a reminder when an unfinished plan goes stale for N rounds, so long tasks don't drift off the original goal; `npm test` 474 cases |
 
 ## 📖 配套教程(免费开源)
 

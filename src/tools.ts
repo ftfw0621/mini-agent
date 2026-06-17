@@ -6,6 +6,7 @@ import type OpenAI from "openai"; // types only — no client is created here
 import { validateArgs, type ParamSchema } from "./validate.js"; // schema validation for tool arguments
 import { setPlanMode } from "./permissions.js"; // plan mode (Day 20): exit_plan_mode flips it off on approval
 import { recordMutation } from "./undo.js"; // capture the before-state so /undo (Day 22) can restore it
+import { parseTodos, setTodos, summarizeTodos } from "./todos.js"; // the agent's own checklist (Day 36)
 
 // ============ Session state ============
 // The foundation of "read before edit": which files has this session actually read?
@@ -296,6 +297,47 @@ On approval, plan mode turns off and writing/executing tools become available. I
   },
 };
 
+// ============ todo_write ============
+// The agent's planning tool (Day 36). The model sends the WHOLE list each time
+// (it replaces the previous one); we store it, show it, and hand back a one-line
+// tally. The array-of-objects schema is built by hand — the `def()` helper only
+// does flat string params. State + rendering + the nag live in todos.ts.
+const todoWrite: Tool = {
+  definition: {
+    type: "function",
+    function: {
+      name: "todo_write",
+      description: `Record and update a short plan for the CURRENT task as a checklist. This adds planning, NOT new abilities — it changes nothing on disk.
+When to use: a task with 3+ distinct steps, or whenever the user gives several requirements. Skip it for trivial one-step asks.
+How: pass the COMPLETE list every time (it replaces the previous one). Keep AT MOST ONE item in_progress. As you work, flip items to completed and move the next to in_progress — an out-of-date list is worse than none.`,
+      parameters: {
+        type: "object",
+        properties: {
+          todos: {
+            type: "array",
+            description: "The complete todo list, in order. Replaces the previous list.",
+            items: {
+              type: "object",
+              properties: {
+                content: { type: "string", description: "The step, phrased as an action" },
+                status: { type: "string", enum: ["pending", "in_progress", "completed"], description: "pending | in_progress | completed (only one in_progress)" },
+              },
+              required: ["content", "status"],
+            },
+          },
+        },
+        required: ["todos"],
+      },
+    },
+  },
+  run: (args) => {
+    const parsed = parseTodos((args as { todos?: unknown }).todos); // validate the model's list
+    if (parsed.error) return fail(parsed.error); // precise repair message, not a crash
+    setTodos(parsed.todos!); // store it (resets the nag clock); the loop renders it to the screen
+    return summarizeTodos(parsed.todos!); // concise tally back to the model — the pretty list is for the human
+  },
+};
+
 // ============ Registry & dispatch ============
 // The built-in tools. External tools (MCP servers, Day 15) are registered into
 // the same record at startup, so they flow through the same dispatch and the
@@ -308,6 +350,7 @@ export const tools: Record<string, Tool> = {
   search,
   run_bash: runBash,
   exit_plan_mode: exitPlanMode,
+  todo_write: todoWrite,
 };
 
 // Register an external tool (e.g. one discovered from an MCP server). Kept in

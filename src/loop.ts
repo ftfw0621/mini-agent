@@ -14,6 +14,7 @@ import { recordUsage } from "./cost.js"; // meter token usage from the stream
 import { mark, thinkingWord, spinnerText } from "./ui.js"; // centralized terminal styling (markers, spinner)
 import { printToolSummary } from "./tui.js"; // collapsible tool output
 import { MarkdownStream } from "./markdown.js"; // render the streamed answer as terminal markdown
+import { todoNag, getTodos, renderTodos } from "./todos.js"; // the agent's plan: show it on screen + nag when it goes stale
 
 export const MAX_RETRIES = 10; // total failed API calls per query, across all rounds
 export const MAX_RATE_LIMIT_RETRIES = 3; // 429s get their own, much smaller budget
@@ -211,7 +212,9 @@ async function streamModelCall(
       // Nested spawning means orphan processes and debugging hell.
       // include_usage adds a final chunk carrying token counts — that is how we
       // meter cost without a second (counting) request.
-      { model: opts.model, messages, tools: opts.subAgent ? toolDefinitions() : [...toolDefinitions(), taskTool, askUserTool], stream: true, stream_options: { include_usage: true } },
+      // Sub-agents don't get todo_write: the plan is the top-level agent's, and
+      // a sub-agent writing to the shared list would clobber it mid-task.
+      { model: opts.model, messages, tools: opts.subAgent ? toolDefinitions().filter((t) => !(t.type === "function" && t.function.name === "todo_write")) : [...toolDefinitions(), taskTool, askUserTool], stream: true, stream_options: { include_usage: true } },
       { signal }, // abortable by user AND watchdog
     );
     let content = ""; // accumulated answer text
@@ -329,6 +332,11 @@ async function runOneCall(call: AssembledCall, opts: LoopOptions): Promise<{ id:
       : `[permission] The user declined this action. Ask them how to proceed, or choose a safer alternative.`; // declined — tell the model
   } else {
     content = await runWithHooks(call, opts); // allow — run it (PreToolUse can still block)
+  }
+  // todo_write's whole point is the VISIBLE plan: the model got a one-line tally,
+  // the human gets the rendered checklist (quiet runs — eval/sub-agents — stay silent).
+  if (call.name === "todo_write" && !opts.quiet && !content.startsWith("[error]")) {
+    console.log(renderTodos(getTodos()));
   }
   return { id: call.id, content }; // paired by id for the API
 }
@@ -560,6 +568,17 @@ export async function runLoop(
         // A single non-read-only call: gate, maybe ask, execute — all serial.
         const r = await runOneCall(out.toolCalls[i++], opts);
         messages.push({ role: "tool", tool_call_id: r.id, content: r.content });
+      }
+
+      // The nag: if there's an unfinished plan the model has stopped touching for
+      // a few rounds, slip in a reminder so the list doesn't go stale and
+      // meaningless. Top-level only — a sub-agent has no plan of its own.
+      if (!opts.subAgent) {
+        const nag = todoNag();
+        if (nag) {
+          messages.push({ role: "user", content: nag });
+          if (!opts.quiet) console.log(chalk.dim("  ⎿ plan reminder injected"));
+        }
       }
       break; // round complete, move to the next one
     }

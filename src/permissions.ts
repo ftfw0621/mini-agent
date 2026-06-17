@@ -112,6 +112,7 @@ function planSafe(toolName: string, verdict: Verdict): boolean {
     case "task": // the sub-agent's own calls hit this same gate, still in plan mode
     case "ask_user": // asking the user a question is safe in plan mode — it doesn't change anything
     case "skill": // loading a skill's instructions is read-only; what it does is gated per-call
+    case "todo_write": // planning is exactly what plan mode is FOR — never block it
     case "exit_plan_mode": // the way OUT of plan mode must never be blocked by plan mode
       return true;
     case "run_bash":
@@ -168,6 +169,9 @@ function basePermission(toolName: string, argsJson: string): Verdict {
       // Loading a skill just returns instructions; whatever the skill then DOES
       // goes through this same gate, call by call. Loading itself is free.
       return { decision: "allow", reason: "loads instructions, no side effects", summary: "skill" };
+    case "todo_write":
+      // Writing the plan touches nothing but in-memory state and the screen.
+      return { decision: "allow", reason: "updates the plan, no side effects", summary: "todo_write" };
     case "read_file": {
       const p = args.path ?? ""; // the file the model wants to read
       if (SECRET_FILE_RE.test(path.resolve(p))) {

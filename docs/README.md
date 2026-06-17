@@ -51,6 +51,7 @@
 | [Ch33](ch33-skills.md) | Markdown 即插件:Skill 系统(写个 .md 就是扩展) | `day33` |
 | [Ch34](ch34-memory-extract.md) | 记忆会自己长出来:分类型 + 自动提取 | `day34` |
 | [Ch35](ch35-hooks-deep.md) | Hook 长全:更多时机 + 改写工具参数 | `day35` |
+| [Ch36](ch36-todo-write.md) | 给 agent 一张待办清单:TodoWrite + 催办 | `day36` |
 
 ## 怎么学
 
