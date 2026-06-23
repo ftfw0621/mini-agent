@@ -113,9 +113,11 @@ function planSafe(toolName: string, verdict: Verdict): boolean {
     case "ask_user": // asking the user a question is safe in plan mode — it doesn't change anything
     case "skill": // loading a skill's instructions is read-only; what it does is gated per-call
     case "todo_write": // planning is exactly what plan mode is FOR — never block it
+    case "bash_output": // reading a background task's output observes, never mutates
     case "exit_plan_mode": // the way OUT of plan mode must never be blocked by plan mode
       return true;
     case "run_bash":
+    case "run_bash_background":
       return verdict.decision === "allow"; // only the read-only commands the classifier cleared
     default:
       return false; // write_file, edit_file, MCP and unknown tools: all mutate-or-unknown
@@ -192,16 +194,25 @@ function basePermission(toolName: string, argsJson: string): Verdict {
       }
       return { decision: "ask", reason: "writes to your filesystem", summary: p }; // normal writes need a human yes
     }
-    case "run_bash": {
+    case "run_bash":
+    case "run_bash_background": {
+      // Backgrounding changes WHEN output comes back, never WHAT runs — so a
+      // background command gets the exact same input-aware analysis as a
+      // foreground one. The danger is in the command, not the blocking.
       const verdict = checkBash(args.command ?? ""); // bash gets input-aware analysis
       // "Don't ask again for run_bash this session" (chosen in the approval menu)
       // upgrades an ASK to ALLOW — but a hard DENY (rm -rf /, .git, .env…) always
-      // stands. Convenience never overrides the no-fly rules.
-      if (verdict.decision === "ask" && CONFIG.permissions.allow.includes("tool:run_bash")) {
+      // stands. Convenience never overrides the no-fly rules. A grant for either
+      // shell tool covers the other: the command is what was vouched for.
+      if (verdict.decision === "ask" && (CONFIG.permissions.allow.includes(`tool:${toolName}`) || CONFIG.permissions.allow.includes("tool:run_bash"))) {
         return { decision: "allow", reason: "bash pre-approved for this session", summary: verdict.summary };
       }
       return verdict;
     }
+    case "bash_output":
+      // Polling a background task only reads its captured output and status —
+      // it touches nothing on the user's filesystem. Always safe.
+      return { decision: "allow", reason: "reads background task output, no side effects", summary: args.task_id ?? "bash_output" };
     case "exit_plan_mode": {
       // Outside plan mode this tool does nothing — let it through silently. In
       // plan mode it is the approval gate: ask the human, showing the plan, and

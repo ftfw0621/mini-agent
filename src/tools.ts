@@ -7,6 +7,7 @@ import { validateArgs, type ParamSchema } from "./validate.js"; // schema valida
 import { setPlanMode } from "./permissions.js"; // plan mode (Day 20): exit_plan_mode flips it off on approval
 import { recordMutation } from "./undo.js"; // capture the before-state so /undo (Day 22) can restore it
 import { parseTodos, setTodos, summarizeTodos } from "./todos.js"; // the agent's own checklist (Day 36)
+import { startBackground, readBackground } from "./background.js"; // long-running commands that outlive the turn (Day 37)
 
 // ============ Session state ============
 // The foundation of "read before edit": which files has this session actually read?
@@ -275,6 +276,57 @@ On error: failures return the error output — analyze it and try a different ap
     }),
 };
 
+// ============ run_bash_background (Day 37) ============
+// run_bash blocks and dies at its 30s watchdog — useless for anything truly
+// slow. This is its asynchronous twin: it spawns the command and returns a task
+// id IMMEDIATELY, so the agent keeps reasoning while the work happens. The loop
+// injects a <task_notification> when the command finishes (background.ts). Use
+// it for installs, builds, full test runs, or servers that never exit — exactly
+// the keywords that signal a slow operation. The command goes through the SAME
+// permission gate as run_bash (see permissions.ts), so the danger rules are
+// identical; only the blocking behavior differs.
+const runBashBackground: Tool = {
+  definition: def(
+    "run_bash_background",
+    `Run a slow bash command in the BACKGROUND and return immediately with a task id (e.g. bg_1) — do NOT wait for it.
+When to use: anything that would exceed run_bash's 30s limit or block you — installing dependencies (npm/pip install), builds (npm run build, cargo build, make), full test suites (pytest, npm test), deploys, or long-running servers (npm run dev) that never exit.
+What you get back: just the task id. The command keeps running. When it finishes you'll receive a <task_notification> with its status and output tail — react to that. For a server or a job still running, poll it with bash_output.
+Boundaries & permissions are identical to run_bash (dangerous commands are still gated or denied). For quick commands use run_bash instead — waiting on a one-off background job wastes a turn.`,
+    { command: { type: "string", description: "The bash command to run in the background" } },
+    ["command"],
+  ),
+  // Fire-and-return: start the process, hand back the id. The output is captured
+  // by background.ts and delivered later as a notification — never inline here.
+  run: (args) => {
+    const id = startBackground(args.command);
+    return `Started background task ${id}: ${args.command}\nIt is running now; you will get a <task_notification> when it finishes. Keep working — use bash_output with task_id "${id}" to check on it (e.g. to confirm a server came up).`;
+  },
+};
+
+// ============ bash_output (Day 37) ============
+// Poll a background task: its status and any output produced since the last
+// poll. Essential for the case a notification can never cover — a server that
+// runs forever (npm run dev) never "finishes", so the only way to see "ready on
+// :3000" is to read its output. Reading advances a per-task cursor, so repeated
+// polls show only what's new, not the whole log every time.
+const bashOutput: Tool = {
+  definition: def(
+    "bash_output",
+    `Check on a background task started with run_bash_background: returns its status and any NEW output since you last checked.
+When to use: to see if a long job is done, or to read a long-running server's output (e.g. confirm "listening on :3000"). A finished task also sends you a <task_notification> automatically — you don't need to poll just to learn it ended.
+Pass full=true to get the entire captured log instead of only the new lines. On an unknown task id you'll get the list of ids that exist.`,
+    {
+      task_id: { type: "string", description: "The background task id, e.g. bg_1" },
+      full: { type: "boolean", description: "Return the entire captured output instead of only new output since the last check (default false)" },
+    },
+    ["task_id"],
+  ),
+  run: (args) => {
+    const full = (args as { full?: unknown }).full === true; // optional boolean
+    return spillIfHuge(readBackground(args.task_id, full), "background output");
+  },
+};
+
 // ============ exit_plan_mode ============
 // Plan mode (Day 20) makes the agent research-only: the permission gate blocks
 // every mutating tool until the model presents a plan the user approves. The
@@ -349,6 +401,8 @@ export const tools: Record<string, Tool> = {
   edit_file: editFile,
   search,
   run_bash: runBash,
+  run_bash_background: runBashBackground,
+  bash_output: bashOutput,
   exit_plan_mode: exitPlanMode,
   todo_write: todoWrite,
 };
@@ -398,7 +452,7 @@ export async function dispatch(name: string, argsJson: string, signal?: AbortSig
   // own output (preview + spill-to-disk via spillIfHuge); its cap must leave
   // room for the spill note, or dispatch would chop off the very pointer the
   // model needs to read the rest.
-  const cap = name === "read_file" ? READ_LIMIT + 100 : name === "run_bash" ? BASH_OUTPUT_LIMIT + SPILL_NOTE_SLACK : TOOL_RESULT_LIMIT;
+  const cap = name === "read_file" ? READ_LIMIT + 100 : name === "run_bash" || name === "bash_output" ? BASH_OUTPUT_LIMIT + SPILL_NOTE_SLACK : TOOL_RESULT_LIMIT;
   try {
     const result = await tool.run(args, signal); // await covers both sync and async tools
     return result.slice(0, cap); // cap the result size

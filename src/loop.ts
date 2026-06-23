@@ -15,6 +15,7 @@ import { mark, thinkingWord, spinnerText } from "./ui.js"; // centralized termin
 import { printToolSummary } from "./tui.js"; // collapsible tool output
 import { MarkdownStream } from "./markdown.js"; // render the streamed answer as terminal markdown
 import { todoNag, getTodos, renderTodos } from "./todos.js"; // the agent's plan: show it on screen + nag when it goes stale
+import { pendingNotifications } from "./background.js"; // background tasks (Day 37): surface finished jobs as a turn
 
 export const MAX_RETRIES = 10; // total failed API calls per query, across all rounds
 export const MAX_RATE_LIMIT_RETRIES = 3; // 429s get their own, much smaller budget
@@ -443,6 +444,24 @@ async function tryCompact(
   }
 }
 
+// Surface any FINISHED background tasks (Day 37) as a user turn, so the model
+// sees the result of work it kicked off earlier. Mirrors the tutorial reference,
+// adapted to the OpenAI wire protocol: tool results are their own role:"tool"
+// messages, so a notification can't ride inside them — it follows as a user
+// message instead (exactly how the todo nag and Stop hook already inject turns).
+// Top-level only: a sub-agent has no separate turn loop to inject into, and the
+// notification belongs to the agent that started the job. Returns true if it
+// injected something. Each finished task notifies exactly once (background.ts).
+function injectBackgroundNotifications(messages: OpenAI.ChatCompletionMessageParam[], opts: LoopOptions): boolean {
+  if (opts.subAgent) return false; // notifications belong to the top-level conversation
+  const note = pendingNotifications(); // "" unless a task finished since we last checked
+  if (!note) return false;
+  const count = (note.match(/<task_notification>/g) ?? []).length; // for the one-line on-screen mark
+  messages.push({ role: "user", content: note }); // the model reacts to it on the next round
+  if (!opts.quiet) console.log(mark.bgNote(count));
+  return true;
+}
+
 // The agent main loop, as a state machine: every iteration either continues
 // for a named reason or terminates for a named reason — nothing implicit.
 export async function runLoop(
@@ -546,6 +565,11 @@ export async function runLoop(
             break; // exit the inner while → advance the round counter
           }
         }
+        // A background task may have finished in the very round the model decided
+        // to stop. Don't return with an unread result on the table: surface it and
+        // run one more round so the model can react. Each task notifies once, so
+        // this adds at most one round per finished task — never an infinite stop.
+        if (injectBackgroundNotifications(messages, opts)) break; // exit the inner while → advance the round counter
         return { reason: TerminateReason.Done, finalText: out.content }; // no tool calls = final answer (already streamed to the screen)
       }
 
@@ -569,6 +593,12 @@ export async function runLoop(
         const r = await runOneCall(out.toolCalls[i++], opts);
         messages.push({ role: "tool", tool_call_id: r.id, content: r.content });
       }
+
+      // Background tasks (Day 37): if a job the model started has finished, slip
+      // its <task_notification> in here, right after this round's tool results —
+      // the model sees the outcome on the next round without ever having blocked
+      // on it. Tasks that are still running stay silent until they finish.
+      injectBackgroundNotifications(messages, opts);
 
       // The nag: if there's an unfinished plan the model has stopped touching for
       // a few rounds, slip in a reminder so the list doesn't go stale and

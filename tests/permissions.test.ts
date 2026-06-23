@@ -51,6 +51,18 @@ expectVerdict(".github is not .git", "run_bash", { command: "ls .github/workflow
 expectVerdict("task tool allowed", "task", { description: "count files" }, "allow");
 expectVerdict("unknown tool asks", "made_up_tool", {}, "ask");
 
+// ---- background tasks (Day 37) ------------------------------------------------------------------
+// Backgrounding changes WHEN output returns, never WHAT runs — so run_bash_background
+// must get the EXACT same input-aware analysis as run_bash. The danger lives in the
+// command, and a malicious one must not slip the gate by asking to run async.
+expectVerdict("bg npm install allowed", "run_bash_background", { command: "npm install" }, "allow"); // npm is allowlisted, same as run_bash
+expectVerdict("bg known-safe allowed", "run_bash_background", { command: "node server.js" }, "allow");
+expectVerdict("bg unrecognized asks", "run_bash_background", { command: "make release" }, "ask"); // unknown first word → ask, fail closed
+expectVerdict("bg rm -rf / still denied", "run_bash_background", { command: "rm -rf /" }, "deny");
+expectVerdict("bg .env still denied", "run_bash_background", { command: "cat .env" }, "deny");
+expectVerdict("bg rm asks", "run_bash_background", { command: "rm old.txt" }, "ask");
+expectVerdict("bash_output always allowed", "bash_output", { task_id: "bg_1" }, "allow");
+
 // ---- user-configured rules (settings files) -----------------------------------------------------
 // The test seam: CONFIG.permissions is intentionally mutable so suites can
 // inject rules without writing temp settings files.

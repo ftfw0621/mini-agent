@@ -26,6 +26,7 @@ import { editLine } from "./editor.js"; // our own line editor (keeps the status
 import { rememberTool, readMemory, readMemoryTyped, extractMemories, MEMORY_PATH } from "./memory.js"; // long-term project memory + auto-extract
 import { loadSkills, buildSkillTool, findSkill, skillInstructions, type Skill } from "./skills.js"; // Markdown-as-plugin skills
 import { initCostMeter, DEFAULT_PRICING } from "./cost.js"; // token & cost accounting for /cost
+import { listBackground, hasRunningBackground, killAllBackground } from "./background.js"; // background tasks: /bg view + kill-on-exit (Day 37)
 
 // package.json sits one level above both src/ (dev) and dist/ (built) — same path either way.
 const pkg = createRequire(import.meta.url)("../package.json") as { version: string };
@@ -71,6 +72,7 @@ const SESSION_HELP = `commands:
   /cost      tokens, cache hit rate and estimated spend this session (local)
   /plan      toggle plan mode — research-only; the agent presents a plan you approve before any change
   /todos     show the agent's current task plan (it maintains one with todo_write on multi-step work)
+  /bg        list background tasks this session (run_bash_background) and their status
   /undo      revert the most recent file write (write_file / edit_file) this session
   /diff      show every file changed this session, as a diff from where it started
   /resume    list recent sessions in this project and continue one of them
@@ -140,6 +142,7 @@ async function main() {
   // server that fails to start is skipped, never fatal.
   const disconnectMcp = await connectMcpServers();
   process.on("exit", disconnectMcp); // best-effort cleanup of server subprocesses
+  process.on("exit", killAllBackground); // Day 37: SIGKILL any background job (dev server, slow install) so it never outlives the agent as an orphan
 
   // The optional LLM permission judge, built once if a settings file enabled it.
   const judge = CONFIG.judge.enabled ? new Judge(client, CONFIG.judge.model || CONFIG.model) : undefined;
@@ -446,6 +449,21 @@ async function main() {
         console.log(todos.length ? renderTodos(todos) : chalk.dim("(no plan yet — the agent writes one with todo_write on multi-step tasks)"));
         return true;
       }
+      case "/bg": {
+        // The background jobs (run_bash_background) started this session — what's
+        // still running, what finished, and with what exit status.
+        const bg = listBackground();
+        if (!bg.length) {
+          console.log(chalk.dim("(no background tasks — the agent starts them with run_bash_background for slow commands)"));
+          return true;
+        }
+        const icon = { running: chalk.yellow("●"), completed: chalk.green("✓"), failed: chalk.red("✗"), killed: chalk.dim("∅") };
+        console.log(chalk.dim(`background tasks this session:`));
+        for (const t of bg) {
+          console.log(chalk.dim(`  ${icon[t.status]} ${t.id} [${t.status}, ${t.elapsed}s] — ${t.command.slice(0, 70)}`));
+        }
+        return true;
+      }
       case "/stats":
         console.log(chalk.dim(statsReport())); // local counters, busiest first
         return true;
@@ -606,7 +624,10 @@ async function main() {
     }
     const line = (await readUserLine(framedPrompt(isPlanMode()), footer)).trim(); // next input, or "exit" on EOF
     if (!line) continue; // empty line — just re-prompt
-    if (line === "exit" || line === "quit") break; // explicit goodbye
+    if (line === "exit" || line === "quit") {
+      if (hasRunningBackground()) console.log(chalk.yellow("(stopping background tasks still running — see /bg)")); // Day 37: they're about to be SIGKILLed on exit
+      break; // explicit goodbye
+    }
     if (await handleCommand(line)) continue; // slash commands never reach the model
 
     // UserPromptSubmit hook: a chance to validate/inject before the model sees
