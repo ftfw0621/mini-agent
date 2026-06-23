@@ -27,6 +27,7 @@ import { rememberTool, readMemory, readMemoryTyped, extractMemories, MEMORY_PATH
 import { loadSkills, buildSkillTool, findSkill, skillInstructions, type Skill } from "./skills.js"; // Markdown-as-plugin skills
 import { initCostMeter, DEFAULT_PRICING } from "./cost.js"; // token & cost accounting for /cost
 import { listBackground, hasRunningBackground, killAllBackground } from "./background.js"; // background tasks: /bg view + kill-on-exit (Day 37)
+import { listTeam, resetTeam } from "./team.js"; // agent teams: /team view + reset on clear/resume (Day 38)
 
 // package.json sits one level above both src/ (dev) and dist/ (built) — same path either way.
 const pkg = createRequire(import.meta.url)("../package.json") as { version: string };
@@ -73,6 +74,7 @@ const SESSION_HELP = `commands:
   /plan      toggle plan mode — research-only; the agent presents a plan you approve before any change
   /todos     show the agent's current task plan (it maintains one with todo_write on multi-step work)
   /bg        list background tasks this session (run_bash_background) and their status
+  /team      list the agent team (spawn_teammate): each teammate's role, status, and pending inbox
   /undo      revert the most recent file write (write_file / edit_file) this session
   /diff      show every file changed this session, as a diff from where it started
   /resume    list recent sessions in this project and continue one of them
@@ -441,6 +443,7 @@ async function main() {
         forgetFilesExcept([]); // the file read-state belongs to the conversation — clear it too
         clearUndo(); // a fresh conversation should not undo the previous one's writes
         clearTodos(); // the plan belonged to the old task — drop it
+        resetTeam(); // the team belonged to the old task — forget it (mailboxes re-wipe on next use)
         sessionId = newSessionId(); // a fresh conversation is a fresh session file
         console.log(chalk.dim("(history cleared)")); // confirm the reset
         return true;
@@ -461,6 +464,22 @@ async function main() {
         console.log(chalk.dim(`background tasks this session:`));
         for (const t of bg) {
           console.log(chalk.dim(`  ${icon[t.status]} ${t.id} [${t.status}, ${t.elapsed}s] — ${t.command.slice(0, 70)}`));
+        }
+        return true;
+      }
+      case "/team": {
+        // The agent team (spawn_teammate): who's running, who's done, and how
+        // many messages still sit unread in each one's on-disk inbox.
+        const team = listTeam();
+        if (!team.length) {
+          console.log(chalk.dim("(no team — the agent forms one with spawn_teammate for large parallel tasks)"));
+          return true;
+        }
+        const icon = { running: chalk.yellow("●"), done: chalk.green("✓"), failed: chalk.red("✗") };
+        console.log(chalk.dim(`agent team this session:`));
+        for (const t of team) {
+          const inbox = t.pending ? chalk.yellow(` · ${t.pending} unread`) : "";
+          console.log(chalk.dim(`  ${icon[t.status]} ${t.name} [${t.status}, ${t.elapsed}s] — ${t.role.slice(0, 60)}${inbox}`));
         }
         return true;
       }
@@ -532,6 +551,7 @@ async function main() {
         forgetFilesExcept([]); // a resumed conversation must re-read files before editing them
         clearUndo(); // the previous session's writes are not ours to undo
         clearTodos(); // the resumed task starts without the old session's stale plan
+        resetTeam(); // a resumed conversation starts with no live team
         console.log(chalk.dim(`(resumed ${chosen.id} — ${chosen.messages.length} messages; files must be re-read before editing)`));
         return true;
       }

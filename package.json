@@ -16,7 +16,7 @@
     "eval": "tsx --env-file=.env eval/run.ts",
     "build": "tsc -p tsconfig.build.json",
     "prepare": "npm run build",
-    "test": "tsx tests/tools.test.ts && tsx tests/permissions.test.ts && tsx tests/context.test.ts && tsx tests/hooks.test.ts && tsx tests/mcp.test.ts && tsx tests/judge.test.ts && tsx tests/memory.test.ts && tsx tests/cost.test.ts && tsx tests/validate.test.ts && tsx tests/plan.test.ts && tsx tests/diff.test.ts && tsx tests/undo.test.ts && tsx tests/tiering.test.ts && tsx tests/mcp-http.test.ts && tsx tests/changes.test.ts && tsx tests/mentions.test.ts && tsx tests/session.test.ts && tsx tests/ui.test.ts && tsx tests/approval.test.ts && tsx tests/form.test.ts && tsx tests/model.test.ts && tsx tests/reasoning.test.ts && tsx tests/skills.test.ts && tsx tests/markdown.test.ts && tsx tests/editor.test.ts && tsx tests/todos.test.ts && tsx tests/background.test.ts"
+    "test": "tsx tests/tools.test.ts && tsx tests/permissions.test.ts && tsx tests/context.test.ts && tsx tests/hooks.test.ts && tsx tests/mcp.test.ts && tsx tests/judge.test.ts && tsx tests/memory.test.ts && tsx tests/cost.test.ts && tsx tests/validate.test.ts && tsx tests/plan.test.ts && tsx tests/diff.test.ts && tsx tests/undo.test.ts && tsx tests/tiering.test.ts && tsx tests/mcp-http.test.ts && tsx tests/changes.test.ts && tsx tests/mentions.test.ts && tsx tests/session.test.ts && tsx tests/ui.test.ts && tsx tests/approval.test.ts && tsx tests/form.test.ts && tsx tests/model.test.ts && tsx tests/reasoning.test.ts && tsx tests/skills.test.ts && tsx tests/markdown.test.ts && tsx tests/editor.test.ts && tsx tests/todos.test.ts && tsx tests/background.test.ts && tsx tests/team.test.ts"
   },
   "engines": {
     "node": ">=20.6"

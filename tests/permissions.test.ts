@@ -51,6 +51,12 @@ expectVerdict(".github is not .git", "run_bash", { command: "ls .github/workflow
 expectVerdict("task tool allowed", "task", { description: "count files" }, "allow");
 expectVerdict("unknown tool asks", "made_up_tool", {}, "ask");
 
+// ---- agent teams (Day 38) -----------------------------------------------------------------------
+// Spawning and messaging are orchestration with no direct filesystem effect, like
+// task/ask_user. Each teammate's OWN tool calls still hit this gate individually.
+expectVerdict("spawn_teammate allowed", "spawn_teammate", { name: "api", role: "routes", task: "build the API" }, "allow");
+expectVerdict("send_message allowed", "send_message", { to: "lead", content: "done" }, "allow");
+
 // ---- background tasks (Day 37) ------------------------------------------------------------------
 // Backgrounding changes WHEN output returns, never WHAT runs — so run_bash_background
 // must get the EXACT same input-aware analysis as run_bash. The danger lives in the

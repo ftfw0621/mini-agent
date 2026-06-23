@@ -55,6 +55,9 @@ export const mark = {
     chalk.blue("  ⎿ sub-agent") + (tier ? chalk.dim(` [${tier}]`) : "") + chalk.blue(`: ${desc}`),
   subAgentDone: chalk.blue("  ⎿ sub-agent done"),
   bgNote: (n: number) => chalk.magenta("  ⎿ ") + chalk.magenta(`${n} background task${n === 1 ? "" : "s"} finished — notified the agent`), // Day 37
+  teammateStart: (name: string, role: string) => chalk.magenta("  ⎿ teammate ") + chalk.bold(name) + chalk.magenta(` spawned`) + chalk.dim(` — ${role}`), // Day 38
+  teammateDone: (name: string, ok: boolean) => (ok ? chalk.magenta("  ⎿ teammate ") + chalk.bold(name) + chalk.magenta(" finished") : chalk.yellow("  ⎿ teammate ") + chalk.bold(name) + chalk.yellow(" ended (not done)")),
+  inbox: (n: number) => chalk.magenta("  ⎿ ") + chalk.magenta(`${n} team message${n === 1 ? "" : "s"} received`),
   note: (s: string) => chalk.dim(s), // dim asides (resumed, attached, cleared…)
   warn: (s: string) => chalk.yellow(s),
 };

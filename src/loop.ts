@@ -6,7 +6,8 @@ import { classifyError, ApiErrorKind } from "./errors.js"; // failure taxonomy
 import { checkPermission } from "./permissions.js"; // the allow/ask/deny gate
 import { previewChange } from "./diff.js"; // show the diff before a write so approval is informed
 import { estimateHistoryTokens, compactHistory, COMPACT_AT, MAX_COMPACTIONS_PER_QUERY, MAX_COMPACT_FAILURES } from "./context.js"; // context management
-import { SUB_AGENT_PROMPT } from "./prompt.js"; // the sub-agent's own constitution
+import { SUB_AGENT_PROMPT, TEAMMATE_PROMPT } from "./prompt.js"; // the sub-agent + teammate constitutions
+import { LEAD, MAX_TEAMMATES, sendMessage, readInbox, inboxCount, registerTeammate, finishTeammate, teammateExists, teammateCount, activeTeammateCount } from "./team.js"; // agent teams (Day 38): mailboxes + teammate registry
 import { emit } from "./telemetry.js"; // local-only event log (no-op unless the CLI armed it)
 import { runHooks } from "./hooks.js"; // user lifecycle hooks (PreToolUse / PostToolUse / Stop)
 import type { Judge } from "./judge.js"; // optional LLM permission classifier
@@ -54,6 +55,8 @@ export interface LoopOptions {
   confirm: (question: string, toolName?: string) => Promise<boolean>; // ask the human; resolves false in non-interactive sessions. toolName lets "don't ask again" target the right tool
   quiet?: boolean; // suppress all narration (used by the eval harness)
   subAgent?: boolean; // this loop IS a sub-agent: no task tool, no text streaming, indented tool logs
+  teammate?: { name: string }; // this loop IS a teammate on a team (Day 38): has send_message + an inbox, reads its mailbox each round, runs bounded; implies subAgent behavior
+  maxRounds?: number; // hard cap on rounds for this loop (teammates are bounded so a team can't run away); unset = the usual unbounded-with-safeguards loop
   subAgentModel?: string; // model to run delegated sub-agents on; falls back to `model`
   judge?: Judge; // optional LLM classifier that auto-allows clearly-safe "ask" commands
   askUser?: (questions: { question: string; options: string[] }[]) => Promise<{ question: string; answer: string }[] | null>; // present a multi-question form (Day 30); null if cancelled/non-interactive
@@ -117,6 +120,69 @@ If the user cancels, you'll be told — then proceed with your best judgment or 
     },
   },
 };
+
+// The spawn_teammate tool (Day 38): the Lead's handle on a PERSISTENT worker.
+// Unlike `task` (one-shot, returns once), a teammate runs concurrently and keeps
+// talking — it messages the lead as it works and is reachable via send_message.
+// Defined here (not tools.ts) because running it needs the loop itself.
+const spawnTeammateTool: OpenAI.ChatCompletionTool = {
+  type: "function",
+  function: {
+    name: "spawn_teammate",
+    description: `Spawn a PERSISTENT teammate that works in parallel with you and the rest of the team. Use this for a large task with distinct streams of work that need to coordinate as they go (e.g. one teammate on the API, one on the database) — not for a quick lookup (use task) or a single linear job (do it yourself).
+The teammate runs concurrently in a fresh context with read/write/search/bash tools. It can message you and other teammates at any time, and you'll receive its result when it finishes. You can run a few at once.
+Give it a short unique name and a one-line role, and a complete self-contained task (it knows nothing about this conversation). After spawning, keep coordinating: you'll get its messages in your inbox; reply with send_message.`,
+    parameters: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "A short, unique name for the teammate (e.g. 'api', 'db', 'tests')" },
+        role: { type: "string", description: "One line describing its specialty/responsibility" },
+        task: { type: "string", description: "The complete, self-contained task for the teammate to carry out" },
+      },
+      required: ["name", "role", "task"],
+    },
+  },
+};
+
+// The send_message tool (Day 38): drop a message in another agent's mailbox.
+// Available to the Lead AND to teammates — it is how a team coordinates.
+const sendMessageTool: OpenAI.ChatCompletionTool = {
+  type: "function",
+  function: {
+    name: "send_message",
+    description: `Send a message to another agent on the team (a teammate by name, or "lead"). The message lands in their inbox and they see it on their next round. Use it to share findings, hand off work, ask a specific question, or report progress to the lead. Returns once delivered; it does NOT wait for a reply — keep working, and their response will arrive in your inbox.`,
+    parameters: {
+      type: "object",
+      properties: {
+        to: { type: "string", description: 'Recipient agent name, or "lead" for the coordinator' },
+        content: { type: "string", description: "The message text" },
+      },
+      required: ["to", "content"],
+    },
+  },
+};
+
+// Which tool manuals does THIS agent get? One place so the three agent kinds
+// stay clearly distinct:
+//   - Lead / top-level: everything, plus task, ask_user, and the team tools.
+//   - Teammate: a focused worker set + send_message; NO task, NO spawn_teammate
+//     (nested spawning is forbidden), NO ask_user (can't reach the human), and
+//     none of the planning/background extras.
+//   - Plain sub-agent (task): all built-ins except todo_write (unchanged).
+const TEAMMATE_TOOLS = new Set(["read_file", "write_file", "edit_file", "search", "run_bash"]); // the teammate's focused kit
+function toolsFor(opts: LoopOptions): OpenAI.ChatCompletionTool[] {
+  const builtins = toolDefinitions();
+  if (opts.teammate) {
+    const kit = builtins.filter((t) => t.type === "function" && TEAMMATE_TOOLS.has(t.function.name));
+    return [...kit, sendMessageTool];
+  }
+  if (opts.subAgent) {
+    // Sub-agents don't get todo_write: the plan is the top-level agent's, and a
+    // sub-agent writing to the shared list would clobber it mid-task.
+    return builtins.filter((t) => !(t.type === "function" && t.function.name === "todo_write"));
+  }
+  return [...builtins, taskTool, askUserTool, spawnTeammateTool, sendMessageTool]; // the Lead can do everything
+}
 
 // Run one sub-agent: a fresh conversation, same tools minus task, same
 // permission gate, and the parent's file read-state protected by a snapshot.
@@ -213,9 +279,10 @@ async function streamModelCall(
       // Nested spawning means orphan processes and debugging hell.
       // include_usage adds a final chunk carrying token counts — that is how we
       // meter cost without a second (counting) request.
-      // Sub-agents don't get todo_write: the plan is the top-level agent's, and
-      // a sub-agent writing to the shared list would clobber it mid-task.
-      { model: opts.model, messages, tools: opts.subAgent ? toolDefinitions().filter((t) => !(t.type === "function" && t.function.name === "todo_write")) : [...toolDefinitions(), taskTool, askUserTool], stream: true, stream_options: { include_usage: true } },
+      // The tool manual depends on the agent kind (Lead / teammate / sub-agent)
+      // — see toolsFor(). This is also where nested spawning is prevented: a
+      // teammate's manual simply omits spawn_teammate and task.
+      { model: opts.model, messages, tools: toolsFor(opts), stream: true, stream_options: { include_usage: true } },
       { signal }, // abortable by user AND watchdog
     );
     let content = ""; // accumulated answer text
@@ -288,7 +355,7 @@ async function streamModelCall(
 // calls (allow/deny only, never "ask") are safe to run via this from inside a
 // Promise.all batch; calls that can prompt must be awaited one at a time.
 async function runOneCall(call: AssembledCall, opts: LoopOptions): Promise<{ id: string; content: string }> {
-  const indent = opts.subAgent ? chalk.blue("  ⎿ ") : ""; // sub-agent activity is visually nested
+  const indent = opts.teammate ? chalk.magenta(`  ⎿ [${opts.teammate.name}] `) : opts.subAgent ? chalk.blue("  ⎿ ") : ""; // teammate activity is tagged by name; plain sub-agent is nested in blue
   if (!opts.quiet) {
     // Compact one-line summary — long args are hidden behind Tab.
     const summary = indent + mark.tool(call.name, call.args.length > 60 ? call.args.slice(0, 57) + "..." : call.args);
@@ -388,6 +455,10 @@ async function execute(call: AssembledCall, opts: LoopOptions): Promise<string> 
   // ask_user is special like task: running it needs the CLI's prompt, not the
   // tool registry. It presents a form and feeds the selections back to the model.
   if (call.name === "ask_user") return runAskUser(call, opts);
+  // The team tools (Day 38) are loop-level like task: they need the loop and the
+  // shared mailbox state, not the tool registry.
+  if (call.name === "send_message") return runSendMessage(call, opts);
+  if (call.name === "spawn_teammate") return runSpawnTeammate(call, opts);
 
   if (call.name !== "task") return dispatch(call.name, call.args, opts.signal); // ordinary tools go through the registry (signal lets Ctrl+C kill run_bash)
   if (opts.subAgent) return "[error] Sub-agents cannot spawn sub-agents. Do the work yourself."; // one level of delegation only
@@ -399,6 +470,119 @@ async function execute(call: AssembledCall, opts: LoopOptions): Promise<string> 
   }
   if (!description) return "[error] task requires a non-empty description argument.";
   return runSubAgent(description, opts); // spawn the worker
+}
+
+// The sender's mailbox name: a teammate sends as itself, everyone else as "lead".
+const senderName = (opts: LoopOptions): string => opts.teammate?.name ?? LEAD;
+
+// send_message: deliver one message to another agent's inbox. Available to the
+// Lead and to teammates. Pure coordination — it never blocks on a reply.
+async function runSendMessage(call: AssembledCall, opts: LoopOptions): Promise<string> {
+  let to = "", content = "";
+  try {
+    const a = JSON.parse(call.args) as { to?: string; content?: string };
+    to = (a.to ?? "").trim();
+    content = a.content ?? "";
+  } catch {
+    /* fall through */
+  }
+  if (!to || !content.trim()) return "[error] send_message needs a non-empty 'to' and 'content'.";
+  const from = senderName(opts);
+  if (to === from) return "[error] You cannot message yourself.";
+  // A teammate can only reach the lead or another teammate; the lead can reach
+  // any teammate. We don't hard-check the recipient exists (it may be spawning) —
+  // an undeliverable message just sits in a file no one reads, which is harmless.
+  sendMessage(from, to, content);
+  return `Message delivered to ${to}'s inbox.`;
+}
+
+// spawn_teammate: start a persistent worker that runs concurrently. Top-level
+// only — a teammate calling this is the nested-spawn case (its manual omits the
+// tool, but we guard anyway). Returns IMMEDIATELY; the teammate's loop runs in
+// the background and reports back through the lead's inbox.
+async function runSpawnTeammate(call: AssembledCall, opts: LoopOptions): Promise<string> {
+  if (opts.subAgent || opts.teammate) return "[error] Only the lead can spawn teammates — teammates cannot spawn teammates. Do the work yourself or message the lead.";
+  let name = "", role = "", task = "";
+  try {
+    const a = JSON.parse(call.args) as { name?: string; role?: string; task?: string };
+    name = (a.name ?? "").trim();
+    role = (a.role ?? "").trim();
+    task = a.task ?? "";
+  } catch {
+    /* fall through */
+  }
+  if (!name || !role || !task.trim()) return "[error] spawn_teammate needs a non-empty name, role, and task.";
+  if (name === LEAD) return `[error] "${LEAD}" is reserved for the coordinator — pick another name.`;
+  if (teammateExists(name)) return `[error] A teammate named "${name}" already exists — pick a unique name or message the existing one.`;
+  if (teammateCount() >= MAX_TEAMMATES) return `[error] The team is full (${MAX_TEAMMATES} teammates max). Wait for one to finish, or do the work yourself.`;
+
+  // Kick off the teammate's loop WITHOUT awaiting it — that is what makes it
+  // concurrent. It progresses whenever the event loop is free (e.g. while the
+  // lead awaits its own API stream). We keep the promise so the lead and
+  // shutdown know when it has ended.
+  const done = runTeammate(name, role, task, opts);
+  registerTeammate(name, role, done);
+  if (!opts.quiet) console.log(mark.teammateStart(name, role));
+  return `Teammate "${name}" (${role}) spawned and is now working in parallel. It will message you (as "lead") with progress and its final result. Reply with send_message; keep coordinating the rest of the team. Do not wait idly — continue your own work.`;
+}
+
+// Run one teammate to completion: a fresh conversation seeded with its task, a
+// focused toolset, its own mailbox, and a hard round cap. On any ending it sends
+// a `result` message back to the lead — so the lead always learns the outcome,
+// success or failure. The teammate's file read-state is isolated by snapshot,
+// exactly like a sub-agent (it reads things the lead's conversation never saw).
+async function runTeammate(name: string, role: string, task: string, opts: LoopOptions): Promise<void> {
+  emit("agent_teammate_spawn");
+  await runHooks("SubagentStart", { description: `teammate ${name}: ${role}`.slice(0, 200), model: opts.model });
+  const snapshot = snapshotFileState();
+  const system = TEAMMATE_PROMPT.replace("{name}", name).replace("{role}", role);
+  try {
+    const messages: OpenAI.ChatCompletionMessageParam[] = [
+      { role: "system", content: system },
+      { role: "user", content: task }, // its first instruction; more arrive via the inbox
+    ];
+    // A teammate is a sub-agent (quiet streaming, no hooks, isolated) PLUS team
+    // wiring: a name, its inbox, a round cap, and a non-interactive permission
+    // policy (it cannot prompt the human, so writes auto-proceed but risky bash
+    // is declined — see teammateConfirm). Deny ALWAYS still wins.
+    const result = await runLoop(messages, {
+      ...opts,
+      subAgent: true,
+      teammate: { name },
+      maxRounds: TEAMMATE_MAX_ROUNDS,
+      confirm: teammateConfirm(name),
+      askUser: undefined, // teammates have no line to the human
+    });
+    const summary = result.reason === TerminateReason.Done && result.finalText?.trim() ? result.finalText.trim() : `[ended without a final report: ${result.reason}]`;
+    sendMessage(name, LEAD, summary, "result"); // the lead always hears how it ended
+    finishTeammate(name, result.reason === TerminateReason.Done);
+    if (!opts.quiet) console.log(mark.teammateDone(name, result.reason === TerminateReason.Done));
+  } catch (err) {
+    // A teammate must never take the whole process down. Report the failure to
+    // the lead and mark it failed.
+    sendMessage(name, LEAD, `[teammate crashed: ${(err as Error).message}]`, "result");
+    finishTeammate(name, false);
+  } finally {
+    restoreFileState(snapshot);
+    await runHooks("SubagentStop", { description: `teammate ${name}` });
+  }
+}
+
+const TEAMMATE_MAX_ROUNDS = 15; // a teammate is bounded — the team can't run away (the reference caps at ~10)
+
+// A teammate's permission policy. It cannot stop and ask the human, so: file
+// writes/edits auto-proceed (that is the teammate's job, and they are reversible
+// via /undo and reviewable via /diff), but anything else the gate rated "ask"
+// (unrecognized or dangerous bash) is DECLINED rather than run unattended. Hard
+// DENY rules (the no-fly zone) are enforced by the gate before confirm is ever
+// called, so they always hold. Production Claude Code instead "bubbles" the
+// request up to the lead and on to the human — omitted here, like the reference.
+function teammateConfirm(name: string): (question: string, toolName?: string) => Promise<boolean> {
+  return async (_question, toolName) => {
+    const ok = toolName === "write_file" || toolName === "edit_file";
+    if (!ok) console.log(chalk.yellow(`  ⎿ [${name}] declined ${toolName ?? "an action"} (teammates can't prompt you; do it yourself or allowlist it)`));
+    return ok;
+  };
 }
 
 // Present the ask_user form and turn the selections into a tool result. The
@@ -462,6 +646,40 @@ function injectBackgroundNotifications(messages: OpenAI.ChatCompletionMessagePar
   return true;
 }
 
+// Drain this agent's mailbox into its conversation as a user turn (Day 38). The
+// lead reads "lead"; a teammate reads its own name. The read is consumptive
+// (team.ts), so each message is injected exactly once. Plain sub-agents (no
+// team) have no inbox. Returns true if anything was injected. Same seam and
+// shape as the background-notification and todo-nag injections.
+function injectInbox(messages: OpenAI.ChatCompletionMessageParam[], opts: LoopOptions): boolean {
+  if (opts.subAgent && !opts.teammate) return false; // a plain sub-agent is not on the team
+  const me = opts.teammate?.name ?? LEAD;
+  const msgs = readInbox(me);
+  if (!msgs.length) return false;
+  const body = msgs.map((m) => `[message from ${m.from}${m.type === "result" ? " · RESULT" : ""}] ${m.content}`).join("\n\n");
+  const header = opts.teammate ? "Messages from your team — read and act on them:" : "Team inbox — your teammates sent these. React to them (a RESULT means that teammate finished):";
+  messages.push({ role: "user", content: `${header}\n\n${body}` });
+  if (!opts.quiet) console.log(opts.teammate ? chalk.dim(`  ⎿ [${me}] received ${msgs.length} message(s)`) : mark.inbox(msgs.length));
+  return true;
+}
+
+// At a stop-point (the model produced no tool calls), decide whether the TEAM
+// keeps this agent's conversation alive. The lead must not end while teammates
+// are still working — their results are still on the way — so it blocks
+// (interruptibly, yielding the event loop to the teammates) until a message
+// lands or the team goes idle, then injects whatever arrived. A teammate doesn't
+// wait on anyone; it just drains a final inbox before finishing. Returns true if
+// the agent should run another round.
+async function continueForTeam(messages: OpenAI.ChatCompletionMessageParam[], opts: LoopOptions): Promise<boolean> {
+  if (opts.teammate) return injectInbox(messages, opts); // a teammate: pick up a late message if any, else finish
+  if (opts.subAgent) return false; // a plain sub-agent has no team
+  // The lead: wait for the team to say something rather than spinning or ending.
+  while (inboxCount(LEAD) === 0 && activeTeammateCount() > 0 && !opts.isInterrupted()) {
+    await interruptibleSleep(250, opts.isInterrupted); // yield to the teammates; they message us when they have something
+  }
+  return injectInbox(messages, opts); // inject whatever is waiting; false if the team is truly idle (→ the lead may finish)
+}
+
 // The agent main loop, as a state machine: every iteration either continues
 // for a named reason or terminates for a named reason — nothing implicit.
 export async function runLoop(
@@ -471,8 +689,15 @@ export async function runLoop(
   // The loop's mutable state: budgets and counters, rewritten every iteration.
   const attempts = { total: 0, rateLimited: 0, consecutive: 0 };
   const compaction = { count: 0, failures: 0 }; // compaction score card for this query
+  let lastText: string | null = null; // most recent assistant text — what we return if a round cap (teammates) stops us mid-flight
 
   for (let round = 1; ; round++) {
+    // A bounded loop (teammates, Day 38) stops cleanly at its round cap with
+    // whatever it last said, so a team can never run away. Unset maxRounds keeps
+    // the usual unbounded-with-safeguards loop for the lead and the user's agent.
+    if (opts.maxRounds && round > opts.maxRounds) {
+      return { reason: TerminateReason.Done, finalText: lastText ?? `(reached the ${opts.maxRounds}-round limit)` };
+    }
     // One round = one successful model call + its tool results.
     // The inner loop retries the model call until it succeeds or a budget dies.
     while (true) {
@@ -549,6 +774,7 @@ export async function runLoop(
           ? { tool_calls: out.toolCalls.map((c) => ({ id: c.id, type: "function" as const, function: { name: c.name, arguments: c.args } })) }
           : {}), // omit the field entirely when there were no calls
       });
+      if (out.content) lastText = out.content; // remember the latest answer text — the round-cap path returns it
 
       if (!out.toolCalls.length) {
         // The model wants to stop. A Stop hook gets the last word: if it exits
@@ -570,6 +796,11 @@ export async function runLoop(
         // run one more round so the model can react. Each task notifies once, so
         // this adds at most one round per finished task — never an infinite stop.
         if (injectBackgroundNotifications(messages, opts)) break; // exit the inner while → advance the round counter
+        // Agent teams (Day 38): the lead must not end while teammates are still
+        // working — it waits for their messages and reacts. A teammate drains a
+        // last inbox message before finishing. Either way, if there's something
+        // to process, run another round instead of stopping.
+        if (await continueForTeam(messages, opts)) break; // exit the inner while → advance the round counter
         return { reason: TerminateReason.Done, finalText: out.content }; // no tool calls = final answer (already streamed to the screen)
       }
 
@@ -599,6 +830,10 @@ export async function runLoop(
       // the model sees the outcome on the next round without ever having blocked
       // on it. Tasks that are still running stay silent until they finish.
       injectBackgroundNotifications(messages, opts);
+
+      // Agent teams (Day 38): drain any messages that arrived during this round
+      // (results, hand-offs, questions) so the agent reacts to them next round.
+      injectInbox(messages, opts);
 
       // The nag: if there's an unfinished plan the model has stopped touching for
       // a few rounds, slip in a reminder so the list doesn't go stale and
