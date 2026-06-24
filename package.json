@@ -1,6 +1,6 @@
 {
   "name": "agent-from-zero",
-  "version": "0.30.0",
+  "version": "0.31.0",
   "description": "Build a Claude Code-style CLI agent from scratch, with AI as your pair programmer — companion code for a 10-day tutorial (DeepSeek by default, any OpenAI-compatible model)",
   "type": "module",
   "bin": {
