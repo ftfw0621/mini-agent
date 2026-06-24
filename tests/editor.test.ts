@@ -53,6 +53,8 @@ check("Esc clears the line", r.state.buffer === "" && r.state.cursor === 0, JSON
 check("Up → history prev", key(st("", 0), undefined, { name: "up" }).action === "histPrev");
 check("Down → history next", key(st("", 0), undefined, { name: "down" }).action === "histNext");
 check("Tab → tab action", key(st("", 0), "\t", { name: "tab" }).action === "tab");
+check("Ctrl+R → reveal action (show the model's thinking)", key(st("", 0), undefined, { name: "r", ctrl: true }).action === "reveal");
+check("a plain 'r' just inserts (not reveal)", key(st("", 0), "r", { name: "r" }).action === "edit" && key(st("", 0), "r", { name: "r" }).state.buffer === "r");
 check("an unknown control key is ignored", key(st("a", 1), undefined, { name: "f5" }).action === "none");
 
 // ---- displayWidth ----------------------------------------------------------

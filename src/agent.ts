@@ -20,7 +20,7 @@ import { renderDiff } from "./diff.js"; // show what /undo put back / what /diff
 import path from "node:path"; // shorten paths for the /diff summary
 import { expandMentions } from "./mentions.js"; // @file mentions: pull referenced files into context (secret files refused)
 import { banner, framedPrompt, formatModelChoices, statusLine, inputRule } from "./ui.js"; // welcome box, prompt, model labels, status line
-import { gitBranch, toggleLastCollapsed, cleanup as tuiCleanup } from "./tui.js"; // git branch for the status line + collapsible output
+import { gitBranch, toggleLastCollapsed, revealReasoning, clearReasoning, cleanup as tuiCleanup } from "./tui.js"; // git branch for the status line + collapsible output + collapsed reasoning (Ctrl+R)
 import { promptSelect, promptForm } from "./menu.js"; // arrow-key approval menu + multi-question form
 import { editLine } from "./editor.js"; // our own line editor (keeps the status footer pinned even when input wraps)
 import { rememberTool, readMemory, readMemoryTyped, extractMemories, MEMORY_PATH } from "./memory.js"; // long-term project memory + auto-extract
@@ -82,7 +82,11 @@ const SESSION_HELP = `commands:
   /resume    list recent sessions in this project and continue one of them
   /skills    list the reusable skills available in this project
   /skill <name>  run a skill yourself (works even for user-only skills)
-  exit       leave (Ctrl+C at the prompt does the same)`;
+  exit       leave (Ctrl+C at the prompt does the same)
+
+keys (at the prompt):
+  Ctrl+R     reveal the model's thinking for the last answer (collapsed behind a spinner by default)
+  Tab        expand/collapse the most recent tool output`;
 
 // Injected when the user turns plan mode on, so the model knows the rules of the
 // mode it now lives in (the permission gate enforces them regardless).
@@ -260,7 +264,7 @@ async function main() {
       // so the status bar stays pinned below however the line wraps.
       editing = true;
       try {
-        const res = await editLine(rl, { prompt, footer, history, onTab: () => toggleLastCollapsed() });
+        const res = await editLine(rl, { prompt, footer, history, onTab: () => toggleLastCollapsed(), onReveal: () => revealReasoning() });
         if (res.type === "line") {
           if (res.value.trim()) history.push(res.value); // remember non-empty entries for ↑/↓
           return res.value;
@@ -447,6 +451,7 @@ async function main() {
         clearTodos(); // the plan belonged to the old task — drop it
         resetTeam(); // the team belonged to the old task — forget it (mailboxes re-wipe on next use)
         resetBoard(); // and the shared task board (Day 40)
+        clearReasoning(); // drop the collapsed thinking too
         sessionId = newSessionId(); // a fresh conversation is a fresh session file
         console.log(chalk.dim("(history cleared)")); // confirm the reset
         return true;
@@ -682,6 +687,7 @@ async function main() {
     if (refused.length) console.log(chalk.yellow(`(refused secret file${refused.length === 1 ? "" : "s"}: ${refused.join(", ")})`));
 
     messages.push({ role: "user", content: augmented + injected }); // the new turn (with any attached files + hook context) joins the shared history
+    clearReasoning(); // Ctrl+R should reveal THIS turn's thinking, not the previous answer's
     running = true; // Ctrl+C now means "interrupt the task"
     interrupted = false; // fresh interrupt state for this task
     controller = new AbortController(); // fresh abort signal for this task

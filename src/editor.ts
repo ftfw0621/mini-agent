@@ -24,7 +24,7 @@ export interface EditorState {
   cursor: number; // caret position, a code-unit index into buffer (0..length)
 }
 // What a keystroke means to the caller. "edit" = buffer/cursor changed, repaint.
-export type EditAction = "edit" | "submit" | "cancel" | "eof" | "histPrev" | "histNext" | "tab" | "none";
+export type EditAction = "edit" | "submit" | "cancel" | "eof" | "histPrev" | "histNext" | "tab" | "reveal" | "none";
 
 // ---- pure editing logic -----------------------------------------------------
 // Map a keypress onto a new state + an action. Emacs-style bindings, the ones a
@@ -53,6 +53,8 @@ export function reduceEditor(s: EditorState, str: string | undefined, key: KeyEv
         return { state: { buffer, cursor: Math.max(0, cursor - 1) }, action: "edit" }; // back one char
       case "f":
         return { state: { buffer, cursor: Math.min(buffer.length, cursor + 1) }, action: "edit" }; // forward one char
+      case "r":
+        return { state: s, action: "reveal" }; // Ctrl+R → reveal the model's collapsed thinking
       default:
         return { state: s, action: "none" };
     }
@@ -221,6 +223,7 @@ export interface EditOptions {
   history?: string[]; // past entries for ↑/↓ recall (not mutated)
   initial?: string; // pre-filled text
   onTab?: () => void; // Tab handler (e.g. toggle a collapsed block), then we repaint
+  onReveal?: () => void; // Ctrl+R handler (reveal the model's collapsed thinking), then we repaint
   input?: NodeJS.ReadStream; // injectable for tests
 }
 
@@ -320,6 +323,10 @@ export function editLine(rl: Pausable, opts: EditOptions): Promise<EditResult> {
         case "tab":
           opts.onTab?.(); // may print above us (e.g. expand a collapsed block) and scroll
           first = true; // so the next paint lands fresh at the cursor, not a stale climb-up
+          return draw();
+        case "reveal":
+          opts.onReveal?.(); // print the model's collapsed thinking above us, then repaint
+          first = true; // the next paint lands fresh, not a stale climb-up
           return draw();
         case "edit":
           return draw();

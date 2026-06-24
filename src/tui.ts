@@ -65,6 +65,35 @@ export function toggleLastCollapsed(): boolean {
   return true;
 }
 
+// ---- collapsed reasoning (the model's thinking) ------------------------------
+// Reasoning models (deepseek-reasoner / R1) stream a long thinking trace before
+// the answer. Dumping it all to the screen buries the actual reply, so we hide
+// it behind a spinner and a one-line indicator, keeping the trace here for the
+// user to reveal with Ctrl+R (handled by the line editor, like Tab for tools).
+// Stored as one entry per model round; cleared when a new user turn begins, so
+// Ctrl+R always shows the thinking behind the LAST answer.
+const reasoningTrace: string[] = [];
+
+export function recordReasoning(text: string): void {
+  const t = text.trim();
+  if (t) reasoningTrace.push(t);
+}
+
+// Drop the current turn's thinking. Called when a new prompt is submitted (the
+// old thinking belonged to the old answer) and on /clear.
+export function clearReasoning(): void {
+  reasoningTrace.length = 0;
+}
+
+// Ctrl+R handler: print the stored thinking for the last answer, dimmed and
+// nested. Returns false (nothing to show) so the editor can ignore the key.
+export function revealReasoning(): boolean {
+  if (!reasoningTrace.length) return false;
+  process.stdout.write(chalk.dim("💭 model's thinking:\n"));
+  process.stdout.write(chalk.dim(reasoningTrace.join("\n\n— — —\n\n").replace(/^/gm, "  ")) + "\n");
+  return true;
+}
+
 // ---- cleanup -----------------------------------------------------------------
 // Called on exit. Nothing fancy to restore now (we no longer hijack the bottom
 // of the screen), but keep the hook so callers don't have to change if that

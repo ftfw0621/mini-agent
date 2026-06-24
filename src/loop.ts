@@ -14,7 +14,7 @@ import { runHooks } from "./hooks.js"; // user lifecycle hooks (PreToolUse / Pos
 import type { Judge } from "./judge.js"; // optional LLM permission classifier
 import { recordUsage } from "./cost.js"; // meter token usage from the stream
 import { mark, thinkingWord, spinnerText } from "./ui.js"; // centralized terminal styling (markers, spinner)
-import { printToolSummary } from "./tui.js"; // collapsible tool output
+import { printToolSummary, recordReasoning } from "./tui.js"; // collapsible tool output + the model's hidden thinking (Ctrl+R)
 import { MarkdownStream } from "./markdown.js"; // render the streamed answer as terminal markdown
 import { todoNag, getTodos, renderTodos } from "./todos.js"; // the agent's plan: show it on screen + nag when it goes stale
 import { pendingNotifications } from "./background.js"; // background tasks (Day 37): surface finished jobs as a turn
@@ -373,6 +373,11 @@ async function streamModelCall(
   const word = thinkingWord(modelCallSeq++); // a rotating "thinking" word for this call
   const startedAt = Date.now(); // for the spinner's live elapsed counter
   let streamedChars = 0; // bytes of content+reasoning streamed this call → a live token estimate
+  // Reasoning is COLLAPSED by default: while the model thinks, the spinner keeps
+  // spinning (with a 💭 hint) instead of dumping the trace; we stash it for Ctrl+R.
+  let reasoningBuf = ""; // the accumulated thinking, hidden behind the spinner
+  let reasoningActive = false; // true while reasoning tokens are arriving → spinner shows 💭
+  let reasoningShown = false; // have we printed the "thought for Ns" indicator yet?
   const spinner = opts.quiet
     ? null // the eval harness wants silence
     : ora({ text: spinnerText(word, 0, !!opts.subAgent, opts.model), discardStdin: false }).start(); // discardStdin:false — ora would otherwise eat Ctrl+C
@@ -384,7 +389,9 @@ async function streamModelCall(
   // - stall (slow but alive for 30s) → log it and keep waiting
   // It also ticks the spinner: elapsed seconds + a live token estimate (~chars/4).
   const watchdog = setInterval(() => {
-    if (spinner?.isSpinning) spinner.text = spinnerText(word, Math.floor((Date.now() - startedAt) / 1000), !!opts.subAgent, opts.model, Math.round(streamedChars / 4));
+    // While the model is reasoning, prefix the spinner with 💭 so "it's thinking"
+    // reads differently from "it's waiting on the first token".
+    if (spinner?.isSpinning) spinner.text = (reasoningActive ? chalk.dim("💭 ") : "") + spinnerText(word, Math.floor((Date.now() - startedAt) / 1000), !!opts.subAgent, opts.model, Math.round(streamedChars / 4));
     const quietMs = Date.now() - lastEvent; // ms since the last event
     if (quietMs > IDLE_TIMEOUT_MS) {
       emit("agent_watchdog_idle"); // record the cut — these should be rare
@@ -411,9 +418,26 @@ async function streamModelCall(
     );
     let content = ""; // accumulated answer text
     let printedPrefix = false; // have we printed the answer prefix yet?
-    let printedThinking = false; // have we started printing the reasoning trace yet?
     let md: MarkdownStream | null = null; // renders the streamed answer as markdown, block by block
     const calls: AssembledCall[] = []; // tool calls under assembly, indexed by delta.index
+
+    // The model has finished thinking and is about to say/do something. Close out
+    // the spinner, stash the trace, and print a single one-line indicator with the
+    // shortcut to reveal it. Idempotent + collapses to nothing for sub-agents and
+    // the eval harness (they never show thinking).
+    const flushReasoning = () => {
+      if (!reasoningBuf || reasoningShown) return;
+      reasoningShown = true;
+      reasoningActive = false;
+      if (spinner?.isSpinning) spinner.stop();
+      if (opts.quiet || opts.subAgent) return; // no UI for silent / nested runs
+      recordReasoning(reasoningBuf); // keep it for Ctrl+R (never goes into history)
+      const secs = Math.round((Date.now() - startedAt) / 1000);
+      const toks = Math.round(reasoningBuf.length / 4); // same ~chars/4 estimate as the spinner
+      const tokStr = toks >= 1000 ? `${(toks / 1000).toFixed(1)}k` : `${toks}`;
+      process.stdout.write(chalk.dim(`💭 thought for ${secs}s (~${tokStr} tokens) · Ctrl+R to view`) + "\n");
+    };
+
     for await (const chunk of stream) {
       lastEvent = Date.now(); // feed the watchdog
       stallWarned = false; // the stream spoke — reset the stall warning
@@ -422,29 +446,24 @@ async function streamModelCall(
       if (!delta) continue; // keep-alive or usage chunk — nothing to do
 
       // Reasoning models (e.g. deepseek-reasoner / R1) stream their thinking in a
-      // separate `reasoning_content` field BEFORE the answer. Show it dimly so a
-      // switch to a reasoning model is visibly different — but do NOT keep it:
-      // the reasoning is not the answer and must not be replayed in later turns.
+      // separate `reasoning_content` field BEFORE the answer. We do NOT print it
+      // (it buries the actual reply) and do NOT keep it (it must not be replayed
+      // in later turns): we let the spinner keep spinning, stash the trace, and
+      // surface it only behind Ctrl+R.
       const reasoning = (delta as { reasoning_content?: string }).reasoning_content;
       if (reasoning) {
         streamedChars += reasoning.length; // count reasoning toward the live token estimate
-        if (spinner?.isSpinning) spinner.stop();
-        if (!opts.quiet && !opts.subAgent) {
-          if (!printedThinking) {
-            process.stdout.write("\n" + chalk.dim("💭 thinking: ")); // label the trace once
-            printedThinking = true;
-          }
-          process.stdout.write(chalk.dim(reasoning)); // stream the thinking, dimmed
-        }
+        reasoningBuf += reasoning; // stash it for Ctrl+R instead of streaming it
+        reasoningActive = true; // the spinner now shows 💭 (set by the watchdog)
       }
 
       if (delta.content) {
+        flushReasoning(); // thinking is over — show the one-line indicator first
         streamedChars += delta.content.length; // count the answer toward the live token estimate
         if (spinner?.isSpinning) spinner.stop(); // first token: replace the spinner with real output
         if (!opts.quiet && !opts.subAgent) {
           // Only the top-level agent streams to the screen — a sub-agent's
           // inner monologue would be mistaken for the answer.
-          if (printedThinking && !printedPrefix) process.stdout.write("\n"); // end the thinking block before the answer
           if (!printedPrefix) {
             // Stream the answer through the markdown renderer: it buffers a block
             // (paragraph / heading / list / table) and prints it formatted the
@@ -457,6 +476,7 @@ async function streamModelCall(
         }
         content += delta.content; // always keep it for the history (the answer only, never the reasoning)
       }
+      if (delta.tool_calls?.length) flushReasoning(); // thinking is over — indicator before the tool logs (which print after we return)
       for (const tc of delta.tool_calls ?? []) {
         if (spinner?.isSpinning) spinner.stop(); // tool call starting — spinner served its purpose
         const slot = (calls[tc.index] ??= { id: "", name: "", args: "" }); // create the slot on first fragment
@@ -465,6 +485,7 @@ async function streamModelCall(
         if (tc.function?.arguments) slot.args += tc.function.arguments; // arguments stream in fragments — concatenate
       }
     }
+    flushReasoning(); // a reasoning-only turn (no content, no tools) still records + indicates
     if (md) md.end(); // flush the final (un-terminated) block through the renderer
     if (printedPrefix) process.stdout.write("\n"); // end the streamed line cleanly
     return { content, toolCalls: calls.filter(Boolean) }; // sparse array → dense
