@@ -79,14 +79,46 @@ export function renderMarkdown(md: string, width = termWidth()): string {
   const w = Math.max(20, width);
   const m = new Marked();
   m.use(renderer(w));
-  // Override the table renderer AFTER marked-terminal so ours wins: render each
-  // cell's inline markdown to ANSI (parseInline), then lay the table out to fit w.
+  // Override the table AND list renderers AFTER marked-terminal so ours win.
+  // marked-terminal v7 predates marked v15's token-object renderer API, so its
+  // built-in table/list renderers receive tokens they don't understand and spit
+  // out the RAW markdown — literal `**bold**`, `` `code` ``, and `*` bullets
+  // inside list items (and unaligned tables). We render both ourselves, calling
+  // parseInline so the inline markup inside cells / list items actually renders.
   m.use({
     renderer: {
       table(this: { parser: { parseInline(tokens: Tokens.Generic[]): string } }, token: Tokens.Table): string {
         const header = token.header.map((c) => this.parser.parseInline(c.tokens));
         const rows = token.rows.map((r) => r.map((c) => this.parser.parseInline(c.tokens)));
         return renderTable(header, rows, w) + "\n";
+      },
+      list(this: { parser: { parseInline(tokens: Tokens.Generic[]): string } }, token: Tokens.List): string {
+        // Render items at a given nesting depth: a bullet (• / N.) + the item's
+        // inline content (bold/code/links parsed), wrapped to width with a hanging
+        // indent so continuation lines sit under the text. Nested lists recurse.
+        const parser = this.parser;
+        const render = (list: Tokens.List, depth: number): string[] => {
+          const pad = "  ".repeat(depth);
+          const lines: string[] = [];
+          list.items.forEach((item, idx) => {
+            const bullet = list.ordered ? `${(typeof list.start === "number" ? list.start : 1) + idx}.` : "•";
+            const box = item.task ? (item.checked ? "[x] " : "[ ] ") : "";
+            let inline = "";
+            const nested: string[] = [];
+            for (const t of item.tokens as Tokens.Generic[]) {
+              if (t.type === "list") nested.push(...render(t as unknown as Tokens.List, depth + 1));
+              else if ((t as { tokens?: Tokens.Generic[] }).tokens) inline += parser.parseInline((t as { tokens: Tokens.Generic[] }).tokens);
+              else inline += (t as { text?: string }).text ?? "";
+            }
+            const head = `${pad}${bullet} ${box}`;
+            const wrapped = wrapAnsi(head + inline.trim(), Math.max(10, w), { hard: true, trim: false }).split("\n");
+            const hang = " ".repeat(displayWidth(head)); // align wrapped lines under the text
+            lines.push(...wrapped.map((ln, i) => (i === 0 ? ln : hang + ln.replace(/^\s+/, ""))));
+            lines.push(...nested);
+          });
+          return lines;
+        };
+        return render(token, 0).join("\n") + "\n\n";
       },
     },
   });

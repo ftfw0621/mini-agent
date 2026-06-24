@@ -56,6 +56,18 @@ const joined = out2.join("");
 check("firstPrefix leads the very first line", joined.startsWith("P>"), `got: ${JSON.stringify(joined.slice(0, 20))}`);
 check("the second block uses the indent, not the prefix", joined.indexOf("P>", 2) === -1, `got: ${JSON.stringify(joined)}`);
 
+// ---- lists render their inline markup (marked-terminal v15 regression fix) ------------
+// marked-terminal left list items as RAW markdown (literal ** and `, a * bullet);
+// our custom list renderer parses the inline tokens, like the table override.
+const BT = String.fromCharCode(96); // backtick, without shell-escaping headaches
+const listOut = renderMarkdown(`intro:\n* use ${BT}read_file${BT} not cat\n* **bold** matters`, 80);
+check("list items drop the literal ** (bold parsed)", !listOut.includes("**"), listOut);
+check("list items drop the literal backtick (code parsed)", !listOut.includes(BT), listOut);
+check("list uses a • bullet, not a raw *", listOut.includes("•"), listOut);
+checkContains("list keeps the code word", listOut, "read_file");
+const ordered = renderMarkdown("steps:\n1. **first**\n2. second", 80);
+check("ordered list keeps its numbers and parses bold", ordered.includes("1.") && ordered.includes("2.") && !ordered.includes("**"), ordered);
+
 // ---- MarkdownStream: a blank line INSIDE a fence is not a block boundary --------------
 const out3: string[] = [];
 const s3 = new MarkdownStream((x) => out3.push(x), {});

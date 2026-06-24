@@ -24,7 +24,7 @@ export interface EditorState {
   cursor: number; // caret position, a code-unit index into buffer (0..length)
 }
 // What a keystroke means to the caller. "edit" = buffer/cursor changed, repaint.
-export type EditAction = "edit" | "submit" | "cancel" | "eof" | "histPrev" | "histNext" | "tab" | "reveal" | "none";
+export type EditAction = "edit" | "submit" | "cancel" | "eof" | "histPrev" | "histNext" | "tab" | "reveal" | "tools" | "none";
 
 // ---- pure editing logic -----------------------------------------------------
 // Map a keypress onto a new state + an action. Emacs-style bindings, the ones a
@@ -55,6 +55,8 @@ export function reduceEditor(s: EditorState, str: string | undefined, key: KeyEv
         return { state: { buffer, cursor: Math.min(buffer.length, cursor + 1) }, action: "edit" }; // forward one char
       case "r":
         return { state: s, action: "reveal" }; // Ctrl+R → reveal the model's collapsed thinking
+      case "t":
+        return { state: s, action: "tools" }; // Ctrl+T → reveal the folded tool-call trace
       default:
         return { state: s, action: "none" };
     }
@@ -224,6 +226,7 @@ export interface EditOptions {
   initial?: string; // pre-filled text
   onTab?: () => void; // Tab handler (e.g. toggle a collapsed block), then we repaint
   onReveal?: () => void; // Ctrl+R handler (reveal the model's collapsed thinking), then we repaint
+  onTools?: () => void; // Ctrl+T handler (reveal the folded tool-call trace), then we repaint
   transformPaste?: (raw: string) => string; // rewrite a multi-char paste before insertion (e.g. drag-and-drop → absolute paths)
   input?: NodeJS.ReadStream; // injectable for tests
 }
@@ -334,6 +337,10 @@ export function editLine(rl: Pausable, opts: EditOptions): Promise<EditResult> {
         case "reveal":
           opts.onReveal?.(); // print the model's collapsed thinking above us, then repaint
           first = true; // the next paint lands fresh, not a stale climb-up
+          return draw();
+        case "tools":
+          opts.onTools?.(); // print the folded tool-call trace above us, then repaint
+          first = true;
           return draw();
         case "edit":
           return draw();

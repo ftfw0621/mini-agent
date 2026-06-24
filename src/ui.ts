@@ -58,6 +58,13 @@ export const mark = {
   teammateStart: (name: string, role: string) => chalk.magenta("  ⎿ teammate ") + chalk.bold(name) + chalk.magenta(` spawned`) + chalk.dim(` — ${role}`), // Day 38
   teammateDone: (name: string, ok: boolean) => (ok ? chalk.magenta("  ⎿ teammate ") + chalk.bold(name) + chalk.magenta(" finished") : chalk.yellow("  ⎿ teammate ") + chalk.bold(name) + chalk.yellow(" ended (not done)")),
   inbox: (n: number) => chalk.magenta("  ⎿ ") + chalk.magenta(`${n} team message${n === 1 ? "" : "s"} received`),
+  // A round's tool calls folded into one line: "⏺ 6 tools · read_file ×4 · search ×2" (Ctrl+T expands them).
+  toolTally: (names: string[]) => {
+    const counts = new Map<string, number>();
+    for (const n of names) counts.set(n, (counts.get(n) ?? 0) + 1);
+    const parts = [...counts.entries()].map(([n, c]) => `${n} ×${c}`).join(" · ");
+    return chalk.cyan("⏺ ") + chalk.dim(`${names.length} tool${names.length === 1 ? "" : "s"} · ${parts}`);
+  },
   note: (s: string) => chalk.dim(s), // dim asides (resumed, attached, cleared…)
   warn: (s: string) => chalk.yellow(s),
 };

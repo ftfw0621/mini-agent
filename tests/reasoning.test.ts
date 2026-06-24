@@ -1,6 +1,6 @@
 import { runLoop } from "../src/loop.js"; // exercise the streaming path end to end
 import { spinnerText } from "../src/ui.js"; // the model tag in the spinner
-import { recordReasoning, revealReasoning, clearReasoning } from "../src/tui.js"; // the collapsed-thinking store (Ctrl+R)
+import { recordReasoning, revealReasoning, clearReasoning, recordToolCall, revealToolCalls, clearToolCalls } from "../src/tui.js"; // collapsed-thinking (Ctrl+R) + folded tool-call (Ctrl+T) stores
 import { check, checkContains, finish } from "./helpers.js"; // assertions
 
 // ---- spinner shows the active model (so a /model switch is visible) --------------------
@@ -79,5 +79,28 @@ checkContains("revealed output includes the second round", got.out, "weigh Y");
 recordReasoning("   "); // whitespace-only is ignored, never stored
 clearReasoning();
 check("clearReasoning empties the store (next turn starts fresh)", reveal().shown === false);
+
+// ---- the folded tool-call store behind Ctrl+T -----------------------------------------
+function revealTools(): { shown: boolean; out: string } {
+  let out = "";
+  const orig = process.stdout.write.bind(process.stdout);
+  (process.stdout as unknown as { write: (s: string) => boolean }).write = (s: string) => ((out += s), true);
+  try {
+    return { shown: revealToolCalls(), out };
+  } finally {
+    (process.stdout as unknown as { write: typeof orig }).write = orig;
+  }
+}
+
+clearToolCalls();
+check("revealToolCalls is false when nothing was recorded", revealTools().shown === false);
+recordToolCall("⏺ read_file {path: a.ts}", "tool: read_file\nargs: {...}");
+recordToolCall("⏺ search {pattern: foo}", "tool: search\nargs: {...}");
+const tools = revealTools();
+check("revealToolCalls is true once calls are recorded", tools.shown === true);
+checkContains("the trace lists the first call", tools.out, "read_file");
+checkContains("the trace lists the second call", tools.out, "search");
+clearToolCalls();
+check("clearToolCalls empties the trace (next turn starts fresh)", revealTools().shown === false);
 
 finish();

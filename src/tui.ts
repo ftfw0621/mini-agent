@@ -34,21 +34,15 @@ export function gitBranch(): string | null {
 }
 
 // ---- collapsible tool output -------------------------------------------------
-// Tool results can be verbose. By default we print only a one-line summary; the
-// full args/output are remembered so Tab can expand the most recent block.
+// Tool calls used to print a line each (recordToolCall folds them into a tally
+// now — see below), but their full args are still stashed here so Tab can expand
+// the most recent one.
 interface CollapsedBlock {
   full: string;
   expanded: boolean;
 }
 const collapsed: CollapsedBlock[] = [];
 const MAX_COLLAPSED = 50; // bound the memory — old blocks fall off
-
-// Print the one-line summary now; stash the full text for Tab to reveal later.
-export function printToolSummary(summary: string, full: string): void {
-  process.stdout.write(summary + "\n");
-  collapsed.push({ full, expanded: false });
-  if (collapsed.length > MAX_COLLAPSED) collapsed.shift();
-}
 
 // Tab handler: reveal (or re-hide) the full text of the most recent tool block.
 // Returns false if there's nothing to toggle.
@@ -91,6 +85,36 @@ export function revealReasoning(): boolean {
   if (!reasoningTrace.length) return false;
   process.stdout.write(chalk.dim("💭 model's thinking:\n"));
   process.stdout.write(chalk.dim(reasoningTrace.join("\n\n— — —\n\n").replace(/^/gm, "  ")) + "\n");
+  return true;
+}
+
+// ---- collapsed tool calls (the activity trace) -------------------------------
+// A long task fires dozens of read_file/search calls; printing one line each
+// floods the screen. Instead the loop prints a compact per-round tally and we
+// keep the full call lines here for Ctrl+T to reveal. Cleared per turn, so
+// Ctrl+T shows the calls behind the LAST answer. (Diffs, prompts, and results
+// still print live — only the one-line announcements are folded.)
+const toolCallLog: string[] = [];
+const MAX_TOOL_LOG = 500; // bound the memory
+
+// Record a tool call's full line for Ctrl+T, and stash its args for Tab.
+export function recordToolCall(line: string, full: string): void {
+  toolCallLog.push(line);
+  if (toolCallLog.length > MAX_TOOL_LOG) toolCallLog.shift();
+  collapsed.push({ full, expanded: false }); // Tab still reveals the most recent call's full args
+  if (collapsed.length > MAX_COLLAPSED) collapsed.shift();
+}
+
+export function clearToolCalls(): void {
+  toolCallLog.length = 0;
+}
+
+// Ctrl+T handler: print every tool call behind the last answer. Returns false
+// (nothing to show) so the editor can ignore the key.
+export function revealToolCalls(): boolean {
+  if (!toolCallLog.length) return false;
+  process.stdout.write(chalk.dim(`tool calls this turn (${toolCallLog.length}):\n`));
+  process.stdout.write(toolCallLog.join("\n") + "\n");
   return true;
 }
 

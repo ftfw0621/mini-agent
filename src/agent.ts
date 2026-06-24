@@ -19,8 +19,8 @@ import { clearTodos, getTodos, renderTodos } from "./todos.js"; // the agent's p
 import { renderDiff } from "./diff.js"; // show what /undo put back / what /diff changed, reusing the Day 21 diff renderer
 import path from "node:path"; // shorten paths for the /diff summary
 import { expandMentions } from "./mentions.js"; // @file mentions: pull referenced files into context (secret files refused)
-import { banner, framedPrompt, formatModelChoices, statusLine, inputRule } from "./ui.js"; // welcome box, prompt, model labels, status line
-import { gitBranch, toggleLastCollapsed, revealReasoning, clearReasoning, cleanup as tuiCleanup } from "./tui.js"; // git branch for the status line + collapsible output + collapsed reasoning (Ctrl+R)
+import { banner, framedPrompt, formatModelChoices, statusLine } from "./ui.js"; // welcome box, prompt, model labels, status line
+import { gitBranch, toggleLastCollapsed, revealReasoning, clearReasoning, revealToolCalls, clearToolCalls, cleanup as tuiCleanup } from "./tui.js"; // git branch + collapsible output + collapsed reasoning (Ctrl+R) + folded tool-call trace (Ctrl+T)
 import { promptSelect, promptForm } from "./menu.js"; // arrow-key approval menu + multi-question form
 import { editLine } from "./editor.js"; // our own line editor (keeps the status footer pinned even when input wraps)
 import { normalizeDroppedPaths } from "./drop.js"; // drag-and-drop: a dropped file's path → a clean absolute path in the input
@@ -87,6 +87,7 @@ const SESSION_HELP = `commands:
 
 keys (at the prompt):
   Ctrl+R     reveal the model's thinking for the last answer (collapsed behind a spinner by default)
+  Ctrl+T     reveal the folded tool-call trace for the last answer (read_file/search/… shown as a tally)
   Tab        expand/collapse the most recent tool output`;
 
 // Injected when the user turns plan mode on, so the model knows the rules of the
@@ -265,7 +266,7 @@ async function main() {
       // so the status bar stays pinned below however the line wraps.
       editing = true;
       try {
-        const res = await editLine(rl, { prompt, footer, history, onTab: () => toggleLastCollapsed(), onReveal: () => revealReasoning(), transformPaste: normalizeDroppedPaths });
+        const res = await editLine(rl, { prompt, footer, history, onTab: () => toggleLastCollapsed(), onReveal: () => revealReasoning(), onTools: () => revealToolCalls(), transformPaste: normalizeDroppedPaths });
         if (res.type === "line") {
           if (res.value.trim()) history.push(res.value); // remember non-empty entries for ↑/↓
           return res.value;
@@ -453,6 +454,7 @@ async function main() {
         resetTeam(); // the team belonged to the old task — forget it (mailboxes re-wipe on next use)
         resetBoard(); // and the shared task board (Day 40)
         clearReasoning(); // drop the collapsed thinking too
+        clearToolCalls(); // ...and the folded tool-call trace
         sessionId = newSessionId(); // a fresh conversation is a fresh session file
         console.log(chalk.dim("(history cleared)")); // confirm the reset
         return true;
@@ -649,16 +651,16 @@ async function main() {
   }
 
   while (true) {
-    // The input area, Claude-Code style: a top rule, the "❯" you type on, then a
-    // bottom rule + status line (model · 📁 dir · 🌿 branch · ctx% · $ · time)
-    // pinned BELOW the input. readUserLine draws the footer under the prompt and
-    // keeps the cursor on the ❯ line, so the status reads like a real bottom bar.
-    // Only in a TTY; piped input stays clean.
+    // The input area: a blank line for breathing room, the "❯" you type on, then
+    // a single status line (model · 📁 dir · 🌿 branch · ctx% · $ · time) pinned
+    // BELOW the input. We dropped the old top/bottom horizontal rules — two bare
+    // lines around an empty prompt just looked like noise. Only in a TTY; piped
+    // input stays clean.
     let footer: string | undefined;
     if (process.stdin.isTTY) {
       const ctxPct = Math.min(100, Math.round((estimateHistoryTokens(messages) / CONFIG.contextWindow) * 100));
-      console.log("\n" + inputRule()); // top rule above the prompt
-      footer = inputRule() + "\n" + statusLine(CONFIG.model, path.basename(process.cwd()), gitBranch(), ctxPct, costMeter.cost(), Date.now() - sessionStartedAt); // bottom rule + status, pinned below
+      console.log(""); // one blank line separates the previous answer from the prompt
+      footer = statusLine(CONFIG.model, path.basename(process.cwd()), gitBranch(), ctxPct, costMeter.cost(), Date.now() - sessionStartedAt); // status pinned below the prompt
     }
     const line = (await readUserLine(framedPrompt(isPlanMode()), footer)).trim(); // next input, or "exit" on EOF
     if (!line) continue; // empty line — just re-prompt
@@ -689,6 +691,7 @@ async function main() {
 
     messages.push({ role: "user", content: augmented + injected }); // the new turn (with any attached files + hook context) joins the shared history
     clearReasoning(); // Ctrl+R should reveal THIS turn's thinking, not the previous answer's
+    clearToolCalls(); // ...and Ctrl+T should reveal THIS turn's tool calls
     running = true; // Ctrl+C now means "interrupt the task"
     interrupted = false; // fresh interrupt state for this task
     controller = new AbortController(); // fresh abort signal for this task

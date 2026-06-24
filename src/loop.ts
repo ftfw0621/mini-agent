@@ -14,7 +14,7 @@ import { runHooks } from "./hooks.js"; // user lifecycle hooks (PreToolUse / Pos
 import type { Judge } from "./judge.js"; // optional LLM permission classifier
 import { recordUsage } from "./cost.js"; // meter token usage from the stream
 import { mark, thinkingWord, spinnerText } from "./ui.js"; // centralized terminal styling (markers, spinner)
-import { printToolSummary, recordReasoning } from "./tui.js"; // collapsible tool output + the model's hidden thinking (Ctrl+R)
+import { recordToolCall, recordReasoning } from "./tui.js"; // folded tool-call trace (Ctrl+T) + the model's hidden thinking (Ctrl+R)
 import { MarkdownStream } from "./markdown.js"; // render the streamed answer as terminal markdown
 import { todoNag, getTodos, renderTodos } from "./todos.js"; // the agent's plan: show it on screen + nag when it goes stale
 import { pendingNotifications } from "./background.js"; // background tasks (Day 37): surface finished jobs as a turn
@@ -495,17 +495,26 @@ async function streamModelCall(
   }
 }
 
+// How this agent's activity is prefixed on screen: teammate tagged by name,
+// plain sub-agent nested in blue, top-level flush-left. Shared by the per-call
+// recording and the per-round tally so they line up.
+function agentIndent(opts: LoopOptions): string {
+  return opts.teammate ? chalk.magenta(`  ⎿ [${opts.teammate.name}] `) : opts.subAgent ? chalk.blue("  ⎿ ") : "";
+}
+
 // Run one tool call end to end: log it, run it through the permission gate,
 // ask the human if needed, execute, and return the paired result. Read-only
 // calls (allow/deny only, never "ask") are safe to run via this from inside a
 // Promise.all batch; calls that can prompt must be awaited one at a time.
 async function runOneCall(call: AssembledCall, opts: LoopOptions): Promise<{ id: string; content: string }> {
-  const indent = opts.teammate ? chalk.magenta(`  ⎿ [${opts.teammate.name}] `) : opts.subAgent ? chalk.blue("  ⎿ ") : ""; // teammate activity is tagged by name; plain sub-agent is nested in blue
+  const indent = agentIndent(opts);
   if (!opts.quiet) {
-    // Compact one-line summary — long args are hidden behind Tab.
-    const summary = indent + mark.tool(call.name, call.args.length > 60 ? call.args.slice(0, 57) + "..." : call.args);
-    const full = `tool: ${call.name}\nargs: ${call.args}`;
-    printToolSummary(summary, full);
+    // The announcement is FOLDED (Day-after-40 UI fix): instead of printing a
+    // line per call (which floods the screen on a big exploration), we record it
+    // for the per-round tally + Ctrl+T. Diffs / prompts / results below still
+    // print live. A generous slice keeps Ctrl+T readable without dumping megabytes.
+    const line = indent + mark.tool(call.name, call.args.length > 300 ? call.args.slice(0, 297) + "..." : call.args);
+    recordToolCall(line, `tool: ${call.name}\nargs: ${call.args}`);
   }
 
   // The permission gate sits between the model's intent and execution.
@@ -1187,6 +1196,12 @@ export async function runLoop(
         // A single non-read-only call: gate, maybe ask, execute — all serial.
         const r = await runOneCall(out.toolCalls[i++], opts);
         messages.push({ role: "tool", tool_call_id: r.id, content: r.content });
+      }
+
+      // Fold this round's tool calls into ONE tally line instead of one line per
+      // call (the per-call announcements were recorded for Ctrl+T in runOneCall).
+      if (!opts.quiet && out.toolCalls.length) {
+        console.log(agentIndent(opts) + mark.toolTally(out.toolCalls.map((c) => c.name)) + chalk.dim(" · Ctrl+T"));
       }
 
       // Background tasks (Day 37): if a job the model started has finished, slip
