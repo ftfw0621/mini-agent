@@ -134,6 +134,13 @@ export function framedPrompt(planMode: boolean): string {
   return planMode ? chalk.yellow.bold("⏸ plan ❯ ") : chalk.cyan.bold("❯ ");
 }
 
+// How a SUBMITTED message is echoed into the scrollback once you hit Enter: a
+// distinct, muted "> …" line (not the bright ❯ prompt) so each turn reads like a
+// sent chat message scrolling up, leaving the input box empty below.
+export function sentMessage(text: string): string {
+  return chalk.dim("> " + text);
+}
+
 
 // ---- the selection menu -----------------------------------------------------
 // Render a numbered list of options with one highlighted. The interactive part

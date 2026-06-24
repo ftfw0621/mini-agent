@@ -228,6 +228,7 @@ export interface EditOptions {
   onReveal?: () => void; // Ctrl+R handler (reveal the model's collapsed thinking), then we repaint
   onTools?: () => void; // Ctrl+T handler (reveal the folded tool-call trace), then we repaint
   transformPaste?: (raw: string) => string; // rewrite a multi-char paste before insertion (e.g. drag-and-drop → absolute paths)
+  echo?: (text: string) => string; // on submit, re-render the line as a "sent message" instead of leaving "prompt + text"; the input box then vanishes
   input?: NodeJS.ReadStream; // injectable for tests
 }
 
@@ -284,12 +285,21 @@ export function editLine(rl: Pausable, opts: EditOptions): Promise<EditResult> {
       done = true;
       input.off("keypress", onKey);
       for (const l of otherKeypress) input.on("keypress", l); // give readline its keypress handler back
-      // Leave the typed command on screen, drop the footer, land on a fresh line.
-      const { rows } = layout(state.buffer, state.cursor, promptW, cols());
+      // Climb to the top of the input block and wipe it (prompt + wrapped input + footer).
       if (prevCursorRow > 0) out.write(`\x1b[${prevCursorRow}A`);
       out.write("\r\x1b[0J");
-      const inputRows = rows.map((r, i) => (i === 0 ? opts.prompt + r : r));
-      out.write(inputRows.join("\r\n") + "\r\n");
+      // What stays on screen: with an echo styler (the main REPL prompt), a
+      // submitted message is re-rendered as a distinct "sent" line and the input
+      // box vanishes — your message scrolls up, the input clears, like a chat app.
+      // Without it (sub-prompts), leave the typed command under its prompt.
+      if (opts.echo) {
+        if (result.type === "line" && state.buffer.trim()) out.write(opts.echo(state.buffer) + "\r\n");
+        // empty submit / cancel / eof: leave nothing — the wipe above already cleared it
+      } else {
+        const { rows } = layout(state.buffer, state.cursor, promptW, cols());
+        const inputRows = rows.map((r, i) => (i === 0 ? opts.prompt + r : r));
+        out.write(inputRows.join("\r\n") + "\r\n");
+      }
       try {
         input.setRawMode(wasRaw); // hand stdin back exactly as we found it
       } catch {

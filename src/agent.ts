@@ -19,7 +19,7 @@ import { clearTodos, getTodos, renderTodos } from "./todos.js"; // the agent's p
 import { renderDiff } from "./diff.js"; // show what /undo put back / what /diff changed, reusing the Day 21 diff renderer
 import path from "node:path"; // shorten paths for the /diff summary
 import { expandMentions } from "./mentions.js"; // @file mentions: pull referenced files into context (secret files refused)
-import { banner, framedPrompt, formatModelChoices, statusLine } from "./ui.js"; // welcome box, prompt, model labels, status line
+import { banner, framedPrompt, formatModelChoices, statusLine, sentMessage } from "./ui.js"; // welcome box, prompt, model labels, status line, sent-message echo
 import { gitBranch, toggleLastCollapsed, revealReasoning, clearReasoning, revealToolCalls, clearToolCalls, cleanup as tuiCleanup } from "./tui.js"; // git branch + collapsible output + collapsed reasoning (Ctrl+R) + folded tool-call trace (Ctrl+T)
 import { promptSelect, promptForm } from "./menu.js"; // arrow-key approval menu + multi-question form
 import { editLine } from "./editor.js"; // our own line editor (keeps the status footer pinned even when input wraps)
@@ -258,7 +258,7 @@ async function main() {
     while (lineWaiters.length) lineWaiters.shift()!("exit"); // wake every waiter with a polite "exit"
   });
   // Get the next line of user input, showing a prompt if we have to wait.
-  const readUserLine = async (prompt: string, footer?: string): Promise<string> => {
+  const readUserLine = async (prompt: string, footer?: string, echo?: (t: string) => string): Promise<string> => {
     if (pendingLines.length) return pendingLines.shift()!; // typed-ahead (or piped) line — use it
     if (stdinDone) return "exit"; // stdin is gone — leave politely
     if (process.stdin.isTTY) {
@@ -266,7 +266,7 @@ async function main() {
       // so the status bar stays pinned below however the line wraps.
       editing = true;
       try {
-        const res = await editLine(rl, { prompt, footer, history, onTab: () => toggleLastCollapsed(), onReveal: () => revealReasoning(), onTools: () => revealToolCalls(), transformPaste: normalizeDroppedPaths });
+        const res = await editLine(rl, { prompt, footer, history, echo, onTab: () => toggleLastCollapsed(), onReveal: () => revealReasoning(), onTools: () => revealToolCalls(), transformPaste: normalizeDroppedPaths });
         if (res.type === "line") {
           if (res.value.trim()) history.push(res.value); // remember non-empty entries for ↑/↓
           return res.value;
@@ -662,7 +662,7 @@ async function main() {
       console.log(""); // one blank line separates the previous answer from the prompt
       footer = statusLine(CONFIG.model, path.basename(process.cwd()), gitBranch(), ctxPct, costMeter.cost(), Date.now() - sessionStartedAt); // status pinned below the prompt
     }
-    const line = (await readUserLine(framedPrompt(isPlanMode()), footer)).trim(); // next input, or "exit" on EOF
+    const line = (await readUserLine(framedPrompt(isPlanMode()), footer, sentMessage)).trim(); // next input (echoed as a sent message above), or "exit" on EOF
     if (!line) continue; // empty line — just re-prompt
     if (line === "exit" || line === "quit") {
       if (hasRunningBackground()) console.log(chalk.yellow("(stopping background tasks still running — see /bg)")); // Day 37: they're about to be SIGKILLed on exit
