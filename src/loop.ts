@@ -8,6 +8,7 @@ import { previewChange } from "./diff.js"; // show the diff before a write so ap
 import { estimateHistoryTokens, compactHistory, COMPACT_AT, MAX_COMPACTIONS_PER_QUERY, MAX_COMPACT_FAILURES } from "./context.js"; // context management
 import { SUB_AGENT_PROMPT, TEAMMATE_PROMPT } from "./prompt.js"; // the sub-agent + teammate constitutions
 import { LEAD, MAX_TEAMMATES, sendMessage, sendProtocol, readInbox, inboxCount, registerTeammate, finishTeammate, teammateExists, teammateCount, createRequest, resolveResponse, setTeammateState, anyTeammateBusy, runningTeammates, markShutdown, shutdownRequestId, resetTeam } from "./team.js"; // agent teams (Day 38) + team protocols (Day 39): mailboxes, registry, request/response contracts
+import { createTask, listTasks, claimTask, completeTask, claimNextAvailable, boardSummary, resetBoard } from "./board.js"; // the shared task board (Day 40): autonomous work claiming
 import { emit } from "./telemetry.js"; // local-only event log (no-op unless the CLI armed it)
 import { runHooks } from "./hooks.js"; // user lifecycle hooks (PreToolUse / PostToolUse / Stop)
 import type { Judge } from "./judge.js"; // optional LLM permission classifier
@@ -226,6 +227,60 @@ const submitPlanTool: OpenAI.ChatCompletionTool = {
   },
 };
 
+// The task board tools (Day 40). The board is how teammates find work without
+// the lead handing it out: create tasks, see the board, claim a ready one, mark
+// it done. claim/complete are loop-level (not registry tools) because they need
+// to know WHO is calling — the claimer's identity is the agent name, which only
+// the loop has.
+const createTaskTool: OpenAI.ChatCompletionTool = {
+  type: "function",
+  function: {
+    name: "create_task",
+    description: `Add a task to the shared board for a teammate to pick up. Use it to break a big job into independent, claimable pieces. A task can declare blockedBy (ids of tasks that must finish first), so you can lay out a dependency order (e.g. schema → routes → tests) and teammates will respect it. Returns the new task id.`,
+    parameters: {
+      type: "object",
+      properties: {
+        subject: { type: "string", description: "Short one-line title of the task" },
+        description: { type: "string", description: "The full, self-contained instruction for whoever claims it" },
+        blockedBy: { type: "array", items: { type: "string" }, description: "Tasks that must be completed before this one can start — by task id or by their subject (optional)" },
+      },
+      required: ["subject"],
+    },
+  },
+};
+const listTasksTool: OpenAI.ChatCompletionTool = {
+  type: "function",
+  function: {
+    name: "list_tasks",
+    description: `Show the shared task board: every task with its status (pending / in_progress / completed), owner, and dependencies. Use it to see what's left, what's claimed, and what's ready to start.`,
+    parameters: { type: "object", properties: {}, required: [] },
+  },
+};
+const claimTaskTool: OpenAI.ChatCompletionTool = {
+  type: "function",
+  function: {
+    name: "claim_task",
+    description: `Claim a pending, unblocked task from the board as your own — it becomes in_progress and owned by you. Claim BEFORE you start working it. If the claim fails (someone beat you to it, or it's still blocked), pick another task or wait. When you're done, call complete_task. (You usually don't need to call this by hand: while idle you are offered ready work automatically.)`,
+    parameters: {
+      type: "object",
+      properties: { task_id: { type: "string", description: "The id of the task to claim" } },
+      required: ["task_id"],
+    },
+  },
+};
+const completeTaskTool: OpenAI.ChatCompletionTool = {
+  type: "function",
+  function: {
+    name: "complete_task",
+    description: `Mark a task you own as completed. This may unblock downstream tasks (you'll be told which). Only call it once the work is actually done and verified.`,
+    parameters: {
+      type: "object",
+      properties: { task_id: { type: "string", description: "The id of the task to complete" } },
+      required: ["task_id"],
+    },
+  },
+};
+
 // Which tool manuals does THIS agent get? One place so the three agent kinds
 // stay clearly distinct:
 //   - Lead / top-level: everything, plus task, ask_user, and the team tools
@@ -238,15 +293,19 @@ const TEAMMATE_TOOLS = new Set(["read_file", "write_file", "edit_file", "search"
 function toolsFor(opts: LoopOptions): OpenAI.ChatCompletionTool[] {
   const builtins = toolDefinitions();
   if (opts.teammate) {
+    // A teammate works the board: it can add tasks it discovers, see the board,
+    // claim ready work, and complete what it owns.
     const kit = builtins.filter((t) => t.type === "function" && TEAMMATE_TOOLS.has(t.function.name));
-    return [...kit, sendMessageTool, submitPlanTool];
+    return [...kit, sendMessageTool, submitPlanTool, createTaskTool, listTasksTool, claimTaskTool, completeTaskTool];
   }
   if (opts.subAgent) {
     // Sub-agents don't get todo_write: the plan is the top-level agent's, and a
     // sub-agent writing to the shared list would clobber it mid-task.
     return builtins.filter((t) => !(t.type === "function" && t.function.name === "todo_write"));
   }
-  return [...builtins, taskTool, askUserTool, spawnTeammateTool, sendMessageTool, requestShutdownTool, requestPlanTool, reviewPlanTool]; // the Lead can do everything
+  // The Lead can do everything: orchestration, the protocols, and authoring +
+  // watching the board (it lays out tasks; teammates pull from it).
+  return [...builtins, taskTool, askUserTool, spawnTeammateTool, sendMessageTool, requestShutdownTool, requestPlanTool, reviewPlanTool, createTaskTool, listTasksTool];
 }
 
 // Run one sub-agent: a fresh conversation, same tools minus task, same
@@ -528,6 +587,11 @@ async function execute(call: AssembledCall, opts: LoopOptions): Promise<string> 
   if (call.name === "request_plan") return runRequestPlan(call, opts);
   if (call.name === "review_plan") return runReviewPlan(call, opts);
   if (call.name === "submit_plan") return runSubmitPlan(call, opts);
+  // The task board tools (Day 40) — claim/complete need the caller's identity.
+  if (call.name === "create_task") return runCreateTask(call, opts);
+  if (call.name === "list_tasks") return runListTasks(call, opts);
+  if (call.name === "claim_task") return runClaimTask(call, opts);
+  if (call.name === "complete_task") return runCompleteTask(call, opts);
 
   if (call.name !== "task") return dispatch(call.name, call.args, opts.signal); // ordinary tools go through the registry (signal lets Ctrl+C kill run_bash)
   if (opts.subAgent) return "[error] Sub-agents cannot spawn sub-agents. Do the work yourself."; // one level of delegation only
@@ -632,6 +696,52 @@ async function runSubmitPlan(call: AssembledCall, opts: LoopOptions): Promise<st
   const requestId = createRequest("plan_approval", opts.teammate.name, LEAD, plan);
   sendProtocol(opts.teammate.name, LEAD, "plan_approval_request", requestId, plan);
   return `Plan submitted to the lead for approval (${requestId}). STOP here and wait — the lead's decision will arrive in your inbox. Do NOT start the work until it is approved.`;
+}
+
+// ---- The task board tools (Day 40) ------------------------------------------
+// The claimer's identity is the calling agent's name — the lead or a teammate.
+const boardActor = (opts: LoopOptions): string => opts.teammate?.name ?? LEAD;
+
+async function runCreateTask(call: AssembledCall, opts: LoopOptions): Promise<string> {
+  if (opts.subAgent && !opts.teammate) return "[error] Only team agents use the task board."; // plain sub-agents have no board
+  let subject = "", description = "", blockedBy: string[] = [];
+  try {
+    const a = JSON.parse(call.args) as { subject?: string; description?: string; blockedBy?: unknown };
+    subject = (a.subject ?? "").trim();
+    description = a.description ?? "";
+    if (Array.isArray(a.blockedBy)) blockedBy = a.blockedBy.filter((x): x is string => typeof x === "string");
+  } catch { /* fall through */ }
+  if (!subject) return "[error] create_task needs a 'subject'.";
+  const task = createTask(subject, description, blockedBy);
+  if (!opts.quiet) console.log(chalk.magenta(`  ⎿ ${boardActor(opts)} created ${task.id}: ${subject.slice(0, 50)}`));
+  return `Created ${task.id}: "${subject}"${blockedBy.length ? ` (blockedBy: ${blockedBy.join(", ")})` : ""}. It's on the board for a teammate to claim.`;
+}
+
+async function runListTasks(_call: AssembledCall, opts: LoopOptions): Promise<string> {
+  if (opts.subAgent && !opts.teammate) return "[error] Only team agents use the task board.";
+  return `Task board:\n${boardSummary()}`;
+}
+
+async function runClaimTask(call: AssembledCall, opts: LoopOptions): Promise<string> {
+  if (opts.subAgent && !opts.teammate) return "[error] Only team agents use the task board.";
+  let taskId = "";
+  try { taskId = (JSON.parse(call.args) as { task_id?: string }).task_id?.trim() ?? ""; } catch { /* fall through */ }
+  if (!taskId) return "[error] claim_task needs a 'task_id'.";
+  const res = claimTask(taskId, boardActor(opts));
+  if (!res.ok) return `[error] ${res.error} Pick another task or check list_tasks.`;
+  return `Claimed ${res.task!.id}: "${res.task!.subject}". It's yours and in_progress. Do it, then call complete_task("${res.task!.id}").\n${res.task!.description}`;
+}
+
+async function runCompleteTask(call: AssembledCall, opts: LoopOptions): Promise<string> {
+  if (opts.subAgent && !opts.teammate) return "[error] Only team agents use the task board.";
+  let taskId = "";
+  try { taskId = (JSON.parse(call.args) as { task_id?: string }).task_id?.trim() ?? ""; } catch { /* fall through */ }
+  if (!taskId) return "[error] complete_task needs a 'task_id'.";
+  const res = completeTask(taskId, boardActor(opts));
+  if (!res.ok) return `[error] ${res.error}`;
+  if (!opts.quiet) console.log(chalk.magenta(`  ⎿ ${boardActor(opts)} completed ${taskId}`));
+  const unblocked = res.unblocked?.length ? ` Unblocked: ${res.unblocked.join(", ")}.` : "";
+  return `Completed ${taskId}.${unblocked} Claim the next ready task, or idle until the lead shuts you down.`;
 }
 
 // spawn_teammate: start a persistent worker that runs concurrently. Top-level
@@ -856,10 +966,23 @@ async function continueForTeam(messages: OpenAI.ChatCompletionMessageParam[], op
     const me = opts.teammate.name;
     let waited = 0;
     while (true) {
-      const injected = consumeInbox(messages, opts); // route protocol + plain; may set the shutdown flag
+      const injected = consumeInbox(messages, opts); // INBOX FIRST (priority) — route protocol + plain; may set the shutdown flag
       if (shutdownRequestId(me)) return false; // shutdown handshake → exit (runTeammate sends the response)
-      if (injected) { setTeammateState(me, "active"); return true; } // real work arrived → run a round
-      setTeammateState(me, "idle"); // nothing to do — wait for the lead/another teammate
+      if (injected) { setTeammateState(me, "active"); return true; } // a direct message arrived → run a round
+      // s17 autonomy: nothing in the inbox — pull ready work off the shared board
+      // yourself. claimNextAvailable atomically claims the next pending+unblocked
+      // task; the claim is what makes this safe with several teammates scanning.
+      const claimed = claimNextAvailable(me);
+      if (claimed) {
+        // The claimed task becomes a fresh WORK instruction. The leading identity
+        // line also re-anchors the persona if the history was compacted (the
+        // reference's identity-reinjection, folded into the work hand-off).
+        messages.push({ role: "user", content: `You are ${me}. You claimed task ${claimed.id} from the board: "${claimed.subject}".\n${claimed.description}\nWhen it is done and verified, call complete_task("${claimed.id}") — then you'll be offered the next ready task.` });
+        if (!opts.quiet) console.log(chalk.magenta(`  ⎿ [${me}] claimed ${claimed.id}: ${claimed.subject.slice(0, 50)}`));
+        setTeammateState(me, "active");
+        return true;
+      }
+      setTeammateState(me, "idle"); // inbox empty AND no claimable work — wait
       if (opts.isInterrupted() || waited >= TEAMMATE_MAX_IDLE_MS) return false; // abandoned → self-exit backstop
       await interruptibleSleep(TEAM_POLL_MS, opts.isInterrupted);
       waited += TEAM_POLL_MS;
@@ -894,6 +1017,7 @@ async function shutdownTeam(opts: LoopOptions): Promise<void> {
   }
   readInbox(LEAD); // drop the shutdown confirmations the lead won't read
   resetTeam(); // clear the registry + protocol state; the next task starts with a fresh team
+  resetBoard(); // and a fresh task board — its work is done with this team
 }
 
 // The agent main loop, as a state machine: every iteration either continues

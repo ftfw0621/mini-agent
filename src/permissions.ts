@@ -116,6 +116,10 @@ function planSafe(toolName: string, verdict: Verdict): boolean {
     case "request_plan":
     case "review_plan":
     case "submit_plan":
+    case "create_task": // task board (Day 40): touches the internal board, not the user's project
+    case "list_tasks":
+    case "claim_task":
+    case "complete_task":
     case "ask_user": // asking the user a question is safe in plan mode — it doesn't change anything
     case "skill": // loading a skill's instructions is read-only; what it does is gated per-call
     case "todo_write": // planning is exactly what plan mode is FOR — never block it
@@ -185,6 +189,13 @@ function basePermission(toolName: string, argsJson: string): Verdict {
       // Team protocol messages (Day 39) — request/response coordination over the
       // mailbox. No filesystem effect; the work they gate still passes the gate.
       return { decision: "allow", reason: "team protocol, no side effects", summary: toolName };
+    case "create_task":
+    case "list_tasks":
+    case "claim_task":
+    case "complete_task":
+      // Task board (Day 40) — bookkeeping on the internal board, not the user's
+      // project. The actual work a claimed task drives still passes this gate.
+      return { decision: "allow", reason: "task board, no project side effects", summary: toolName };
     case "ask_user":
       // Asking the user a question has no side effects — it's the safest thing
       // the model can do. Never gate it behind an approval prompt.

@@ -61,6 +61,11 @@ expectVerdict("request_shutdown allowed", "request_shutdown", { teammate: "api" 
 expectVerdict("request_plan allowed", "request_plan", { teammate: "api", task: "refactor" }, "allow");
 expectVerdict("review_plan allowed", "review_plan", { request_id: "req_000001", decision: "approve" }, "allow");
 expectVerdict("submit_plan allowed", "submit_plan", { plan: "do X then Y" }, "allow");
+// Task board tools (Day 40) — bookkeeping on the internal board, no project effect.
+expectVerdict("create_task allowed", "create_task", { subject: "write tests" }, "allow");
+expectVerdict("list_tasks allowed", "list_tasks", {}, "allow");
+expectVerdict("claim_task allowed", "claim_task", { task_id: "task_1" }, "allow");
+expectVerdict("complete_task allowed", "complete_task", { task_id: "task_1" }, "allow");
 
 // ---- background tasks (Day 37) ------------------------------------------------------------------
 // Backgrounding changes WHEN output returns, never WHAT runs — so run_bash_background

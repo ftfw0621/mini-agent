@@ -28,6 +28,7 @@ import { loadSkills, buildSkillTool, findSkill, skillInstructions, type Skill } 
 import { initCostMeter, DEFAULT_PRICING } from "./cost.js"; // token & cost accounting for /cost
 import { listBackground, hasRunningBackground, killAllBackground } from "./background.js"; // background tasks: /bg view + kill-on-exit (Day 37)
 import { listTeam, resetTeam } from "./team.js"; // agent teams: /team view + reset on clear/resume (Day 38)
+import { boardSummary, resetBoard } from "./board.js"; // task board: /tasks view + reset on clear/resume (Day 40)
 
 // package.json sits one level above both src/ (dev) and dist/ (built) — same path either way.
 const pkg = createRequire(import.meta.url)("../package.json") as { version: string };
@@ -75,6 +76,7 @@ const SESSION_HELP = `commands:
   /todos     show the agent's current task plan (it maintains one with todo_write on multi-step work)
   /bg        list background tasks this session (run_bash_background) and their status
   /team      list the agent team (spawn_teammate): each teammate's role, status, and pending inbox
+  /tasks     show the shared task board (create_task/claim_task): each task's status, owner, and dependencies
   /undo      revert the most recent file write (write_file / edit_file) this session
   /diff      show every file changed this session, as a diff from where it started
   /resume    list recent sessions in this project and continue one of them
@@ -444,6 +446,7 @@ async function main() {
         clearUndo(); // a fresh conversation should not undo the previous one's writes
         clearTodos(); // the plan belonged to the old task — drop it
         resetTeam(); // the team belonged to the old task — forget it (mailboxes re-wipe on next use)
+        resetBoard(); // and the shared task board (Day 40)
         sessionId = newSessionId(); // a fresh conversation is a fresh session file
         console.log(chalk.dim("(history cleared)")); // confirm the reset
         return true;
@@ -482,6 +485,13 @@ async function main() {
           const inbox = t.pending ? chalk.yellow(` · ${t.pending} unread`) : "";
           console.log(chalk.dim(`  ${icon[t.status] ?? "?"} ${t.name} [${t.status}, ${t.elapsed}s] — ${t.role.slice(0, 60)}${inbox}`));
         }
+        return true;
+      }
+      case "/tasks": {
+        // The shared task board (create_task/claim_task/complete_task): what's
+        // pending, claimed, and done, and who owns what.
+        const summary = boardSummary();
+        console.log(summary === "(the task board is empty)" ? chalk.dim("(no tasks — the lead adds them with create_task; teammates claim them autonomously)") : chalk.dim(`task board:\n${summary}`));
         return true;
       }
       case "/stats":
@@ -553,6 +563,7 @@ async function main() {
         clearUndo(); // the previous session's writes are not ours to undo
         clearTodos(); // the resumed task starts without the old session's stale plan
         resetTeam(); // a resumed conversation starts with no live team
+        resetBoard(); // ...and an empty task board (Day 40)
         console.log(chalk.dim(`(resumed ${chosen.id} — ${chosen.messages.length} messages; files must be re-read before editing)`));
         return true;
       }
