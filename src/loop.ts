@@ -7,7 +7,7 @@ import { checkPermission } from "./permissions.js"; // the allow/ask/deny gate
 import { previewChange } from "./diff.js"; // show the diff before a write so approval is informed
 import { estimateHistoryTokens, compactHistory, COMPACT_AT, MAX_COMPACTIONS_PER_QUERY, MAX_COMPACT_FAILURES } from "./context.js"; // context management
 import { SUB_AGENT_PROMPT, TEAMMATE_PROMPT } from "./prompt.js"; // the sub-agent + teammate constitutions
-import { LEAD, MAX_TEAMMATES, sendMessage, readInbox, inboxCount, registerTeammate, finishTeammate, teammateExists, teammateCount, activeTeammateCount } from "./team.js"; // agent teams (Day 38): mailboxes + teammate registry
+import { LEAD, MAX_TEAMMATES, sendMessage, sendProtocol, readInbox, inboxCount, registerTeammate, finishTeammate, teammateExists, teammateCount, createRequest, resolveResponse, setTeammateState, anyTeammateBusy, runningTeammates, markShutdown, shutdownRequestId, resetTeam } from "./team.js"; // agent teams (Day 38) + team protocols (Day 39): mailboxes, registry, request/response contracts
 import { emit } from "./telemetry.js"; // local-only event log (no-op unless the CLI armed it)
 import { runHooks } from "./hooks.js"; // user lifecycle hooks (PreToolUse / PostToolUse / Stop)
 import type { Judge } from "./judge.js"; // optional LLM permission classifier
@@ -162,26 +162,91 @@ const sendMessageTool: OpenAI.ChatCompletionTool = {
   },
 };
 
+// The team protocol tools (Day 39). Both sides of each contract are a tool:
+// the lead asks for shutdown / reviews a plan; a teammate submits a plan. Each
+// carries a request_id so the answer can be correlated to the ask.
+const requestShutdownTool: OpenAI.ChatCompletionTool = {
+  type: "function",
+  function: {
+    name: "request_shutdown",
+    description: `Ask a teammate to shut down GRACEFULLY. It finishes what it's mid-way through, confirms, and exits cleanly — far better than abandoning it (which can leave a half-written file). Use it when a teammate's part is done, or when you're wrapping up the whole task. You'll get a shutdown confirmation back. (When you finish, any teammates still up are shut down for you automatically.)`,
+    parameters: {
+      type: "object",
+      properties: {
+        teammate: { type: "string", description: "Name of the teammate to shut down" },
+        reason: { type: "string", description: "Optional short reason, shown to the teammate" },
+      },
+      required: ["teammate"],
+    },
+  },
+};
+const requestPlanTool: OpenAI.ChatCompletionTool = {
+  type: "function",
+  function: {
+    name: "request_plan",
+    description: `Tell a teammate to submit a PLAN (via submit_plan) and wait for your approval BEFORE it carries out a risky or far-reaching change (e.g. an auth refactor, a schema migration). Use this when you want to pre-authorize high-stakes work instead of reviewing the damage after. The teammate will send you a plan_approval_request; approve or reject it with review_plan.`,
+    parameters: {
+      type: "object",
+      properties: {
+        teammate: { type: "string", description: "Name of the teammate" },
+        task: { type: "string", description: "The risky work it must plan before doing" },
+      },
+      required: ["teammate", "task"],
+    },
+  },
+};
+const reviewPlanTool: OpenAI.ChatCompletionTool = {
+  type: "function",
+  function: {
+    name: "review_plan",
+    description: `Approve or reject a plan a teammate submitted for approval. You'll have received a plan_approval_request with a request_id — pass that id and your decision. On approval the teammate proceeds; on rejection it revises and may submit again. Always include a brief reason on a rejection so it can fix the plan.`,
+    parameters: {
+      type: "object",
+      properties: {
+        request_id: { type: "string", description: "The request_id from the plan_approval_request" },
+        decision: { type: "string", enum: ["approve", "reject"], description: "approve | reject" },
+        reason: { type: "string", description: "Short reason (required-in-spirit on a rejection)" },
+      },
+      required: ["request_id", "decision"],
+    },
+  },
+};
+const submitPlanTool: OpenAI.ChatCompletionTool = {
+  type: "function",
+  function: {
+    name: "submit_plan",
+    description: `Submit a PLAN to the lead and wait for approval BEFORE carrying out a risky or far-reaching change. Use it whenever you're about to do something high-stakes (refactor auth, migrate a schema, delete/rewrite many files) — propose first, act after. After you call this, STOP and wait: the lead's approval (or rejection) will arrive in your inbox. Do not start the work until it's approved.`,
+    parameters: {
+      type: "object",
+      properties: {
+        plan: { type: "string", description: "The concise, ordered plan you intend to carry out" },
+      },
+      required: ["plan"],
+    },
+  },
+};
+
 // Which tool manuals does THIS agent get? One place so the three agent kinds
 // stay clearly distinct:
-//   - Lead / top-level: everything, plus task, ask_user, and the team tools.
-//   - Teammate: a focused worker set + send_message; NO task, NO spawn_teammate
-//     (nested spawning is forbidden), NO ask_user (can't reach the human), and
-//     none of the planning/background extras.
+//   - Lead / top-level: everything, plus task, ask_user, and the team tools
+//     (spawn + message + the protocol tools it drives: shutdown / plan review).
+//   - Teammate: a focused worker set + send_message + submit_plan; NO task, NO
+//     spawn_teammate (nested spawning is forbidden), NO ask_user (can't reach
+//     the human), and none of the planning/background extras.
 //   - Plain sub-agent (task): all built-ins except todo_write (unchanged).
 const TEAMMATE_TOOLS = new Set(["read_file", "write_file", "edit_file", "search", "run_bash"]); // the teammate's focused kit
 function toolsFor(opts: LoopOptions): OpenAI.ChatCompletionTool[] {
   const builtins = toolDefinitions();
   if (opts.teammate) {
     const kit = builtins.filter((t) => t.type === "function" && TEAMMATE_TOOLS.has(t.function.name));
-    return [...kit, sendMessageTool];
+    return [...kit, sendMessageTool, submitPlanTool];
   }
   if (opts.subAgent) {
     // Sub-agents don't get todo_write: the plan is the top-level agent's, and a
     // sub-agent writing to the shared list would clobber it mid-task.
     return builtins.filter((t) => !(t.type === "function" && t.function.name === "todo_write"));
   }
-  return [...builtins, taskTool, askUserTool, spawnTeammateTool, sendMessageTool]; // the Lead can do everything
+  return [...builtins, taskTool, askUserTool, spawnTeammateTool, sendMessageTool, requestShutdownTool, requestPlanTool, reviewPlanTool]; // the Lead can do everything
 }
 
 // Run one sub-agent: a fresh conversation, same tools minus task, same
@@ -455,10 +520,14 @@ async function execute(call: AssembledCall, opts: LoopOptions): Promise<string> 
   // ask_user is special like task: running it needs the CLI's prompt, not the
   // tool registry. It presents a form and feeds the selections back to the model.
   if (call.name === "ask_user") return runAskUser(call, opts);
-  // The team tools (Day 38) are loop-level like task: they need the loop and the
-  // shared mailbox state, not the tool registry.
+  // The team tools (Day 38/39) are loop-level like task: they need the loop and
+  // the shared mailbox + protocol state, not the tool registry.
   if (call.name === "send_message") return runSendMessage(call, opts);
   if (call.name === "spawn_teammate") return runSpawnTeammate(call, opts);
+  if (call.name === "request_shutdown") return runRequestShutdown(call, opts);
+  if (call.name === "request_plan") return runRequestPlan(call, opts);
+  if (call.name === "review_plan") return runReviewPlan(call, opts);
+  if (call.name === "submit_plan") return runSubmitPlan(call, opts);
 
   if (call.name !== "task") return dispatch(call.name, call.args, opts.signal); // ordinary tools go through the registry (signal lets Ctrl+C kill run_bash)
   if (opts.subAgent) return "[error] Sub-agents cannot spawn sub-agents. Do the work yourself."; // one level of delegation only
@@ -494,6 +563,75 @@ async function runSendMessage(call: AssembledCall, opts: LoopOptions): Promise<s
   // an undeliverable message just sits in a file no one reads, which is harmless.
   sendMessage(from, to, content);
   return `Message delivered to ${to}'s inbox.`;
+}
+
+// request_shutdown (lead → teammate): open a shutdown contract. We stamp the
+// teammate with the request_id (it replies with that id and exits) AND send the
+// request message so it shows up in the teammate's inbox and conversation.
+async function runRequestShutdown(call: AssembledCall, opts: LoopOptions): Promise<string> {
+  if (opts.teammate || opts.subAgent) return "[error] Only the lead can request a shutdown.";
+  let teammate = "", reason = "";
+  try {
+    const a = JSON.parse(call.args) as { teammate?: string; reason?: string };
+    teammate = (a.teammate ?? "").trim();
+    reason = a.reason ?? "";
+  } catch { /* fall through */ }
+  if (!teammate) return "[error] request_shutdown needs a 'teammate' name.";
+  if (!teammateExists(teammate)) return `[error] No teammate named "${teammate}".`;
+  if (shutdownRequestId(teammate)) return `Shutdown already requested for "${teammate}" — waiting for it to confirm and exit.`;
+  const requestId = createRequest("shutdown", LEAD, teammate, reason || "task complete");
+  markShutdown(teammate, requestId);
+  sendProtocol(LEAD, teammate, "shutdown_request", requestId, reason || "Your part is done — please wrap up and exit.");
+  return `Requested shutdown of "${teammate}" (${requestId}). It will finish up, confirm, and exit; you'll get the confirmation in your inbox.`;
+}
+
+// request_plan (lead → teammate): ask the teammate to plan-before-acting. This
+// is a directive message; the teammate answers it by calling submit_plan, which
+// opens the actual plan_approval contract.
+async function runRequestPlan(call: AssembledCall, opts: LoopOptions): Promise<string> {
+  if (opts.teammate || opts.subAgent) return "[error] Only the lead can request a plan.";
+  let teammate = "", task = "";
+  try {
+    const a = JSON.parse(call.args) as { teammate?: string; task?: string };
+    teammate = (a.teammate ?? "").trim();
+    task = a.task ?? "";
+  } catch { /* fall through */ }
+  if (!teammate || !task.trim()) return "[error] request_plan needs a 'teammate' and a 'task'.";
+  if (!teammateExists(teammate)) return `[error] No teammate named "${teammate}".`;
+  sendMessage(LEAD, teammate, `Before doing this, call submit_plan with your plan and WAIT for my approval — do not start until approved:\n${task}`);
+  return `Asked "${teammate}" to submit a plan before doing: ${task.slice(0, 80)}. Approve/reject it with review_plan when it arrives.`;
+}
+
+// review_plan (lead): the answer half of the plan_approval contract. Correlate
+// to the request via match_response (resolveResponse), then send the decision
+// back to the teammate that submitted it.
+async function runReviewPlan(call: AssembledCall, opts: LoopOptions): Promise<string> {
+  if (opts.teammate || opts.subAgent) return "[error] Only the lead can review a plan.";
+  let requestId = "", decision = "", reason = "";
+  try {
+    const a = JSON.parse(call.args) as { request_id?: string; decision?: string; reason?: string };
+    requestId = (a.request_id ?? "").trim();
+    decision = (a.decision ?? "").trim();
+    reason = a.reason ?? "";
+  } catch { /* fall through */ }
+  if (!requestId || (decision !== "approve" && decision !== "reject")) return '[error] review_plan needs a request_id and decision "approve" or "reject".';
+  const approved = decision === "approve";
+  const res = resolveResponse(requestId, "plan_approval", approved); // match_response: validates kind + state
+  if (!res.ok) return `[error] ${res.error}`;
+  sendProtocol(LEAD, res.state!.from, "plan_approval_response", requestId, reason || (approved ? "approved" : "rejected"), approved ? "approved" : "rejected");
+  return `Plan ${approved ? "approved" : "rejected"} (${requestId}); told ${res.state!.from}.`;
+}
+
+// submit_plan (teammate → lead): open a plan_approval contract and STOP. The
+// teammate idles after this until the lead's decision lands in its inbox.
+async function runSubmitPlan(call: AssembledCall, opts: LoopOptions): Promise<string> {
+  if (!opts.teammate) return "[error] Only a teammate can submit a plan (the lead reviews them).";
+  let plan = "";
+  try { plan = (JSON.parse(call.args) as { plan?: string }).plan ?? ""; } catch { /* fall through */ }
+  if (!plan.trim()) return "[error] submit_plan needs a non-empty 'plan'.";
+  const requestId = createRequest("plan_approval", opts.teammate.name, LEAD, plan);
+  sendProtocol(opts.teammate.name, LEAD, "plan_approval_request", requestId, plan);
+  return `Plan submitted to the lead for approval (${requestId}). STOP here and wait — the lead's decision will arrive in your inbox. Do NOT start the work until it is approved.`;
 }
 
 // spawn_teammate: start a persistent worker that runs concurrently. Top-level
@@ -542,9 +680,12 @@ async function runTeammate(name: string, role: string, task: string, opts: LoopO
       { role: "user", content: task }, // its first instruction; more arrive via the inbox
     ];
     // A teammate is a sub-agent (quiet streaming, no hooks, isolated) PLUS team
-    // wiring: a name, its inbox, a round cap, and a non-interactive permission
-    // policy (it cannot prompt the human, so writes auto-proceed but risky bash
-    // is declined — see teammateConfirm). Deny ALWAYS still wins.
+    // wiring: a name, its inbox, a non-interactive permission policy (it cannot
+    // prompt the human, so writes auto-proceed but risky bash is declined — see
+    // teammateConfirm; deny ALWAYS still wins), and a runaway backstop. Day 39:
+    // it is no longer bounded by a low round cap — it idle-waits for work and
+    // exits on the shutdown handshake (continueForTeam); maxRounds is only a
+    // generous guard against an active loop that never stops calling tools.
     const result = await runLoop(messages, {
       ...opts,
       subAgent: true,
@@ -553,8 +694,13 @@ async function runTeammate(name: string, role: string, task: string, opts: LoopO
       confirm: teammateConfirm(name),
       askUser: undefined, // teammates have no line to the human
     });
-    const summary = result.reason === TerminateReason.Done && result.finalText?.trim() ? result.finalText.trim() : `[ended without a final report: ${result.reason}]`;
-    sendMessage(name, LEAD, summary, "result"); // the lead always hears how it ended
+    // How it ended decides what the lead hears. A shutdown handshake gets a
+    // shutdown_response(approved) carrying the request_id; anything else is a
+    // plain result. Either way the lead always learns the outcome.
+    const summary = result.reason === TerminateReason.Done && result.finalText?.trim() ? result.finalText.trim() : `[ended: ${result.reason}]`;
+    const sd = shutdownRequestId(name);
+    if (sd) sendProtocol(name, LEAD, "shutdown_response", sd, summary || "shut down", "approved");
+    else sendMessage(name, LEAD, summary, "result");
     finishTeammate(name, result.reason === TerminateReason.Done);
     if (!opts.quiet) console.log(mark.teammateDone(name, result.reason === TerminateReason.Done));
   } catch (err) {
@@ -568,7 +714,10 @@ async function runTeammate(name: string, role: string, task: string, opts: LoopO
   }
 }
 
-const TEAMMATE_MAX_ROUNDS = 15; // a teammate is bounded — the team can't run away (the reference caps at ~10)
+const TEAMMATE_MAX_ROUNDS = 30; // runaway backstop for an active teammate (not the lifecycle — idle-wait + shutdown handshake end it normally)
+const TEAM_POLL_MS = 250; // how often an idle agent polls its inbox while waiting
+const TEAMMATE_MAX_IDLE_MS = 60_000; // an abandoned teammate self-exits after this long with nothing to do (the lead normally shuts it down first)
+const SHUTDOWN_GRACE_MS = 30_000; // how long the lead waits for teammates to exit cleanly when it disbands the team
 
 // A teammate's permission policy. It cannot stop and ask the human, so: file
 // writes/edits auto-proceed (that is the teammate's job, and they are reversible
@@ -646,38 +795,105 @@ function injectBackgroundNotifications(messages: OpenAI.ChatCompletionMessagePar
   return true;
 }
 
-// Drain this agent's mailbox into its conversation as a user turn (Day 38). The
-// lead reads "lead"; a teammate reads its own name. The read is consumptive
-// (team.ts), so each message is injected exactly once. Plain sub-agents (no
-// team) have no inbox. Returns true if anything was injected. Same seam and
-// shape as the background-notification and todo-nag injections.
-function injectInbox(messages: OpenAI.ChatCompletionMessageParam[], opts: LoopOptions): boolean {
+// Consume this agent's mailbox into its conversation, ROUTING protocol messages
+// (Day 39) as it goes — the reference's consume_lead_inbox + dispatch_message in
+// one pass. The lead reads "lead"; a teammate reads its own name. The read is
+// consumptive (team.ts), so each message is handled exactly once. Protocol
+// messages update state (correlate responses via match_response, flag a shutdown)
+// AND get a plain-language line so the model can react; plain chat is passed
+// through. Returns whether anything was injected. (Plan-approval is a handshake,
+// not a hard gate: the teammate is TOLD to wait and does — execution gating by
+// permission mode is what production Claude Code adds; omitted here, per s16.)
+function consumeInbox(messages: OpenAI.ChatCompletionMessageParam[], opts: LoopOptions): boolean {
   if (opts.subAgent && !opts.teammate) return false; // a plain sub-agent is not on the team
   const me = opts.teammate?.name ?? LEAD;
   const msgs = readInbox(me);
   if (!msgs.length) return false;
-  const body = msgs.map((m) => `[message from ${m.from}${m.type === "result" ? " · RESULT" : ""}] ${m.content}`).join("\n\n");
-  const header = opts.teammate ? "Messages from your team — read and act on them:" : "Team inbox — your teammates sent these. React to them (a RESULT means that teammate finished):";
-  messages.push({ role: "user", content: `${header}\n\n${body}` });
+  const lines: string[] = [];
+  for (const m of msgs) {
+    switch (m.kind) {
+      case "shutdown_request": // (teammate side) the lead asked us to shut down
+        markShutdown(me, m.requestId ?? "");
+        lines.push(`[lead] SHUTDOWN REQUESTED (${m.requestId}): ${m.content}. Finish any in-progress write, then you will exit cleanly.`);
+        break;
+      case "shutdown_response": // (lead side) a teammate confirmed it shut down
+        if (m.requestId) resolveResponse(m.requestId, "shutdown", m.status === "approved");
+        finishTeammate(m.from, true);
+        lines.push(`[${m.from}] confirmed shutdown (${m.requestId}) and has exited.`);
+        break;
+      case "plan_approval_request": // (lead side) a teammate wants approval before risky work
+        lines.push(`[${m.from}] PLAN APPROVAL REQUESTED (${m.requestId}). Review it, then call review_plan with this id. Plan:\n${m.content}`);
+        break;
+      case "plan_approval_response": { // (teammate side) the lead decided on our plan
+        if (m.requestId) resolveResponse(m.requestId, "plan_approval", m.status === "approved");
+        const ok = m.status === "approved";
+        lines.push(`[lead] plan ${ok ? "APPROVED" : "REJECTED"} (${m.requestId})${m.content ? `: ${m.content}` : ""}. ${ok ? "Proceed with the plan now." : "Revise it and submit_plan again."}`);
+        break;
+      }
+      default: // plain chat / a teammate's result
+        lines.push(`[message from ${m.from}${m.type === "result" ? " · RESULT" : ""}] ${m.content}`);
+    }
+  }
+  const header = opts.teammate ? "Messages from your team — read and act on them:" : "Team inbox — react to these (RESULT = that teammate finished a part):";
+  messages.push({ role: "user", content: `${header}\n\n${lines.join("\n\n")}` });
   if (!opts.quiet) console.log(opts.teammate ? chalk.dim(`  ⎿ [${me}] received ${msgs.length} message(s)`) : mark.inbox(msgs.length));
   return true;
 }
 
-// At a stop-point (the model produced no tool calls), decide whether the TEAM
-// keeps this agent's conversation alive. The lead must not end while teammates
-// are still working — their results are still on the way — so it blocks
-// (interruptibly, yielding the event loop to the teammates) until a message
-// lands or the team goes idle, then injects whatever arrived. A teammate doesn't
-// wait on anyone; it just drains a final inbox before finishing. Returns true if
-// the agent should run another round.
+// At a stop-point (no tool calls), decide whether the TEAM keeps this agent's
+// conversation alive (Day 38/39).
+//   - A teammate now IDLE-LOOPS instead of exiting: it processes its inbox, and
+//     if there's nothing to do it waits (yielding the event loop) for new work —
+//     bounded, so an abandoned teammate self-exits instead of hanging forever. It
+//     leaves only on the shutdown handshake (its request_id is set) or that
+//     backstop. While waiting it marks itself "idle" so the lead can tell the
+//     team is quiescent.
+//   - The lead waits while any teammate is actively working, then drains its
+//     inbox. When the team has gone quiet and nothing is waiting, it returns
+//     false → the lead finishes (and disbands the team, see runLoop).
 async function continueForTeam(messages: OpenAI.ChatCompletionMessageParam[], opts: LoopOptions): Promise<boolean> {
-  if (opts.teammate) return injectInbox(messages, opts); // a teammate: pick up a late message if any, else finish
-  if (opts.subAgent) return false; // a plain sub-agent has no team
-  // The lead: wait for the team to say something rather than spinning or ending.
-  while (inboxCount(LEAD) === 0 && activeTeammateCount() > 0 && !opts.isInterrupted()) {
-    await interruptibleSleep(250, opts.isInterrupted); // yield to the teammates; they message us when they have something
+  if (opts.teammate) {
+    const me = opts.teammate.name;
+    let waited = 0;
+    while (true) {
+      const injected = consumeInbox(messages, opts); // route protocol + plain; may set the shutdown flag
+      if (shutdownRequestId(me)) return false; // shutdown handshake → exit (runTeammate sends the response)
+      if (injected) { setTeammateState(me, "active"); return true; } // real work arrived → run a round
+      setTeammateState(me, "idle"); // nothing to do — wait for the lead/another teammate
+      if (opts.isInterrupted() || waited >= TEAMMATE_MAX_IDLE_MS) return false; // abandoned → self-exit backstop
+      await interruptibleSleep(TEAM_POLL_MS, opts.isInterrupted);
+      waited += TEAM_POLL_MS;
+    }
   }
-  return injectInbox(messages, opts); // inject whatever is waiting; false if the team is truly idle (→ the lead may finish)
+  if (opts.subAgent) return false; // a plain sub-agent has no team
+  // The lead: wait for the team to act rather than spinning or ending early.
+  while (inboxCount(LEAD) === 0 && anyTeammateBusy() && !opts.isInterrupted()) {
+    await interruptibleSleep(TEAM_POLL_MS, opts.isInterrupted); // yield to the teammates; they message us when they have something
+  }
+  return consumeInbox(messages, opts); // process whatever is waiting; false if the team is quiescent (→ the lead may finish)
+}
+
+// The lead finished its work but teammates may still be idling. Disband the team
+// GRACEFULLY (Day 39): open a shutdown contract with each, let them confirm and
+// exit (bounded by a grace window so a wedged teammate can't hang the prompt),
+// then drain the lead's inbox of their confirmations and clear the team.
+async function shutdownTeam(opts: LoopOptions): Promise<void> {
+  const running = runningTeammates();
+  if (!running.length) return;
+  if (!opts.quiet) console.log(chalk.magenta(`  ⎿ disbanding team — shutting down ${running.length} teammate(s)`));
+  for (const name of running) {
+    const id = createRequest("shutdown", LEAD, name, "task complete");
+    markShutdown(name, id);
+    sendProtocol(LEAD, name, "shutdown_request", id, "The task is complete — wrap up and exit.");
+  }
+  // Yield the event loop so the teammates wake, confirm, and exit — but never
+  // block the human forever on a stuck one.
+  const start = Date.now();
+  while (runningTeammates().length && Date.now() - start < SHUTDOWN_GRACE_MS && !opts.isInterrupted()) {
+    await interruptibleSleep(TEAM_POLL_MS, opts.isInterrupted);
+  }
+  readInbox(LEAD); // drop the shutdown confirmations the lead won't read
+  resetTeam(); // clear the registry + protocol state; the next task starts with a fresh team
 }
 
 // The agent main loop, as a state machine: every iteration either continues
@@ -796,11 +1012,14 @@ export async function runLoop(
         // run one more round so the model can react. Each task notifies once, so
         // this adds at most one round per finished task — never an infinite stop.
         if (injectBackgroundNotifications(messages, opts)) break; // exit the inner while → advance the round counter
-        // Agent teams (Day 38): the lead must not end while teammates are still
-        // working — it waits for their messages and reacts. A teammate drains a
-        // last inbox message before finishing. Either way, if there's something
-        // to process, run another round instead of stopping.
+        // Agent teams (Day 38/39): the lead waits for teammate messages and
+        // reacts; a teammate idle-loops for new work and leaves only on the
+        // shutdown handshake (or its idle backstop). If there's something to
+        // process, run another round instead of stopping.
         if (await continueForTeam(messages, opts)) break; // exit the inner while → advance the round counter
+        // The lead is really finishing: disband any teammates still idling so
+        // they exit cleanly (Day 39) instead of being orphaned.
+        if (!opts.subAgent && !opts.teammate) await shutdownTeam(opts);
         return { reason: TerminateReason.Done, finalText: out.content }; // no tool calls = final answer (already streamed to the screen)
       }
 
@@ -831,9 +1050,11 @@ export async function runLoop(
       // on it. Tasks that are still running stay silent until they finish.
       injectBackgroundNotifications(messages, opts);
 
-      // Agent teams (Day 38): drain any messages that arrived during this round
-      // (results, hand-offs, questions) so the agent reacts to them next round.
-      injectInbox(messages, opts);
+      // Agent teams (Day 38/39): drain any messages that arrived during this
+      // round (results, hand-offs, protocol requests/responses) so the agent
+      // reacts to them next round. A shutdown_request seen here just flags the
+      // teammate; it acts on it at the next stop-point (continueForTeam).
+      consumeInbox(messages, opts);
 
       // The nag: if there's an unfinished plan the model has stopped touching for
       // a few rounds, slip in a reminder so the list doesn't go stale and

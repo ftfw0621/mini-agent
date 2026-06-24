@@ -112,6 +112,10 @@ function planSafe(toolName: string, verdict: Verdict): boolean {
     case "task": // the sub-agent's own calls hit this same gate, still in plan mode
     case "spawn_teammate": // a teammate's own calls hit this same gate (plan mode still blocks their writes)
     case "send_message": // coordination only — changes nothing on disk
+    case "request_shutdown": // team protocol (Day 39): coordination, no side effects
+    case "request_plan":
+    case "review_plan":
+    case "submit_plan":
     case "ask_user": // asking the user a question is safe in plan mode — it doesn't change anything
     case "skill": // loading a skill's instructions is read-only; what it does is gated per-call
     case "todo_write": // planning is exactly what plan mode is FOR — never block it
@@ -174,6 +178,13 @@ function basePermission(toolName: string, argsJson: string): Verdict {
       // Dropping a message in another agent's mailbox has no filesystem effect on
       // the user's project — it is pure team coordination.
       return { decision: "allow", reason: "team coordination, no side effects", summary: "send_message" };
+    case "request_shutdown":
+    case "request_plan":
+    case "review_plan":
+    case "submit_plan":
+      // Team protocol messages (Day 39) — request/response coordination over the
+      // mailbox. No filesystem effect; the work they gate still passes the gate.
+      return { decision: "allow", reason: "team protocol, no side effects", summary: toolName };
     case "ask_user":
       // Asking the user a question has no side effects — it's the safest thing
       // the model can do. Never gate it behind an approval prompt.

@@ -56,6 +56,11 @@ expectVerdict("unknown tool asks", "made_up_tool", {}, "ask");
 // task/ask_user. Each teammate's OWN tool calls still hit this gate individually.
 expectVerdict("spawn_teammate allowed", "spawn_teammate", { name: "api", role: "routes", task: "build the API" }, "allow");
 expectVerdict("send_message allowed", "send_message", { to: "lead", content: "done" }, "allow");
+// Protocol tools (Day 39) are request/response coordination — no filesystem effect.
+expectVerdict("request_shutdown allowed", "request_shutdown", { teammate: "api" }, "allow");
+expectVerdict("request_plan allowed", "request_plan", { teammate: "api", task: "refactor" }, "allow");
+expectVerdict("review_plan allowed", "review_plan", { request_id: "req_000001", decision: "approve" }, "allow");
+expectVerdict("submit_plan allowed", "submit_plan", { plan: "do X then Y" }, "allow");
 
 // ---- background tasks (Day 37) ------------------------------------------------------------------
 // Backgrounding changes WHEN output returns, never WHAT runs — so run_bash_background

@@ -475,11 +475,12 @@ async function main() {
           console.log(chalk.dim("(no team — the agent forms one with spawn_teammate for large parallel tasks)"));
           return true;
         }
-        const icon = { running: chalk.yellow("●"), done: chalk.green("✓"), failed: chalk.red("✗") };
+        // Day 39: a running teammate reports as active (working) or idle (waiting).
+        const icon: Record<string, string> = { active: chalk.yellow("●"), idle: chalk.cyan("◐"), done: chalk.green("✓"), failed: chalk.red("✗") };
         console.log(chalk.dim(`agent team this session:`));
         for (const t of team) {
           const inbox = t.pending ? chalk.yellow(` · ${t.pending} unread`) : "";
-          console.log(chalk.dim(`  ${icon[t.status]} ${t.name} [${t.status}, ${t.elapsed}s] — ${t.role.slice(0, 60)}${inbox}`));
+          console.log(chalk.dim(`  ${icon[t.status] ?? "?"} ${t.name} [${t.status}, ${t.elapsed}s] — ${t.role.slice(0, 60)}${inbox}`));
         }
         return true;
       }
