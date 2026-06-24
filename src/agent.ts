@@ -23,6 +23,7 @@ import { banner, framedPrompt, formatModelChoices, statusLine, inputRule } from 
 import { gitBranch, toggleLastCollapsed, revealReasoning, clearReasoning, cleanup as tuiCleanup } from "./tui.js"; // git branch for the status line + collapsible output + collapsed reasoning (Ctrl+R)
 import { promptSelect, promptForm } from "./menu.js"; // arrow-key approval menu + multi-question form
 import { editLine } from "./editor.js"; // our own line editor (keeps the status footer pinned even when input wraps)
+import { normalizeDroppedPaths } from "./drop.js"; // drag-and-drop: a dropped file's path → a clean absolute path in the input
 import { rememberTool, readMemory, readMemoryTyped, extractMemories, MEMORY_PATH } from "./memory.js"; // long-term project memory + auto-extract
 import { loadSkills, buildSkillTool, findSkill, skillInstructions, type Skill } from "./skills.js"; // Markdown-as-plugin skills
 import { initCostMeter, DEFAULT_PRICING } from "./cost.js"; // token & cost accounting for /cost
@@ -264,7 +265,7 @@ async function main() {
       // so the status bar stays pinned below however the line wraps.
       editing = true;
       try {
-        const res = await editLine(rl, { prompt, footer, history, onTab: () => toggleLastCollapsed(), onReveal: () => revealReasoning() });
+        const res = await editLine(rl, { prompt, footer, history, onTab: () => toggleLastCollapsed(), onReveal: () => revealReasoning(), transformPaste: normalizeDroppedPaths });
         if (res.type === "line") {
           if (res.value.trim()) history.push(res.value); // remember non-empty entries for ↑/↓
           return res.value;

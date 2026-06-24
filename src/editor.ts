@@ -224,6 +224,7 @@ export interface EditOptions {
   initial?: string; // pre-filled text
   onTab?: () => void; // Tab handler (e.g. toggle a collapsed block), then we repaint
   onReveal?: () => void; // Ctrl+R handler (reveal the model's collapsed thinking), then we repaint
+  transformPaste?: (raw: string) => string; // rewrite a multi-char paste before insertion (e.g. drag-and-drop → absolute paths)
   input?: NodeJS.ReadStream; // injectable for tests
 }
 
@@ -297,6 +298,12 @@ export function editLine(rl: Pausable, opts: EditOptions): Promise<EditResult> {
 
     const onKey = (str: string | undefined, key: KeyEvent | undefined) => {
       if (done) return;
+      // A drag-and-drop (or any paste) arrives as one multi-char string. Give the
+      // caller a chance to rewrite it — e.g. turn dropped file paths into clean
+      // absolute paths — before it lands in the buffer. No-op for normal text.
+      if (str && str.length > 1 && !key?.ctrl && !key?.meta && opts.transformPaste) {
+        str = opts.transformPaste(str);
+      }
       const next = reduceEditor(state, str, key || {});
       state = next.state;
       switch (next.action) {
