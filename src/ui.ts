@@ -1,4 +1,5 @@
 import chalk from "chalk"; // the one place color lives
+import { displayWidth } from "./editor.js"; // CJK-/ANSI-aware width, to pad the sent-message bar to the full row
 
 // The app's visual theme, in one place. Before this, emoji and colors were
 // sprinkled across agent.ts and loop.ts — no coherent look, and impossible to
@@ -134,11 +135,18 @@ export function framedPrompt(planMode: boolean): string {
   return planMode ? chalk.yellow.bold("⏸ plan ❯ ") : chalk.cyan.bold("❯ ");
 }
 
-// How a SUBMITTED message is echoed into the scrollback once you hit Enter: a
-// distinct, muted "> …" line (not the bright ❯ prompt) so each turn reads like a
-// sent chat message scrolling up, leaving the input box empty below.
+// How a SUBMITTED message is echoed into the scrollback once you hit Enter:
+// a "> …" line on a full-width highlight BAR (like Claude Code), so each turn
+// reads as a distinct sent message scrolling up — not just faint text. The line
+// is padded to the terminal width so the background spans the whole row; if the
+// message is longer than the row it just wraps (the tail line won't be padded,
+// a minor cosmetic). Colors fall back gracefully when the terminal lacks 256.
 export function sentMessage(text: string): string {
-  return chalk.dim("> " + text);
+  const cols = Math.max(20, process.stdout.columns || 80);
+  const content = "> " + text;
+  const w = displayWidth(content);
+  const padded = w < cols ? content + " ".repeat(cols - w) : content; // fill the row when it fits
+  return chalk.bgAnsi256(237).ansi256(252)(padded); // light-grey text on a subtle dark-grey bar
 }
 
 
