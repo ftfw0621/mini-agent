@@ -87,9 +87,10 @@ export async function compactHistory(
   client: OpenAI, // the same client the loop uses
   model: string, // the same model summarizes its own conversation
   signal: AbortSignal, // Ctrl+C must abort compaction too
+  log: (line: string) => void = (s) => console.log(s), // where the two progress lines go — stdout by default; the Ink REPL routes them through its sink so they don't corrupt the live region
 ): Promise<void> {
   const before = estimateHistoryTokens(messages); // for the log line
-  console.log(chalk.magenta(`📦 compacting context (~${before} tokens)...`)); // automatic behavior must be visible
+  log(chalk.magenta(`📦 compacting context (~${before} tokens)...`)); // automatic behavior must be visible
   const res = await client.chat.completions.create(
     {
       model, // same model — no need for a fancier one to summarize
@@ -111,5 +112,5 @@ export async function compactHistory(
   messages.push({ role: "user", content: `[Context was compacted. Summary of the conversation so far:]\n\n${summary}` }); // the summary becomes the new history
   const recoveredNote = recoverFileState(); // restore working-file contents from disk
   if (recoveredNote) messages.push({ role: "user", content: recoveredNote }); // attach as a second message
-  console.log(chalk.magenta(`📦 compacted: ~${before} → ~${estimateHistoryTokens(messages)} tokens`)); // report the result
+  log(chalk.magenta(`📦 compacted: ~${before} → ~${estimateHistoryTokens(messages)} tokens`)); // report the result
 }

@@ -1,6 +1,7 @@
 import type OpenAI from "openai"; // types + the client passed in
 import { runLoop, type LoopResult } from "../loop.js"; // the REAL agent loop — tools, permissions, retries, the lot
 import { CONFIG } from "../config.js"; // model + sub-agent tier
+import type { Judge } from "../judge.js"; // optional LLM permission classifier
 import type { LoopOutput } from "../output.js"; // the Ink sink implements this
 
 // What the App hands the loop for one turn: where output goes (the Ink sink) and
@@ -12,6 +13,7 @@ export interface TurnHooks {
   askUser?: (questions: { question: string; options: string[] }[]) => Promise<{ question: string; answer: string }[] | null>; // the ask_user form
   signal: AbortSignal; // aborts the in-flight request (Esc / Ctrl+C)
   isInterrupted: () => boolean; // polled between steps for a clean stop
+  judge?: Judge; // the session's optional LLM permission classifier
 }
 
 // Drive one real turn through the loop. The loop mutates `messages` in place
@@ -28,6 +30,7 @@ export function makeRunTurn(client: OpenAI, messages: OpenAI.ChatCompletionMessa
       isInterrupted: hooks.isInterrupted,
       confirm: hooks.confirm,
       askUser: hooks.askUser,
+      judge: hooks.judge,
       subAgentModel: CONFIG.subAgentModel,
       output: hooks.output,
     });

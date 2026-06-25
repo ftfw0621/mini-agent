@@ -904,7 +904,7 @@ async function tryCompact(
 ): Promise<boolean> {
   try {
     if (!opts.subAgent) await runHooks("PreCompact", {}); // lifecycle hook (top-level only; hooks are the human's project policy)
-    await compactHistory(messages, opts.client, opts.model, opts.signal); // do the actual work
+    await compactHistory(messages, opts.client, opts.model, opts.signal, (s) => sink(opts).note(s)); // do the actual work — narration through the sink (so it doesn't corrupt an Ink live region)
     compaction.count++; // one more successful compaction this query
     compaction.failures = 0; // success resets the failure streak
     emit("agent_compaction_ok"); // worth counting — frequent compaction means tasks are too big
