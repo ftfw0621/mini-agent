@@ -1,6 +1,5 @@
 import OpenAI from "openai"; // types + client for the chat completions API
 import chalk from "chalk"; // terminal colors for status lines
-import ora from "ora"; // the "thinking..." spinner while waiting for the first token
 import { toolDefinitions, dispatch, snapshotFileState, restoreFileState, isReadOnlyTool } from "./tools.js"; // the tool manuals + the executor + file-state isolation
 import { classifyError, ApiErrorKind } from "./errors.js"; // failure taxonomy
 import { checkPermission } from "./permissions.js"; // the allow/ask/deny gate
@@ -15,7 +14,7 @@ import type { Judge } from "./judge.js"; // optional LLM permission classifier
 import { recordUsage } from "./cost.js"; // meter token usage from the stream
 import { mark, thinkingWord, spinnerText } from "./ui.js"; // centralized terminal styling (markers, spinner)
 import { recordToolCall, recordReasoning } from "./tui.js"; // folded tool-call trace (Ctrl+T) + the model's hidden thinking (Ctrl+R)
-import { MarkdownStream } from "./markdown.js"; // render the streamed answer as terminal markdown
+import { type LoopOutput, type AnswerSink, STDOUT_OUTPUT } from "./output.js"; // where the loop's screen output goes (stdout by default, Ink REPL passes its own)
 import { todoNag, getTodos, renderTodos } from "./todos.js"; // the agent's plan: show it on screen + nag when it goes stale
 import { pendingNotifications } from "./background.js"; // background tasks (Day 37): surface finished jobs as a turn
 
@@ -61,6 +60,13 @@ export interface LoopOptions {
   subAgentModel?: string; // model to run delegated sub-agents on; falls back to `model`
   judge?: Judge; // optional LLM classifier that auto-allows clearly-safe "ask" commands
   askUser?: (questions: { question: string; options: string[] }[]) => Promise<{ question: string; answer: string }[] | null>; // present a multi-question form (Day 30); null if cancelled/non-interactive
+  output?: LoopOutput; // where screen output goes — stdout by default (readline REPL); the Ink REPL passes its own sink
+}
+
+// Resolve the output sink for a loop: the caller's sink, or stdout (the old
+// behaviour) when none was passed. Centralised so every site reads the same way.
+function sink(opts: LoopOptions): LoopOutput {
+  return opts.output ?? STDOUT_OUTPUT;
 }
 
 // Which model should a delegated sub-agent run on? The configured sub-agent
@@ -315,7 +321,7 @@ async function runSubAgent(description: string, opts: LoopOptions): Promise<stri
   const subModel = subAgentModelFor(opts); // the tier this delegated work runs on
   // Show the delegation, and the model when it differs from the orchestrator's —
   // the tiering should be visible, not a silent surprise on the bill.
-  if (!opts.quiet) console.log(mark.subAgentStart(description.slice(0, 100), subModel !== opts.model ? subModel : "")); // annotate the tier only on a real switch
+  if (!opts.quiet) sink(opts).note(mark.subAgentStart(description.slice(0, 100), subModel !== opts.model ? subModel : "")); // annotate the tier only on a real switch
   await runHooks("SubagentStart", { description: description.slice(0, 200), model: subModel }); // lifecycle hook (observational)
   const snapshot = snapshotFileState(); // what the sub-agent reads, the parent has NOT seen
   try {
@@ -333,7 +339,7 @@ async function runSubAgent(description: string, opts: LoopOptions): Promise<stri
   } finally {
     restoreFileState(snapshot); // the parent's read-before-edit state, exactly as it was
     await runHooks("SubagentStop", { description: description.slice(0, 200) }); // lifecycle hook (observational)
-    if (!opts.quiet) console.log(mark.subAgentDone); // close the bracket
+    if (!opts.quiet) sink(opts).note(mark.subAgentDone); // close the bracket
   }
 }
 
@@ -380,7 +386,7 @@ async function streamModelCall(
   let reasoningShown = false; // have we printed the "thought for Ns" indicator yet?
   const spinner = opts.quiet
     ? null // the eval harness wants silence
-    : ora({ text: spinnerText(word, 0, !!opts.subAgent, opts.model), discardStdin: false }).start(); // discardStdin:false — ora would otherwise eat Ctrl+C
+    : sink(opts).spinner(spinnerText(word, 0, !!opts.subAgent, opts.model)); // a fresh spinner from the sink (stdout → ora; Ink → React state)
   let lastEvent = Date.now(); // when did we last hear ANYTHING from the stream?
   let stallWarned = false; // only warn once per quiet stretch
 
@@ -391,7 +397,7 @@ async function streamModelCall(
   const watchdog = setInterval(() => {
     // While the model is reasoning, prefix the spinner with 💭 so "it's thinking"
     // reads differently from "it's waiting on the first token".
-    if (spinner?.isSpinning) spinner.text = (reasoningActive ? chalk.dim("💭 ") : "") + spinnerText(word, Math.floor((Date.now() - startedAt) / 1000), !!opts.subAgent, opts.model, Math.round(streamedChars / 4));
+    if (spinner?.spinning) spinner.set((reasoningActive ? chalk.dim("💭 ") : "") + spinnerText(word, Math.floor((Date.now() - startedAt) / 1000), !!opts.subAgent, opts.model, Math.round(streamedChars / 4)));
     const quietMs = Date.now() - lastEvent; // ms since the last event
     if (quietMs > IDLE_TIMEOUT_MS) {
       emit("agent_watchdog_idle"); // record the cut — these should be rare
@@ -399,7 +405,7 @@ async function streamModelCall(
     } else if (quietMs > STALL_WARN_MS && !stallWarned) {
       stallWarned = true; // don't repeat the warning every second
       emit("agent_watchdog_stall"); // record the slowness — pattern-spotting data
-      console.log(chalk.dim(`  [watchdog] stream quiet for ${Math.round(quietMs / 1000)}s — still waiting (slow ≠ dead)`));
+      sink(opts).note(chalk.dim(`  [watchdog] stream quiet for ${Math.round(quietMs / 1000)}s — still waiting (slow ≠ dead)`));
     }
   }, 1000);
 
@@ -417,8 +423,7 @@ async function streamModelCall(
       { signal }, // abortable by user AND watchdog
     );
     let content = ""; // accumulated answer text
-    let printedPrefix = false; // have we printed the answer prefix yet?
-    let md: MarkdownStream | null = null; // renders the streamed answer as markdown, block by block
+    let ans: AnswerSink | null = null; // renders the streamed answer (stdout: markdown block by block; Ink: React state) — non-null once the answer starts
     const calls: AssembledCall[] = []; // tool calls under assembly, indexed by delta.index
 
     // The model has finished thinking and is about to say/do something. Close out
@@ -429,13 +434,13 @@ async function streamModelCall(
       if (!reasoningBuf || reasoningShown) return;
       reasoningShown = true;
       reasoningActive = false;
-      if (spinner?.isSpinning) spinner.stop();
+      if (spinner?.spinning) spinner.stop();
       if (opts.quiet || opts.subAgent) return; // no UI for silent / nested runs
       recordReasoning(reasoningBuf); // keep it for Ctrl+R (never goes into history)
       const secs = Math.round((Date.now() - startedAt) / 1000);
       const toks = Math.round(reasoningBuf.length / 4); // same ~chars/4 estimate as the spinner
       const tokStr = toks >= 1000 ? `${(toks / 1000).toFixed(1)}k` : `${toks}`;
-      process.stdout.write(chalk.dim(`💭 thought for ${secs}s (~${tokStr} tokens) · Ctrl+R to view`) + "\n");
+      sink(opts).reasoning(chalk.dim(`💭 thought for ${secs}s (~${tokStr} tokens) · Ctrl+R to view`));
     };
 
     for await (const chunk of stream) {
@@ -460,25 +465,21 @@ async function streamModelCall(
       if (delta.content) {
         flushReasoning(); // thinking is over — show the one-line indicator first
         streamedChars += delta.content.length; // count the answer toward the live token estimate
-        if (spinner?.isSpinning) spinner.stop(); // first token: replace the spinner with real output
+        if (spinner?.spinning) spinner.stop(); // first token: replace the spinner with real output
         if (!opts.quiet && !opts.subAgent) {
           // Only the top-level agent streams to the screen — a sub-agent's
-          // inner monologue would be mistaken for the answer.
-          if (!printedPrefix) {
-            // Stream the answer through the markdown renderer: it buffers a block
-            // (paragraph / heading / list / table) and prints it formatted the
-            // moment that block completes — still live, but no raw `##`/`|---|`.
-            // The ⏺ marker leads the first line; wrapped lines align under it.
-            md = new MarkdownStream((s) => process.stdout.write(s), { firstPrefix: "\n" + mark.answer, indent: "  " });
-            printedPrefix = true;
-          }
-          md!.push(delta.content); // hand the token to the renderer (it decides when to paint)
+          // inner monologue would be mistaken for the answer. The sink decides
+          // how to paint: the stdout sink buffers a markdown block (paragraph /
+          // heading / list / table) and flushes it whole — live, but no raw
+          // `##`/`|---|`; the Ink sink accumulates into React state.
+          if (!ans) ans = sink(opts).answer(); // first token: start the answer renderer
+          ans.push(delta.content); // hand the token to the renderer (it decides when to paint)
         }
         content += delta.content; // always keep it for the history (the answer only, never the reasoning)
       }
       if (delta.tool_calls?.length) flushReasoning(); // thinking is over — indicator before the tool logs (which print after we return)
       for (const tc of delta.tool_calls ?? []) {
-        if (spinner?.isSpinning) spinner.stop(); // tool call starting — spinner served its purpose
+        if (spinner?.spinning) spinner.stop(); // tool call starting — spinner served its purpose
         const slot = (calls[tc.index] ??= { id: "", name: "", args: "" }); // create the slot on first fragment
         if (tc.id) slot.id = tc.id; // id arrives once
         if (tc.function?.name) slot.name += tc.function.name; // name usually arrives whole; += is safe either way
@@ -486,12 +487,11 @@ async function streamModelCall(
       }
     }
     flushReasoning(); // a reasoning-only turn (no content, no tools) still records + indicates
-    if (md) md.end(); // flush the final (un-terminated) block through the renderer
-    if (printedPrefix) process.stdout.write("\n"); // end the streamed line cleanly
+    if (ans) ans.end(); // flush the final (un-terminated) block + end the line cleanly (the sink owns the trailing newline)
     return { content, toolCalls: calls.filter(Boolean) }; // sparse array → dense
   } finally {
     clearInterval(watchdog); // always stop the timer
-    if (spinner?.isSpinning) spinner.stop(); // and never leave a zombie spinner
+    if (spinner?.spinning) spinner.stop(); // and never leave a zombie spinner
   }
 }
 
@@ -526,12 +526,12 @@ async function runOneCall(call: AssembledCall, opts: LoopOptions): Promise<{ id:
   // are. Skipped for a hard deny (nothing will run) and in quiet sub-agent runs.
   if (!opts.quiet && v.decision !== "deny" && (call.name === "write_file" || call.name === "edit_file")) {
     const preview = previewChange(call.name, call.args);
-    if (preview) console.log(preview.replace(/^/gm, indent)); // nest under the sub-agent marker if any
+    if (preview) sink(opts).note(preview.replace(/^/gm, indent)); // nest under the sub-agent marker if any
   }
   let content: string; // what goes back to the model as the tool result
   if (v.decision === "deny") {
     emit("agent_tool_denied", { tool: call.name }); // hard blocks, per tool
-    if (!opts.quiet) console.log(mark.denied(v.reason)); // tell the user we blocked it
+    if (!opts.quiet) sink(opts).note(mark.denied(v.reason)); // tell the user we blocked it
     content = `[permission] Denied: ${v.reason}. This is a hard rule — do not try to work around it; pick a different approach or ask the user.`; // teach the model the boundary
   } else if (v.decision === "ask") {
     // Optional LLM judge: for a run_bash command the rules couldn't classify,
@@ -543,12 +543,12 @@ async function runOneCall(call: AssembledCall, opts: LoopOptions): Promise<{ id:
       try { cmd = (JSON.parse(call.args) as { command?: string }).command ?? ""; } catch { /* leave empty → judge will ask */ }
       if (cmd && (await opts.judge.classify(cmd)) === "allow") {
         autoAllowed = true;
-        if (!opts.quiet) console.log(mark.judge); // visible — the user can see the judge worked
+        if (!opts.quiet) sink(opts).note(mark.judge); // visible — the user can see the judge worked
       }
     }
     const ok = autoAllowed || (await opts.confirm(`${call.name} (${v.reason}):\n   ${v.summary}`, call.name)); // judge-allowed, or pause and ask the human
     if (!ok) emit("agent_tool_declined", { tool: call.name }); // the human said no — that is signal
-    if (!ok && !opts.quiet) console.log(mark.declined); // make the refusal visible
+    if (!ok && !opts.quiet) sink(opts).note(mark.declined); // make the refusal visible
     content = ok
       ? await runWithHooks(call, opts) // approved — run it (PreToolUse can still block)
       : `[permission] The user declined this action. Ask them how to proceed, or choose a safer alternative.`; // declined — tell the model
@@ -558,7 +558,7 @@ async function runOneCall(call: AssembledCall, opts: LoopOptions): Promise<{ id:
   // todo_write's whole point is the VISIBLE plan: the model got a one-line tally,
   // the human gets the rendered checklist (quiet runs — eval/sub-agents — stay silent).
   if (call.name === "todo_write" && !opts.quiet && !content.startsWith("[error]")) {
-    console.log(renderTodos(getTodos()));
+    sink(opts).note(renderTodos(getTodos()));
   }
   return { id: call.id, content }; // paired by id for the API
 }
@@ -576,7 +576,7 @@ async function runWithHooks(call: AssembledCall, opts: LoopOptions): Promise<str
   const pre = await runHooks("PreToolUse", { tool: call.name, args: call.args }); // before
   if (pre.block) {
     emit("agent_hook_block", { event: "PreToolUse", tool: call.name }); // a hook said no
-    if (!opts.quiet) console.log(mark.hookBlock("PreToolUse")); // make it visible
+    if (!opts.quiet) sink(opts).note(mark.hookBlock("PreToolUse")); // make it visible
     return `[hook] A PreToolUse hook blocked this call: ${pre.feedback}. Treat this as a hard boundary — adjust your approach.`;
   }
   // A PreToolUse hook may REWRITE the arguments (e.g. add a commit trailer). The
@@ -585,7 +585,7 @@ async function runWithHooks(call: AssembledCall, opts: LoopOptions): Promise<str
   if (pre.rewrite) {
     try {
       JSON.parse(pre.rewrite); // must be valid JSON args
-      if (!opts.quiet) console.log(chalk.dim(`  ⎿ PreToolUse hook rewrote the arguments`));
+      if (!opts.quiet) sink(opts).note(chalk.dim(`  ⎿ PreToolUse hook rewrote the arguments`));
       call = { ...call, args: pre.rewrite };
     } catch {
       /* malformed rewrite — ignore, run the original args */
@@ -743,7 +743,7 @@ async function runCreateTask(call: AssembledCall, opts: LoopOptions): Promise<st
   } catch { /* fall through */ }
   if (!subject) return "[error] create_task needs a 'subject'.";
   const task = createTask(subject, description, blockedBy);
-  if (!opts.quiet) console.log(chalk.magenta(`  ⎿ ${boardActor(opts)} created ${task.id}: ${subject.slice(0, 50)}`));
+  if (!opts.quiet) sink(opts).note(chalk.magenta(`  ⎿ ${boardActor(opts)} created ${task.id}: ${subject.slice(0, 50)}`));
   return `Created ${task.id}: "${subject}"${blockedBy.length ? ` (blockedBy: ${blockedBy.join(", ")})` : ""}. It's on the board for a teammate to claim.`;
 }
 
@@ -769,7 +769,7 @@ async function runCompleteTask(call: AssembledCall, opts: LoopOptions): Promise<
   if (!taskId) return "[error] complete_task needs a 'task_id'.";
   const res = completeTask(taskId, boardActor(opts));
   if (!res.ok) return `[error] ${res.error}`;
-  if (!opts.quiet) console.log(chalk.magenta(`  ⎿ ${boardActor(opts)} completed ${taskId}`));
+  if (!opts.quiet) sink(opts).note(chalk.magenta(`  ⎿ ${boardActor(opts)} completed ${taskId}`));
   const unblocked = res.unblocked?.length ? ` Unblocked: ${res.unblocked.join(", ")}.` : "";
   return `Completed ${taskId}.${unblocked} Claim the next ready task, or idle until the lead shuts you down.`;
 }
@@ -800,7 +800,7 @@ async function runSpawnTeammate(call: AssembledCall, opts: LoopOptions): Promise
   // shutdown know when it has ended.
   const done = runTeammate(name, role, task, opts);
   registerTeammate(name, role, done);
-  if (!opts.quiet) console.log(mark.teammateStart(name, role));
+  if (!opts.quiet) sink(opts).note(mark.teammateStart(name, role));
   return `Teammate "${name}" (${role}) spawned and is now working in parallel. It will message you (as "lead") with progress and its final result. Reply with send_message; keep coordinating the rest of the team. Do not wait idly — continue your own work.`;
 }
 
@@ -831,7 +831,7 @@ async function runTeammate(name: string, role: string, task: string, opts: LoopO
       subAgent: true,
       teammate: { name },
       maxRounds: TEAMMATE_MAX_ROUNDS,
-      confirm: teammateConfirm(name),
+      confirm: teammateConfirm(name, sink(opts)),
       askUser: undefined, // teammates have no line to the human
     });
     // How it ended decides what the lead hears. A shutdown handshake gets a
@@ -842,7 +842,7 @@ async function runTeammate(name: string, role: string, task: string, opts: LoopO
     if (sd) sendProtocol(name, LEAD, "shutdown_response", sd, summary || "shut down", "approved");
     else sendMessage(name, LEAD, summary, "result");
     finishTeammate(name, result.reason === TerminateReason.Done);
-    if (!opts.quiet) console.log(mark.teammateDone(name, result.reason === TerminateReason.Done));
+    if (!opts.quiet) sink(opts).note(mark.teammateDone(name, result.reason === TerminateReason.Done));
   } catch (err) {
     // A teammate must never take the whole process down. Report the failure to
     // the lead and mark it failed.
@@ -866,10 +866,10 @@ const SHUTDOWN_GRACE_MS = 30_000; // how long the lead waits for teammates to ex
 // DENY rules (the no-fly zone) are enforced by the gate before confirm is ever
 // called, so they always hold. Production Claude Code instead "bubbles" the
 // request up to the lead and on to the human — omitted here, like the reference.
-function teammateConfirm(name: string): (question: string, toolName?: string) => Promise<boolean> {
+function teammateConfirm(name: string, output: LoopOutput): (question: string, toolName?: string) => Promise<boolean> {
   return async (_question, toolName) => {
     const ok = toolName === "write_file" || toolName === "edit_file";
-    if (!ok) console.log(chalk.yellow(`  ⎿ [${name}] declined ${toolName ?? "an action"} (teammates can't prompt you; do it yourself or allowlist it)`));
+    if (!ok) output.note(chalk.yellow(`  ⎿ [${name}] declined ${toolName ?? "an action"} (teammates can't prompt you; do it yourself or allowlist it)`));
     return ok;
   };
 }
@@ -931,7 +931,7 @@ function injectBackgroundNotifications(messages: OpenAI.ChatCompletionMessagePar
   if (!note) return false;
   const count = (note.match(/<task_notification>/g) ?? []).length; // for the one-line on-screen mark
   messages.push({ role: "user", content: note }); // the model reacts to it on the next round
-  if (!opts.quiet) console.log(mark.bgNote(count));
+  if (!opts.quiet) sink(opts).note(mark.bgNote(count));
   return true;
 }
 
@@ -976,7 +976,7 @@ function consumeInbox(messages: OpenAI.ChatCompletionMessageParam[], opts: LoopO
   }
   const header = opts.teammate ? "Messages from your team — read and act on them:" : "Team inbox — react to these (RESULT = that teammate finished a part):";
   messages.push({ role: "user", content: `${header}\n\n${lines.join("\n\n")}` });
-  if (!opts.quiet) console.log(opts.teammate ? chalk.dim(`  ⎿ [${me}] received ${msgs.length} message(s)`) : mark.inbox(msgs.length));
+  if (!opts.quiet) sink(opts).note(opts.teammate ? chalk.dim(`  ⎿ [${me}] received ${msgs.length} message(s)`) : mark.inbox(msgs.length));
   return true;
 }
 
@@ -1008,7 +1008,7 @@ async function continueForTeam(messages: OpenAI.ChatCompletionMessageParam[], op
         // line also re-anchors the persona if the history was compacted (the
         // reference's identity-reinjection, folded into the work hand-off).
         messages.push({ role: "user", content: `You are ${me}. You claimed task ${claimed.id} from the board: "${claimed.subject}".\n${claimed.description}\nWhen it is done and verified, call complete_task("${claimed.id}") — then you'll be offered the next ready task.` });
-        if (!opts.quiet) console.log(chalk.magenta(`  ⎿ [${me}] claimed ${claimed.id}: ${claimed.subject.slice(0, 50)}`));
+        if (!opts.quiet) sink(opts).note(chalk.magenta(`  ⎿ [${me}] claimed ${claimed.id}: ${claimed.subject.slice(0, 50)}`));
         setTeammateState(me, "active");
         return true;
       }
@@ -1033,7 +1033,7 @@ async function continueForTeam(messages: OpenAI.ChatCompletionMessageParam[], op
 async function shutdownTeam(opts: LoopOptions): Promise<void> {
   const running = runningTeammates();
   if (!running.length) return;
-  if (!opts.quiet) console.log(chalk.magenta(`  ⎿ disbanding team — shutting down ${running.length} teammate(s)`));
+  if (!opts.quiet) sink(opts).note(chalk.magenta(`  ⎿ disbanding team — shutting down ${running.length} teammate(s)`));
   for (const name of running) {
     const id = createRequest("shutdown", LEAD, name, "task complete");
     markShutdown(name, id);
@@ -1120,7 +1120,7 @@ export async function runLoop(
           return { reason: TerminateReason.RetryBudgetExhausted, detail: `${e.kind}: ${e.message}` };
 
         const wait = backoffMs(attempts.consecutive); // how long to back off this time
-        console.log(chalk.dim(`  [retry] ${e.kind} — attempt ${attempts.total}/${MAX_RETRIES}, waiting ${wait}ms`)); // retries must be visible, or the app just looks frozen
+        sink(opts).note(chalk.dim(`  [retry] ${e.kind} — attempt ${attempts.total}/${MAX_RETRIES}, waiting ${wait}ms`)); // retries must be visible, or the app just looks frozen
         await interruptibleSleep(wait, opts.isInterrupted); // wait, but stay responsive to Ctrl+C
         continue; // retry the same round
       }
@@ -1156,7 +1156,7 @@ export async function runLoop(
           const stop = await runHooks("Stop", { finalText: out.content }); // give hooks the last word
           if (stop.block) {
             emit("agent_hook_block", { event: "Stop" }); // the agent was sent back to work
-            if (!opts.quiet) console.log(chalk.yellow(`\n↩ Stop hook: not done yet — ${stop.feedback.slice(0, 120)}`)); // show why
+            if (!opts.quiet) sink(opts).note(chalk.yellow(`\n↩ Stop hook: not done yet — ${stop.feedback.slice(0, 120)}`)); // show why
             messages.push({ role: "user", content: `[Stop hook] You are not finished: ${stop.feedback}` }); // inject the instruction
             break; // exit the inner while → advance the round counter
           }
@@ -1201,7 +1201,7 @@ export async function runLoop(
       // Fold this round's tool calls into ONE tally line instead of one line per
       // call (the per-call announcements were recorded for Ctrl+T in runOneCall).
       if (!opts.quiet && out.toolCalls.length) {
-        console.log(agentIndent(opts) + mark.toolTally(out.toolCalls.map((c) => c.name)) + chalk.dim(" · Ctrl+T"));
+        sink(opts).note(agentIndent(opts) + mark.toolTally(out.toolCalls.map((c) => c.name)) + chalk.dim(" · Ctrl+T"));
       }
 
       // Background tasks (Day 37): if a job the model started has finished, slip
@@ -1223,7 +1223,7 @@ export async function runLoop(
         const nag = todoNag();
         if (nag) {
           messages.push({ role: "user", content: nag });
-          if (!opts.quiet) console.log(chalk.dim("  ⎿ plan reminder injected"));
+          if (!opts.quiet) sink(opts).note(chalk.dim("  ⎿ plan reminder injected"));
         }
       }
       break; // round complete, move to the next one
