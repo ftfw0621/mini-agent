@@ -28,4 +28,4 @@ const getStatus = () => ({
   elapsedMs: Date.now() - startedAt,
 });
 
-render(<App model={CONFIG.model} dir={dir} branch={branch} getStatus={getStatus} runTurn={makeRunTurn(client, CONFIG.model, messages)} />);
+render(<App model={CONFIG.model} dir={dir} branch={branch} getStatus={getStatus} runTurn={makeRunTurn(client, messages)} />);
