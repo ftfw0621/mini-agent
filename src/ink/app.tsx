@@ -47,6 +47,25 @@ const PLAN_MODE_NOTICE = `[plan mode ON] Investigate this request using only rea
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]; // the braille spinner ora uses, hand-rolled for Ink
 
+// Cap the live streaming preview to a terminal-aware tail. THIS IS LOAD-BEARING:
+// Ink redraws the whole dynamic region (everything below <Static>) on every
+// token, and when that region grows TALLER than the terminal, Ink can no longer
+// erase its previous frame — committed lines get reprinted (duplicate messages)
+// and the cursor math drifts (sudden blank gaps). So we never let the in-flight
+// answer render more than the rows we can spare; the FULL reply still commits to
+// <Static> (formatted as markdown) the moment it finishes.
+function liveTail(s: string): string {
+  const rows = process.stdout.rows || 24;
+  const maxLines = Math.max(3, rows - 14); // reserve rows for the input box + status bar + agent bar + margins
+  const cols = process.stdout.columns || 80;
+  const maxChars = maxLines * cols; // rough bound so one very long line can't blow past either
+  let t = s.length > maxChars ? s.slice(-maxChars) : s;
+  const lines = t.split("\n");
+  const clipped = s.length > maxChars || lines.length > maxLines;
+  if (lines.length > maxLines) t = lines.slice(-maxLines).join("\n");
+  return clipped ? "… " + t : t; // a leading ellipsis signals there's more above (it's all in the scrollback on commit)
+}
+
 function Spinner() {
   const [f, setF] = useState(0);
   useEffect(() => {
@@ -524,7 +543,7 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
         <Box marginTop={1} flexDirection="row">
           <Text color="green">⏺ </Text>
           <Box flexGrow={1}>
-            <Text>{live === "" ? chalk.dim("…") : live}</Text>
+            <Text>{live === "" ? chalk.dim("…") : liveTail(live)}</Text>
           </Box>
         </Box>
       )}
