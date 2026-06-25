@@ -27,6 +27,7 @@ import { normalizeDroppedPaths } from "./drop.js"; // drag-and-drop: a dropped f
 import { rememberTool, readMemory, readMemoryTyped, extractMemories, MEMORY_PATH } from "./memory.js"; // long-term project memory + auto-extract
 import { loadSkills, buildSkillTool, findSkill, skillInstructions, type Skill } from "./skills.js"; // Markdown-as-plugin skills
 import { initCostMeter, DEFAULT_PRICING } from "./cost.js"; // token & cost accounting for /cost
+import { launchInk } from "./ink/launch.js"; // the Ink REPL — the default front-end for interactive sessions
 import { listBackground, hasRunningBackground, killAllBackground } from "./background.js"; // background tasks: /bg view + kill-on-exit (Day 37)
 import { listTeam, resetTeam } from "./team.js"; // agent teams: /team view + reset on clear/resume (Day 38)
 import { boardSummary, resetBoard } from "./board.js"; // task board: /tasks view + reset on clear/resume (Day 40)
@@ -111,6 +112,18 @@ async function main() {
   if (pIdx >= 0 && !printTask) {
     console.error('Usage: mini-agent -p "<task>"'); // -p without a task is a usage error
     process.exitCode = 2;
+    return;
+  }
+
+  // Interactive sessions default to the Ink REPL (a pinned input box, the
+  // conversation scrolling above it — like Claude Code). It does its OWN full
+  // setup (MCP, skills, judge, cost, hooks, session), so we hand off here before
+  // the readline path below ever runs. Print mode (-p) is a non-interactive
+  // one-shot that streams to stdout, so it stays on the readline path. Set
+  // MINI_AGENT_NO_INK=1 to use the readline REPL below instead (a simpler
+  // reference front-end, and an escape hatch for terminals Ink misbehaves in).
+  if (printTask === null && process.env.MINI_AGENT_NO_INK !== "1") {
+    await launchInk({ resume: argv.includes("-r") || argv.includes("--resume") });
     return;
   }
 
