@@ -529,11 +529,17 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
         </Box>
       )}
 
-      {/* the "thinking" / "running tool" spinner */}
-      {status !== null && (
+      {/* The "thinking" spinner: the loop's own status text when it has one, or a
+          generic "working…" whenever a turn is in flight but nothing else is
+          animating — i.e. a tool is running between model calls (the loop stops
+          its spinner the instant a tool call starts). Without this fallback the
+          UI looks frozen during exactly the busiest part of a turn (a long
+          run_bash, a sub-agent), which reads as "it died". Streaming answers are
+          their own indicator, so we suppress it while `live` is showing. */}
+      {(status !== null || (busy && live === null)) && (
         <Box marginTop={live === null ? 1 : 0}>
           <Spinner />
-          <Text> {status}</Text>
+          <Text> {status ?? chalk.dim("working…")}</Text>
         </Box>
       )}
 
