@@ -26,14 +26,28 @@ function box(lines: { text: string; style?: (s: string) => string }[]): string {
   return [top, ...body, bottom].join("\n");
 }
 
+// The llama — our mascot. Drawn in ASCII so it renders in any terminal.
+// Each line is styled with a warm alpaca-wool tone (ansi256 #215, a sandy gold).
+const LLAMA = [
+  "                    ╱▔▔╲   ╱▔▔╲",
+  "                   ╱    ╲_╱    ╲",
+  "                  ╭──────────────╮",
+  "                  │   ◉      ◉   │",
+  "                  │      ⏝      │",
+  "                  ╰──────┬──────╯",
+  "                         │",
+].join("\n");
+
 // The welcome banner, shown once at startup.
 export function banner(version: string, model: string, host: string): string {
-  return box([
+  const art = chalk.ansi256(215)(LLAMA);
+  const info = box([
     { text: `mini-agent  v${version}`, style: chalk.bold.cyan },
     { text: `${model}  ·  ${host}`, style: chalk.dim },
     { text: "" },
     { text: "/help  commands     @file  attach     Esc  interrupt     Ctrl+C  quit", style: chalk.dim },
   ]);
+  return art + "\n" + info;
 }
 
 // The input prompt. A styled chevron, not a bare ">". Plan mode (Day 20) gets a
