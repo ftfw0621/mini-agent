@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { Box, Text, Static, useInput, useApp } from "ink";
 import { formatElapsed } from "../ui.js"; // reuse the same elapsed-time formatting as the non-Ink status line
+import { renderMarkdown } from "../markdown.js"; // model speaks markdown → ANSI, same as the non-Ink REPL
 
 // The Ink REPL (increment 1 + status bar). Claude Code's layout — a conversation
 // that scrolls ABOVE a pinned input box — is what a full-screen TUI framework is
@@ -83,13 +84,26 @@ export function App({ model, dir, branch, getStatus, runTurn }: { model: string;
 
   return (
     <Box flexDirection="column">
-      {/* committed conversation — rendered once each, then left in the scrollback */}
+      {/* committed conversation — rendered once each, then left in the scrollback.
+          Assistant replies go through renderMarkdown (→ ANSI), so `**bold**`,
+          lists, code, and tables render instead of showing literal markdown. Ink
+          passes the embedded ANSI through untouched, so the body <Text> carries
+          no colour prop of its own — only the green ⏺ marker does. */}
       <Static items={history}>
-        {(m, i) => (
-          <Box key={i} flexDirection="column" marginTop={1}>
-            {m.role === "user" ? <Text backgroundColor="gray" color="whiteBright">{`> ${m.text}`}</Text> : <Text color="green">{`⏺ ${m.text}`}</Text>}
-          </Box>
-        )}
+        {(m, i) =>
+          m.role === "user" ? (
+            <Box key={i} marginTop={1}>
+              <Text backgroundColor="gray" color="whiteBright">{`> ${m.text}`}</Text>
+            </Box>
+          ) : (
+            <Box key={i} marginTop={1} flexDirection="row">
+              <Text color="green">⏺ </Text>
+              <Box flexGrow={1}>
+                <Text>{renderMarkdown(m.text)}</Text>
+              </Box>
+            </Box>
+          )
+        }
       </Static>
 
       {/* the live, streaming reply (moves into <Static> when it finishes) */}
