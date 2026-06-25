@@ -50,15 +50,24 @@ export function makeInkSink(api: InkSinkApi): LoopOutput {
     // The streamed answer accumulates in the dynamic region as raw text (live,
     // "it's typing"), then commits as ONE markdown-rendered item when it ends —
     // partial markdown mid-stream renders badly, so we format only once it's whole.
+    //
+    // THROTTLED on purpose: a fast stream delivers tokens dozens of times a
+    // second, and Ink erases+redraws the whole live region on every state change
+    // — repainting a multi-line block that often is what makes a long answer
+    // "shake" violently. So we coalesce a burst of tokens into ONE setLive every
+    // ~90ms (≈11 fps, smooth but cheap). The final, complete answer still commits
+    // to <Static> on end(), so nothing is lost or under-rendered.
     answer() {
       let buf = "";
+      let timer: ReturnType<typeof setTimeout> | null = null;
       api.setLive("");
       return {
         push: (tok) => {
           buf += tok;
-          api.setLive(buf);
+          if (!timer) timer = setTimeout(() => { timer = null; api.setLive(buf); }, 90); // leading-edge throttle: schedule one repaint, ignore the burst until it fires
         },
         end: () => {
+          if (timer) { clearTimeout(timer); timer = null; } // drop the pending repaint — we're committing now
           api.setLive(null); // clear the live preview first, then commit (no flicker/duplicate)
           if (buf.trim()) api.pushItem({ kind: "answer", text: buf });
         },

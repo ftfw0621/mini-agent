@@ -56,7 +56,10 @@ const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", 
 // <Static> (formatted as markdown) the moment it finishes.
 function liveTail(s: string): string {
   const rows = process.stdout.rows || 24;
-  const maxLines = Math.max(3, rows - 14); // reserve rows for the input box + status bar + agent bar + margins
+  // Keep the preview SMALL (≤10 lines) even on a tall terminal: Ink repaints this
+  // whole region on every (throttled) update, and a smaller block repaints with
+  // far less flicker. The full reply still lands in <Static> on commit.
+  const maxLines = Math.max(3, Math.min(10, rows - 14)); // reserve rows for the input box + status bar + agent bar + margins
   const cols = process.stdout.columns || 80;
   const maxChars = maxLines * cols; // rough bound so one very long line can't blow past either
   let t = s.length > maxChars ? s.slice(-maxChars) : s;
