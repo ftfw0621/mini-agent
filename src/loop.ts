@@ -85,6 +85,7 @@ const taskTool: OpenAI.ChatCompletionTool = {
     description: `Delegate one self-contained subtask to a sub-agent that works in a FRESH context.
 The sub-agent has the same tools (except task) but knows NOTHING about this conversation — put every detail it needs into the description.
 Use it for exploration that would flood your context: reading many files, broad searches, summarizing a directory.
+The sub-agent runs ASYNC — it returns a handle immediately and you are notified when it finishes. Do NOT wait idly: continue working or wait for its result.
 The sub-agent's report is INPUT MATERIAL, not verified truth — re-check key claims yourself before acting on them.
 On error: a failed sub-agent returns [sub-agent failed: reason] — retry with a clearer description, or do the work yourself.`,
     parameters: {
@@ -314,33 +315,111 @@ function toolsFor(opts: LoopOptions): OpenAI.ChatCompletionTool[] {
   return [...builtins, taskTool, askUserTool, spawnTeammateTool, sendMessageTool, requestShutdownTool, requestPlanTool, reviewPlanTool, createTaskTool, listTasksTool];
 }
 
-// Run one sub-agent: a fresh conversation, same tools minus task, same
-// permission gate, and the parent's file read-state protected by a snapshot.
-async function runSubAgent(description: string, opts: LoopOptions): Promise<string> {
-  emit("agent_subagent_spawn"); // delegation is worth counting
-  const subModel = subAgentModelFor(opts); // the tier this delegated work runs on
-  // Show the delegation, and the model when it differs from the orchestrator's —
-  // the tiering should be visible, not a silent surprise on the bill.
-  if (!opts.quiet) sink(opts).note(mark.subAgentStart(description.slice(0, 100), subModel !== opts.model ? subModel : "")); // annotate the tier only on a real switch
-  await runHooks("SubagentStart", { description: description.slice(0, 200), model: subModel }); // lifecycle hook (observational)
-  const snapshot = snapshotFileState(); // what the sub-agent reads, the parent has NOT seen
-  try {
-    const subMessages: OpenAI.ChatCompletionMessageParam[] = [
-      { role: "system", content: SUB_AGENT_PROMPT }, // its own, smaller constitution
-      { role: "user", content: description }, // the task is its entire world
-    ];
-    const result = await runLoop(subMessages, { ...opts, subAgent: true, model: subModel }); // recurse as a sub-agent, on its own tier
-    if (result.reason === TerminateReason.Done && result.finalText?.trim()) {
-      // The framing matters: the parent must treat this as material to verify,
-      // not as conclusions to copy — the most common multi-agent failure mode.
-      return `Sub-agent report (INPUT MATERIAL — verify key claims before acting on them):\n${result.finalText}`;
-    }
-    return `[sub-agent failed: ${result.reason}]`; // any non-Done ending, compressed to one line
-  } finally {
-    restoreFileState(snapshot); // the parent's read-before-edit state, exactly as it was
-    await runHooks("SubagentStop", { description: description.slice(0, 200) }); // lifecycle hook (observational)
-    if (!opts.quiet) sink(opts).note(mark.subAgentDone); // close the bracket
+// ---- sub-agent registry (async task delegation) -------------------------------
+// The problem: task tool calls runSubAgent synchronously (await), so the main
+// loop blocks while the sub-agent works. The user's REPL is frozen — they can't
+// send messages, interrupt, or change direction until the sub-agent finishes.
+//
+// The fix: run sub-agents in the background, like background tasks (Day 37) and
+// teammates (Day 38). The task tool returns IMMEDIATELY with a handle; when the
+// sub-agent finishes, its result is injected as a user message via the same
+// notification path as background tasks. The model can keep working (call more
+// tools, or wait) while the sub-agent runs — and the user stays in control.
+interface PendingSubAgent {
+  id: string;
+  description: string;
+  done: Promise<void>;
+  result: string | null;
+  notified: boolean;
+}
+const pendingSubAgents = new Map<string, PendingSubAgent>();
+let subAgentSeq = 0;
+
+// Collect finished sub-agent results (like pendingNotifications for background
+// tasks). Each result surfaces exactly once (the `notified` flag).
+function pendingSubAgentResults(): string {
+  const done: string[] = [];
+  for (const sa of pendingSubAgents.values()) {
+    if (sa.result === null || sa.notified) continue;
+    sa.notified = true;
+    done.push(
+      `<subagent_notification>\n  <id>${sa.id}</id>\n  <task>${sa.description.slice(0, 200)}</task>\n  <result>\n${sa.result}\n  </result>\n</subagent_notification>`,
+    );
   }
+  if (!done.length) return "";
+  return `A sub-agent you delegated work to has finished. Read its report carefully — it is INPUT MATERIAL, not verified truth. Verify key claims yourself, then continue.\n\n${done.join("\n\n")}`;
+}
+
+// Inject finished sub-agent results into the conversation, like
+// injectBackgroundNotifications. Returns true if something was injected.
+function injectSubAgentResults(messages: OpenAI.ChatCompletionMessageParam[], opts: LoopOptions): boolean {
+  if (opts.subAgent) return false; // notifications belong to the top-level conversation
+  const note = pendingSubAgentResults();
+  if (!note) return false;
+  messages.push({ role: "user", content: note });
+  if (!opts.quiet) sink(opts).note(mark.subAgentDone);
+  return true;
+}
+
+// Start a sub-agent WITHOUT awaiting — returns a handle immediately. The
+// sub-agent's result will be injected as a notification when it finishes.
+function spawnSubAgent(description: string, opts: LoopOptions): string {
+  emit("agent_subagent_spawn");
+  const subModel = subAgentModelFor(opts);
+  const id = `sa_${++subAgentSeq}`;
+  if (!opts.quiet) sink(opts).note(mark.subAgentStart(description.slice(0, 100), subModel !== opts.model ? subModel : ""));
+  runHooks("SubagentStart", { description: description.slice(0, 200), model: subModel }); // fire-and-forget (observational)
+
+  const snapshot = snapshotFileState(); // what the sub-agent reads, the parent has NOT seen
+  const sa: PendingSubAgent = { id, description, done: Promise.resolve(), result: null, notified: false };
+
+  sa.done = (async () => {
+    try {
+      const subMessages: OpenAI.ChatCompletionMessageParam[] = [
+        { role: "system", content: SUB_AGENT_PROMPT },
+        { role: "user", content: description },
+      ];
+      const result = await runLoop(subMessages, { ...opts, subAgent: true, model: subModel });
+      if (result.reason === TerminateReason.Done && result.finalText?.trim()) {
+        sa.result = `Sub-agent report (INPUT MATERIAL — verify key claims before acting on them):\n${result.finalText}`;
+      } else {
+        sa.result = `[sub-agent failed: ${result.reason}]`;
+      }
+    } catch (err) {
+      sa.result = `[sub-agent crashed: ${(err as Error).message}]`;
+    } finally {
+      restoreFileState(snapshot);
+      await runHooks("SubagentStop", { description: description.slice(0, 200) });
+    }
+  })();
+
+  pendingSubAgents.set(id, sa);
+  return `Sub-agent started (${id}): "${description.slice(0, 100)}". Continue working — you'll be notified when it finishes. Do NOT wait idly; keep working on other parts of the task, or wait for the notification.`;
+}
+
+// True if any sub-agent is still running.
+function hasRunningSubAgents(): boolean {
+  return [...pendingSubAgents.values()].some((sa) => sa.result === null);
+}
+
+// Kill every still-running sub-agent. Called on session exit.
+export function killAllSubAgents(): void {
+  for (const sa of pendingSubAgents.values()) {
+    if (sa.result === null) sa.result = "[sub-agent killed: session exited]";
+  }
+}
+
+// Snapshot of current sub-agents for the UI (Ink app shows a list below the
+// input box, like Claude Code's agent list). Newest first.
+export function listSubAgents(): { id: string; description: string; status: "running" | "done" | "failed"; result?: string }[] {
+  return [...pendingSubAgents.values()]
+    .reverse()
+    .map((sa) => ({
+      id: sa.id,
+      description: sa.description.slice(0, 80),
+      status: sa.result === null ? "running" : sa.result.startsWith("[sub-agent failed") || sa.result.startsWith("[sub-agent crashed") || sa.result.startsWith("[sub-agent killed") ? "failed" : "done",
+      result: sa.result ?? undefined,
+    }));
 }
 
 // Exponential backoff with jitter: 500ms, 1s, 2s, ... ±25%, capped.
@@ -632,7 +711,7 @@ async function execute(call: AssembledCall, opts: LoopOptions): Promise<string> 
     /* fall through to the error below */
   }
   if (!description) return "[error] task requires a non-empty description argument.";
-  return runSubAgent(description, opts); // spawn the worker
+  return spawnSubAgent(description, opts); // spawn the worker (async — returns immediately; result injected later)
 }
 
 // The sender's mailbox name: a teammate sends as itself, everyone else as "lead".
@@ -1161,11 +1240,12 @@ export async function runLoop(
             break; // exit the inner while → advance the round counter
           }
         }
-        // A background task may have finished in the very round the model decided
-        // to stop. Don't return with an unread result on the table: surface it and
-        // run one more round so the model can react. Each task notifies once, so
-        // this adds at most one round per finished task — never an infinite stop.
+        // A background task (or sub-agent) may have finished in the very round the
+        // model decided to stop. Don't return with an unread result on the table:
+        // surface it and run one more round so the model can react. Each notifies
+        // once, so this adds at most one round per finished job — never infinite.
         if (injectBackgroundNotifications(messages, opts)) break; // exit the inner while → advance the round counter
+        if (injectSubAgentResults(messages, opts)) break;
         // Agent teams (Day 38/39): the lead waits for teammate messages and
         // reacts; a teammate idle-loops for new work and leaves only on the
         // shutdown handshake (or its idle backstop). If there's something to
@@ -1209,6 +1289,10 @@ export async function runLoop(
       // the model sees the outcome on the next round without ever having blocked
       // on it. Tasks that are still running stay silent until they finish.
       injectBackgroundNotifications(messages, opts);
+
+      // Sub-agent results (async task delegation): same pattern — a finished
+      // sub-agent's report is injected here so the model can react next round.
+      injectSubAgentResults(messages, opts);
 
       // Agent teams (Day 38/39): drain any messages that arrived during this
       // round (results, hand-offs, protocol requests/responses) so the agent

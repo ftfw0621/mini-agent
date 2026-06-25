@@ -5,7 +5,7 @@ import { formatElapsed, renderMenu, MENU_HINT, formatModelChoices } from "../ui.
 import { renderMarkdown } from "../markdown.js"; // model speaks markdown → ANSI, same as the non-Ink REPL
 import { initFormState, reduceForm, renderForm, collectAnswers, type FormQuestion, type FormState, type FormAnswer } from "../form.js"; // the ask_user form: pure state machine + renderer
 import { CONFIG, saveGlobalSetting } from "../config.js"; // session allowlist + /model save
-import { TerminateReason, type LoopResult } from "../loop.js"; // how a turn can end
+import { TerminateReason, type LoopResult, listSubAgents } from "../loop.js"; // how a turn can end
 import { compactHistory, COMPACT_AT } from "../context.js"; // /compact
 import { forgetFilesExcept } from "../tools.js"; // /clear resets the file read-state
 import { clearUndo } from "../undo.js";
@@ -132,6 +132,8 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
   const [sessionId, setSessionId] = useState(session.initialSessionId); // changes on /clear, /resume
   const [planMode, setPlan] = useState(isPlanMode()); // mirrored into the prompt frame
   const [histIdx, setHistIdx] = useState<number | null>(null); // ↑/↓ recall position (null = editing a fresh line)
+  const [subAgentFocus, setSubAgentFocus] = useState<number | null>(null); // which sub-agent is highlighted (null = none)
+  const [subAgentDetail, setSubAgentDetail] = useState<string | null>(null); // the id of the sub-agent whose output is shown in detail
   const [, setTick] = useState(0); // forces a re-render once a second so the clock / cost tick
   const { exit } = useApp();
 
@@ -381,6 +383,13 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
     if (key.ctrl && char === "r") return note(getReasoning() ?? chalk.dim("(no thinking recorded for the last answer)"));
     if (key.ctrl && char === "t") return note(getToolCalls() ?? chalk.dim("(no tool calls recorded for the last answer)"));
 
+    // Esc while a sub-agent detail is open: close it, don't interrupt.
+    if (key.escape && subAgentDetail && !pending) {
+      setSubAgentDetail(null);
+      setSubAgentFocus(null);
+      return;
+    }
+
     // Esc while a turn runs (and no menu is up): interrupt it — like the first
     // Ctrl+C of the readline REPL, without the force-quit escalation.
     if (key.escape && busy && !pending) {
@@ -427,8 +436,50 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
       return;
     }
 
+    // Tab / Shift+Tab: cycle through the sub-agent list below the input box.
+    // Enter on a highlighted sub-agent toggles its detail view.
+    const agents = listSubAgents();
+    if (agents.length > 0 && !key.return && key.tab) {
+      const back = key.shift; // Shift+Tab = go backwards
+      if (subAgentDetail) {
+        // Detail open: Tab moves to next + closes detail.
+        setSubAgentDetail(null);
+        setSubAgentFocus((prev) => {
+          const n = agents.length;
+          if (back) {
+            const next = prev === null ? n - 1 : (prev - 1 + n) % n;
+            return next;
+          }
+          const next = prev === null ? 0 : (prev + 1) % n;
+          return next;
+        });
+      } else {
+        setSubAgentDetail(null);
+        setSubAgentFocus((prev) => {
+          const n = agents.length;
+          if (back) {
+            if (prev === null) return n - 1;
+            const next = (prev - 1 + n) % n;
+            return next === n - 1 ? null : next;
+          }
+          if (prev === null) return 0;
+          const next = (prev + 1) % n;
+          return next === 0 ? null : next;
+        });
+      }
+      return;
+    }
+    // Enter with a sub-agent highlighted: show its detail.
+    if (agents.length > 0 && subAgentFocus !== null && key.return) {
+      setSubAgentDetail(agents[subAgentFocus].id === subAgentDetail ? null : agents[subAgentFocus].id);
+      return;
+    }
+
     if (busy) return; // a turn in flight with no prompt — ignore typing for now (type-ahead is later)
     if (key.return) {
+      // Dismiss the sub-agent detail/focus on a normal submit.
+      setSubAgentDetail(null);
+      setSubAgentFocus(null);
       const text = input.trim();
       setInput("");
       setHistIdx(null);
@@ -508,6 +559,48 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
         <Text>{input}</Text>
         <Text inverse> </Text>
       </Box>
+
+      {/* sub-agent list — like Claude Code's agent bar below the input box.
+          Tab/Shift+Tab to cycle, Enter to expand detail, Esc to close detail. */}
+      {(() => {
+        const agents = listSubAgents();
+        if (!agents.length) return null;
+        return (
+          <Box flexDirection="column" marginTop={0}>
+            <Box>
+              <Text dimColor>agents · </Text>
+              {agents.map((sa, i) => (
+                <React.Fragment key={sa.id}>
+                  <Text color={i === subAgentFocus ? "cyan" : "blue"} bold={i === subAgentFocus}>
+                    {sa.id}
+                  </Text>
+                  <Text dimColor>
+                    {sa.status === "running" ? " ●" : sa.status === "done" ? " ✓" : " ✗"}
+                  </Text>
+                  {i < agents.length - 1 && <Text dimColor> │ </Text>}
+                </React.Fragment>
+              ))}
+              <Text dimColor> · Tab</Text>
+            </Box>
+            {/* expanded detail for the focused sub-agent */}
+            {subAgentDetail && (() => {
+              const detail = agents.find((sa) => sa.id === subAgentDetail);
+              if (!detail) return null;
+              const head = `${detail.id} · ${detail.status === "running" ? "running" : detail.status === "done" ? "done" : "failed"}`;
+              const body = detail.result ?? "(still working…)";
+              return (
+                <Box flexDirection="column" marginTop={0} borderStyle="single" borderColor="blue" paddingX={1}>
+                  <Text color="cyan" bold>{head}</Text>
+                  <Text dimColor>{detail.description}</Text>
+                  <Box marginTop={0}>
+                    <Text>{body.length > 500 ? body.slice(0, 500) + "\n…" : body}</Text>
+                  </Box>
+                </Box>
+              );
+            })()}
+          </Box>
+        );
+      })()}
       <StatusBar model={model} dir={dir} branch={branch} status={getStatus()} />
     </Box>
   );

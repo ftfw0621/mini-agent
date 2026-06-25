@@ -4,7 +4,7 @@ import chalk from "chalk"; // terminal colors
 import readline from "node:readline/promises"; // promise-based terminal input
 import { createRequire } from "node:module"; // to read package.json for --version
 import { CONFIG, requireApiKey, saveGlobalSetting, PROJECT_SETTINGS_PATH, GLOBAL_SETTINGS_PATH } from "./config.js"; // provider-agnostic settings (.env loaded there)
-import { runLoop, TerminateReason, MAX_RETRIES, type LoopResult } from "./loop.js"; // the state machine
+import { runLoop, TerminateReason, MAX_RETRIES, type LoopResult, killAllSubAgents } from "./loop.js"; // the state machine
 import { buildSystemMessage } from "./prompt.js"; // the constitution + optional AGENT.md project memory
 import { forgetFilesExcept, registerExternalTool } from "./tools.js"; // file-state reset + tool registration
 import { compactHistory, estimateHistoryTokens, COMPACT_AT } from "./context.js"; // for the manual /compact command
@@ -166,6 +166,7 @@ async function main() {
   const disconnectMcp = await connectMcpServers();
   process.on("exit", disconnectMcp); // best-effort cleanup of server subprocesses
   process.on("exit", killAllBackground); // Day 37: SIGKILL any background job (dev server, slow install) so it never outlives the agent as an orphan
+  process.on("exit", killAllSubAgents); // mark any still-running sub-agents as killed so they don't leave pending promises
 
   // The optional LLM permission judge, built once if a settings file enabled it.
   const judge = CONFIG.judge.enabled ? new Judge(client, CONFIG.judge.model || CONFIG.model) : undefined;

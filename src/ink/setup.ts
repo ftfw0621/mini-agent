@@ -15,6 +15,7 @@ import { registerExternalTool } from "../tools.js";
 import { rememberTool, readMemory } from "../memory.js";
 import { loadSkills, buildSkillTool, type Skill } from "../skills.js";
 import { killAllBackground } from "../background.js";
+import { killAllSubAgents } from "../loop.js";
 import { banner } from "../ui.js";
 import type { StatusData } from "./app.js";
 
@@ -77,6 +78,7 @@ export async function buildInkSession(opts: { resume?: boolean } = {}): Promise<
   const disconnectMcp = await connectMcpServers();
   process.on("exit", disconnectMcp);
   process.on("exit", killAllBackground); // SIGKILL any background job so it never outlives the agent
+  process.on("exit", killAllSubAgents); // mark any still-running sub-agents as killed
 
   const judge = CONFIG.judge.enabled ? new Judge(client, CONFIG.judge.model || CONFIG.model) : undefined;
   if (judge) notices.push(`(permission judge on — model ${CONFIG.judge.model || CONFIG.model})`);
