@@ -1,11 +1,21 @@
 import React, { useState, useEffect, useRef } from "react";
 import { Box, Text, Static, useInput, useApp } from "ink";
 import chalk from "chalk";
-import { formatElapsed } from "../ui.js"; // reuse the same elapsed-time formatting as the non-Ink status line
+import { formatElapsed, renderMenu, MENU_HINT } from "../ui.js"; // elapsed-time format + the SAME pure menu renderer the readline REPL uses
 import { renderMarkdown } from "../markdown.js"; // model speaks markdown → ANSI, same as the non-Ink REPL
+import { initFormState, reduceForm, renderForm, collectAnswers, type FormQuestion, type FormState, type FormAnswer } from "../form.js"; // the ask_user form: pure state machine + renderer
+import { CONFIG } from "../config.js"; // for the session allowlist ("don't ask again for <tool>")
 import { TerminateReason, type LoopResult } from "../loop.js"; // how a turn can end
 import { makeInkSink, type Item } from "./sink.js"; // turns the loop's output into React state
 import type { TurnHooks } from "./chat.js"; // what one turn needs from the App
+
+// A prompt the loop is waiting on: a yes/no/allow approval, or the multi-question
+// ask_user form. Each carries the promise resolver the loop is awaiting, so a
+// keystroke here unblocks the loop. Same UX as the readline REPL (promptSelect /
+// promptForm), driven by Ink's useInput instead of raw keypress events.
+type Pending =
+  | { kind: "confirm"; question: string; options: string[]; toolName?: string; resolve: (approved: boolean) => void }
+  | { kind: "form"; questions: FormQuestion[]; resolve: (answers: FormAnswer[] | null) => void };
 
 // The Ink REPL. Claude Code's layout — a conversation that scrolls ABOVE a pinned
 // input box — is what a full-screen TUI framework is FOR. <Static> commits each
@@ -104,6 +114,9 @@ export function App({ model, dir, branch, getStatus, runTurn }: { model: string;
   const [live, setLive] = useState<string | null>(null); // the streaming answer
   const [input, setInput] = useState(""); // the current input buffer
   const [busy, setBusy] = useState(false); // a turn is in flight
+  const [pending, setPending] = useState<Pending | null>(null); // a permission/ask_user prompt the loop is blocked on
+  const [menuSel, setMenuSel] = useState(0); // the confirm menu's cursor
+  const [formState, setFormState] = useState<FormState | null>(null); // the ask_user form's state
   const [, setTick] = useState(0); // forces a re-render once a second so the clock / cost tick
   const { exit } = useApp();
 
@@ -117,20 +130,28 @@ export function App({ model, dir, branch, getStatus, runTurn }: { model: string;
     return () => clearInterval(id);
   }, []);
 
-  // Run one turn through the real loop. 2b: the permission prompt isn't wired into
-  // Ink yet, so confirm declines (read-only tools still flow through — the gate
-  // allows them without asking); the interactive menu/form arrive next increment.
+  // Run one turn through the real loop. The permission prompt and the ask_user
+  // form raise a `pending` prompt and return a promise the loop awaits; a keystroke
+  // in useInput resolves it. Read-only tools never reach confirm (the gate allows
+  // them silently); writes/bash do, and now get a real menu.
   const submit = (text: string) => {
     pushItem({ kind: "user", text });
     setBusy(true);
     const controller = new AbortController();
     const hooks: TurnHooks = {
       output: sink,
-      confirm: async (question) => {
-        pushItem({ kind: "note", text: chalk.yellow(`⚠ approval needed — ${question.split("\n")[0]} — declined (the Ink approval prompt isn't wired yet)`) });
-        return false;
-      },
-      askUser: undefined,
+      confirm: (question, toolName) =>
+        new Promise<boolean>((resolve) => {
+          const allowLabel = toolName ? `Yes, and don't ask again for ${toolName} this session` : "Yes, and don't ask again this session";
+          setMenuSel(0);
+          setPending({ kind: "confirm", question, toolName, options: ["Yes", allowLabel, "No — let me tell the agent what to do instead"], resolve });
+        }),
+      askUser: (questions) =>
+        new Promise<FormAnswer[] | null>((resolve) => {
+          if (!questions.length) return resolve(null);
+          setFormState(initFormState(questions));
+          setPending({ kind: "form", questions, resolve });
+        }),
       signal: controller.signal,
       isInterrupted: () => false,
     };
@@ -148,7 +169,43 @@ export function App({ model, dir, branch, getStatus, runTurn }: { model: string;
 
   useInput((char, key) => {
     if (key.ctrl && char === "c") return exit(); // Ctrl+C quits
-    if (busy) return; // 2b: no typing while the agent responds (type-ahead is a later increment)
+
+    // A permission prompt is up: ↑/↓ to move, Enter to choose, Esc = decline.
+    if (pending?.kind === "confirm") {
+      const n = pending.options.length;
+      if (key.upArrow) setMenuSel((i) => (i - 1 + n) % n);
+      else if (key.downArrow) setMenuSel((i) => (i + 1) % n);
+      else if (key.return || key.escape) {
+        const approved = !key.escape && (menuSel === 0 || menuSel === 1);
+        if (approved && menuSel === 1 && pending.toolName) CONFIG.permissions.allow.push(`tool:${pending.toolName}`); // "don't ask again" → session allowlist
+        pushItem({ kind: "note", text: `${chalk.yellow("⚠ approval")} — ${pending.question.split("\n")[0]} → ${approved ? chalk.green("✓ approved") : chalk.yellow("✗ declined")}` });
+        pending.resolve(approved);
+        setPending(null);
+      }
+      return;
+    }
+
+    // The ask_user form is up: reuse form.ts's pure state machine verbatim.
+    if (pending?.kind === "form" && formState) {
+      if (key.upArrow) setFormState(reduceForm(pending.questions, formState, "up").state);
+      else if (key.downArrow || key.tab) setFormState(reduceForm(pending.questions, formState, "down").state);
+      else if (key.return || char === " ") {
+        const next = reduceForm(pending.questions, formState, "select");
+        setFormState(next.state);
+        if (next.done) {
+          pending.resolve(collectAnswers(pending.questions, next.state)); // submitted with all answered
+          setPending(null);
+          setFormState(null);
+        }
+      } else if (key.escape) {
+        pending.resolve(null); // cancelled — the model is told to ask in prose instead
+        setPending(null);
+        setFormState(null);
+      }
+      return;
+    }
+
+    if (busy) return; // a turn in flight with no prompt — ignore typing for now (type-ahead is later)
     if (key.return) {
       const text = input.trim();
       setInput("");
@@ -182,6 +239,22 @@ export function App({ model, dir, branch, getStatus, runTurn }: { model: string;
         <Box marginTop={live === null ? 1 : 0}>
           <Spinner />
           <Text> {status}</Text>
+        </Box>
+      )}
+
+      {/* a permission prompt the loop is blocked on — reuses the readline REPL's menu */}
+      {pending?.kind === "confirm" && (
+        <Box flexDirection="column" marginTop={1}>
+          <Text color="yellow">⚠ approval needed — {pending.question}</Text>
+          <Text>{renderMenu(pending.options, menuSel)}</Text>
+          <Text>{MENU_HINT}</Text>
+        </Box>
+      )}
+
+      {/* the ask_user multi-question form */}
+      {pending?.kind === "form" && formState && (
+        <Box marginTop={1}>
+          <Text>{renderForm(pending.questions, formState)}</Text>
         </Box>
       )}
 
