@@ -12,7 +12,9 @@ import { clearUndo } from "../undo.js";
 import { clearTodos } from "../todos.js";
 import { resetTeam } from "../team.js";
 import { resetBoard } from "../board.js";
-import { clearReasoning, clearToolCalls, cleanup as tuiCleanup } from "../tui.js";
+import { clearReasoning, clearToolCalls, getReasoning, getToolCalls, cleanup as tuiCleanup } from "../tui.js";
+import { expandMentions } from "../mentions.js"; // @file mentions → attach file contents
+import { normalizeDroppedPaths } from "../drop.js"; // drag-and-drop a file → its absolute path in the input
 import { newSessionId, saveSession, listSessions, loadSession } from "../session.js";
 import { isPlanMode, setPlanMode } from "../permissions.js";
 import { findSkill, skillInstructions } from "../skills.js";
@@ -129,12 +131,15 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
   const [formState, setFormState] = useState<FormState | null>(null); // the ask_user form's state
   const [sessionId, setSessionId] = useState(session.initialSessionId); // changes on /clear, /resume
   const [planMode, setPlan] = useState(isPlanMode()); // mirrored into the prompt frame
+  const [histIdx, setHistIdx] = useState<number | null>(null); // ↑/↓ recall position (null = editing a fresh line)
   const [, setTick] = useState(0); // forces a re-render once a second so the clock / cost tick
   const { exit } = useApp();
 
   const pushItem = useRef((it: Item) => setItems((xs) => [...xs, it])).current;
   const note = (text: string) => pushItem({ kind: "note", text });
   const sink = useRef(makeInkSink({ setStatus, setLive, pushItem })).current;
+  const history = useRef<string[]>([]).current; // past prompts, for ↑/↓ recall
+  const turn = useRef<{ controller: AbortController; interrupted: boolean } | null>(null); // the in-flight turn, for Esc-interrupt
 
   useEffect(() => {
     const id = setInterval(() => setTick((t) => t + 1), 1000);
@@ -157,6 +162,8 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
     clearToolCalls(); // ...and Ctrl+T THIS turn's tool calls
     setBusy(true);
     const controller = new AbortController();
+    const tstate = { controller, interrupted: false };
+    turn.current = tstate; // expose it so Esc can interrupt this turn
     const hooks: TurnHooks = {
       output: sink,
       confirm: (question, toolName) =>
@@ -176,7 +183,7 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
           setPending({ kind: "form", questions, resolve });
         }),
       signal: controller.signal,
-      isInterrupted: () => false,
+      isInterrupted: () => tstate.interrupted, // polled between steps for a clean stop
       judge,
     };
     runTurn(content, hooks)
@@ -194,10 +201,27 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
       })
       .catch((e: unknown) => note(chalk.red(`[error] ${(e as Error).message}`)))
       .finally(() => {
+        turn.current = null;
         setBusy(false);
         setStatus(null);
         setLive(null);
       });
+  };
+
+  // A normal (non-command) prompt: run UserPromptSubmit hooks, expand @file
+  // mentions, then start the turn. Mirrors agent.ts's submit path.
+  const submitLine = async (text: string) => {
+    if (text === "exit" || text === "quit") return doExit();
+    if (await handleCommand(text)) return; // slash commands never reach the model
+    const hook = await runHooks("UserPromptSubmit", { prompt: text });
+    if (hook.block) return note(chalk.yellow(`(prompt blocked by a UserPromptSubmit hook: ${hook.feedback.slice(0, 150)})`));
+    const injected = hook.stdout ? `\n\n[context added by a UserPromptSubmit hook]\n${hook.stdout}` : "";
+    const { augmented, mentions } = expandMentions(text);
+    const attached = mentions.filter((m) => m.status === "ok").map((m) => m.raw);
+    const refused = mentions.filter((m) => m.status === "denied").map((m) => m.raw);
+    if (attached.length) note(chalk.dim(`(attached ${attached.length} file${attached.length === 1 ? "" : "s"}: ${attached.join(", ")})`));
+    if (refused.length) note(chalk.yellow(`(refused secret file${refused.length === 1 ? "" : "s"}: ${refused.join(", ")})`));
+    runConversationTurn(augmented + injected, { kind: "user", text }); // show the original line; send the augmented content
   };
 
   // Handle a /slash command. Returns true if the line was a command (handled).
@@ -353,6 +377,22 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
       return exit(); // Ctrl+C quits immediately (process.on exit cleans up MCP/background)
     }
 
+    // Ctrl+R / Ctrl+T: reveal the LAST answer's collapsed thinking / tool calls.
+    if (key.ctrl && char === "r") return note(getReasoning() ?? chalk.dim("(no thinking recorded for the last answer)"));
+    if (key.ctrl && char === "t") return note(getToolCalls() ?? chalk.dim("(no tool calls recorded for the last answer)"));
+
+    // Esc while a turn runs (and no menu is up): interrupt it — like the first
+    // Ctrl+C of the readline REPL, without the force-quit escalation.
+    if (key.escape && busy && !pending) {
+      const t = turn.current;
+      if (t && !t.interrupted) {
+        t.interrupted = true; // the loop polls this between steps
+        t.controller.abort(); // cancel the in-flight API request
+        note(chalk.yellow("(esc — interrupting; back at the prompt)"));
+      }
+      return;
+    }
+
     // A select menu is up (approval / model / resume): ↑↓ move, Enter choose, Esc cancel.
     if (pending?.kind === "select") {
       const n = pending.options.length;
@@ -391,18 +431,35 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
     if (key.return) {
       const text = input.trim();
       setInput("");
+      setHistIdx(null);
       if (!text) return;
-      if (text === "exit" || text === "quit") {
-        void doExit();
-        return;
+      if (text.trim()) history.push(text); // remember non-empty entries for ↑/↓
+      void submitLine(text);
+    } else if (key.upArrow) {
+      // ↑ recall an earlier prompt (newest-first), like a shell.
+      if (!history.length) return;
+      const idx = histIdx === null ? history.length - 1 : Math.max(0, histIdx - 1);
+      setHistIdx(idx);
+      setInput(history[idx]);
+    } else if (key.downArrow) {
+      // ↓ walk back toward the fresh line.
+      if (histIdx === null) return;
+      const idx = histIdx + 1;
+      if (idx >= history.length) {
+        setHistIdx(null);
+        setInput("");
+      } else {
+        setHistIdx(idx);
+        setInput(history[idx]);
       }
-      void handleCommand(text).then((handled) => {
-        if (!handled) runConversationTurn(text, { kind: "user", text });
-      });
     } else if (key.backspace || key.delete) {
       setInput((s) => s.slice(0, -1));
     } else if (char && !key.ctrl && !key.meta) {
-      setInput((s) => s + char); // ordinary typing
+      // A bulk chunk (a paste / a dropped file path) is normalized: a dropped
+      // file becomes a clean absolute path; ordinary pasted prose is unchanged.
+      const add = char.length > 1 ? normalizeDroppedPaths(char) : char;
+      setHistIdx(null);
+      setInput((s) => s + add);
     }
   });
 

@@ -118,6 +118,18 @@ export function revealToolCalls(): boolean {
   return true;
 }
 
+// Ink variants of the two reveals: RETURN the formatted block (or null) instead
+// of writing to stdout, so the Ink REPL can commit it as a note in its tree.
+export function getReasoning(): string | null {
+  if (!reasoningTrace.length) return null;
+  return chalk.dim("💭 model's thinking:\n") + chalk.dim(reasoningTrace.join("\n\n— — —\n\n").replace(/^/gm, "  "));
+}
+
+export function getToolCalls(): string | null {
+  if (!toolCallLog.length) return null;
+  return chalk.dim(`tool calls this turn (${toolCallLog.length}):\n`) + toolCallLog.join("\n");
+}
+
 // ---- cleanup -----------------------------------------------------------------
 // Called on exit. Nothing fancy to restore now (we no longer hijack the bottom
 // of the screen), but keep the hook so callers don't have to change if that
