@@ -5,6 +5,7 @@
     "moduleResolution": "NodeNext",
     "strict": true,
     "types": ["node"],
+    "jsx": "react-jsx",
     "skipLibCheck": true,
     "noEmit": true
   },
