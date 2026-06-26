@@ -169,6 +169,25 @@ export function listJobs(): CronJob[] {
   return [...scheduledJobs.values()].sort((a, b) => a.createdAt - b.createdAt);
 }
 
+// The turn content a fired job injects: the job's own prompt, wrapped with the
+// instruction to DO it now and report the result visibly, then go back to idle.
+// Shared by both consumers — the in-turn one (injectCronMessages in loop.ts, for
+// a job that fires mid-task) and the idle one (the REPL's idle processor, for a
+// job that fires while the user is at the prompt) — so they behave identically.
+export function cronTriggerContent(job: CronJob): string {
+  return [
+    `[Cron job "${job.id}" triggered — ${job.cron}]`,
+    ``,
+    `${job.prompt}`,
+    ``,
+    `Execute this now. When done, report the result directly to the user — make it visible and clear.`,
+    `If the task produces output (e.g. a shell command result, a file change, a value), show it.`,
+    `If there's nothing to show, confirm success with one line.`,
+    ``,
+    `After this, return to idle — do NOT start additional work unless the user asked for a chain of follow-ups.`,
+  ].join("\n");
+}
+
 // ============ Cron queue ============
 export function hasCronQueue(): boolean {
   return cronQueue.length > 0;

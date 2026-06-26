@@ -314,10 +314,11 @@ Boundaries & permissions are identical to run_bash (dangerous commands are still
 const scheduleCron: Tool = {
   definition: def(
     "schedule_cron",
-    `Schedule a recurring or one-shot task in the BACKGROUND using a 5-field cron expression.
+    `Schedule a recurring or one-shot task using a 5-field cron expression. When it fires, YOU are woken with the prompt below, you do the task, and you report the result to the user — even while they're idle. This is the RIGHT tool for "every morning at 9 run the tests", "every 5 minutes check CI", "every minute print X" — anything that should run on a schedule AND report back. Prefer it over run_bash_background for such requests: a background job's output is captured, not shown, so the user won't see it.
 Boundaries: max 50 jobs; the scheduler checks every second and delivers the prompt when the cron matches.
+GRANULARITY: cron's finest interval is ONE MINUTE. Sub-minute schedules ("every 10 seconds") are NOT possible — tell the user that, and offer the nearest option (every minute) or, if they truly need higher frequency to watch live, suggest they run a foreground loop in their own shell.
 Cron format: minute hour day-of-month month day-of-week. Supports *, */N, N, N-M, N,M,….
-Examples: "0 9 * * *" = every day at 9:00; "*/5 * * * *" = every 5 minutes; "0 9 * * 1-5" = weekdays at 9:00.
+Examples: "* * * * *" = every minute; "0 9 * * *" = every day at 9:00; "*/5 * * * *" = every 5 minutes; "0 9 * * 1-5" = weekdays at 9:00.
 
 IMPORTANT — the "prompt" parameter is what you (the agent) will receive when the job fires.
 Put the user's FULL INTENT here — a complete self-contained instruction that tells you what to do.

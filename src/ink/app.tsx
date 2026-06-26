@@ -15,6 +15,7 @@ import { resetBoard } from "../board.js";
 import { clearReasoning, clearToolCalls, getReasoning, getToolCalls, cleanup as tuiCleanup } from "../tui.js";
 import { expandMentions } from "../mentions.js"; // @file mentions → attach file contents
 import { normalizeDroppedPaths } from "../drop.js"; // drag-and-drop a file → its absolute path in the input
+import { cronItemsPending, consumeCronQueue, cronTriggerContent } from "../cron.js"; // cron scheduler (Day s14): fire scheduled jobs autonomously while idle
 import { newSessionId, saveSession, listSessions, loadSession } from "../session.js";
 import { isPlanMode, setPlanMode } from "../permissions.js";
 import { findSkill, skillInstructions } from "../skills.js";
@@ -233,6 +234,27 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
         setLive(null);
       });
   };
+
+  // The cron IDLE PROCESSOR (Day s14): the scheduler fires jobs into a queue, but
+  // injectCronMessages only drains it mid-turn — so a job that fires while you're
+  // at the prompt would never run on its own. Here, while idle (no turn, no menu),
+  // we poll the queue and start a turn for any fired job: the agent does the work
+  // and reports the result into the conversation, autonomously — like Claude Code.
+  // Effect re-subscribes on busy/pending changes so the closure always sees the
+  // current `runConversationTurn`; it only installs the poll when truly idle.
+  useEffect(() => {
+    if (busy || pending) return; // only fire scheduled work when the agent is idle
+    const id = setInterval(() => {
+      if (!cronItemsPending()) return;
+      const fired = consumeCronQueue();
+      if (!fired.length) return;
+      const content = fired.map(cronTriggerContent).join("\n\n---\n\n");
+      const label = fired.length === 1 ? `⏰ cron ${fired[0].id} fired (${fired[0].cron})` : `⏰ ${fired.length} cron jobs fired`;
+      runConversationTurn(content, { kind: "note", text: chalk.cyan(label) }); // a cron NOTE (not a user bar); the agent runs it + reports
+    }, 2000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [busy, pending]);
 
   // A normal (non-command) prompt: run UserPromptSubmit hooks, expand @file
   // mentions, then start the turn. Mirrors agent.ts's submit path.

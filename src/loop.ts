@@ -17,7 +17,7 @@ import { recordToolCall, recordReasoning } from "./tui.js"; // folded tool-call 
 import { type LoopOutput, type AnswerSink, STDOUT_OUTPUT } from "./output.js"; // where the loop's screen output goes (stdout by default, Ink REPL passes its own)
 import { todoNag, getTodos, renderTodos } from "./todos.js"; // the agent's plan: show it on screen + nag when it goes stale
 import { pendingNotifications } from "./background.js"; // background tasks (Day 37): surface finished jobs as a turn
-import { consumeCronQueue, cronItemsPending, startCronScheduler, loadDurableJobs } from "./cron.js"; // cron scheduler (Day s14): scheduled, recurring work
+import { consumeCronQueue, cronItemsPending, cronTriggerContent, startCronScheduler, loadDurableJobs } from "./cron.js"; // cron scheduler (Day s14): scheduled, recurring work
 
 export const MAX_RETRIES = 10; // total failed API calls per query, across all rounds
 export const MAX_RATE_LIMIT_RETRIES = 3; // 429s get their own, much smaller budget
@@ -1014,18 +1014,7 @@ function injectCronMessages(messages: OpenAI.ChatCompletionMessageParam[], opts:
   const fired = consumeCronQueue();
   let count = 0;
   for (const job of fired) {
-    const content = [
-      `[Cron job "${job.id}" triggered — ${job.cron}]`,
-      ``,
-      `${job.prompt}`,
-      ``,
-      `Execute this now. When done, report the result directly to the user — make it visible and clear.`,
-      `If the task produces output (e.g. a shell command result, a file change, a value), show it.`,
-      `If there's nothing to show, confirm success with one line.`,
-      ``,
-      `After this, return to idle — do NOT start additional work unless the user asked for a chain of follow-ups.`,
-    ].join("\n");
-    messages.push({ role: "user", content });
+    messages.push({ role: "user", content: cronTriggerContent(job) }); // shared with the REPL's idle processor
     count++;
   }
   if (count && !opts.quiet) sink(opts).note(chalk.cyan(`⏰ cron: ${count} job${count > 1 ? "s" : ""} fired`));
