@@ -147,6 +147,7 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
   const [status, setStatus] = useState<string | null>(null); // the live spinner line
   const [live, setLive] = useState<string | null>(null); // the streaming answer
   const [input, setInput] = useState(""); // the current input buffer
+  const [cursor, setCursor] = useState(0); // caret position WITHIN `input` (0..input.length), for ←/→ editing
   const [busy, setBusy] = useState(false); // a turn is in flight
   const [pending, setPending] = useState<Pending | null>(null); // a prompt/menu blocking input
   const [menuSel, setMenuSel] = useState(0); // the select menu's cursor
@@ -504,16 +505,26 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
       setSubAgentFocus(null);
       const text = input.trim();
       setInput("");
+      setCursor(0);
       setHistIdx(null);
       if (!text) return;
       if (text.trim()) history.push(text); // remember non-empty entries for ↑/↓
       void submitLine(text);
+    } else if (key.leftArrow) {
+      setCursor((c) => Math.max(0, c - 1)); // move the caret left within the line
+    } else if (key.rightArrow) {
+      setCursor((c) => Math.min(input.length, c + 1)); // ...and right
+    } else if (key.ctrl && char === "a") {
+      setCursor(0); // Home — jump to the start of the line
+    } else if (key.ctrl && char === "e") {
+      setCursor(input.length); // End — jump to the end of the line
     } else if (key.upArrow) {
-      // ↑ recall an earlier prompt (newest-first), like a shell.
+      // ↑ recall an earlier prompt (newest-first), like a shell; caret to its end.
       if (!history.length) return;
       const idx = histIdx === null ? history.length - 1 : Math.max(0, histIdx - 1);
       setHistIdx(idx);
       setInput(history[idx]);
+      setCursor(history[idx].length);
     } else if (key.downArrow) {
       // ↓ walk back toward the fresh line.
       if (histIdx === null) return;
@@ -521,18 +532,26 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
       if (idx >= history.length) {
         setHistIdx(null);
         setInput("");
+        setCursor(0);
       } else {
         setHistIdx(idx);
         setInput(history[idx]);
+        setCursor(history[idx].length);
       }
     } else if (key.backspace || key.delete) {
-      setInput((s) => s.slice(0, -1));
+      // Delete the char BEFORE the caret. Both Backspace and macOS DEL land here,
+      // so this is always a backward delete (forward-delete is rare; we skip it).
+      if (cursor > 0) {
+        setInput(input.slice(0, cursor - 1) + input.slice(cursor));
+        setCursor(cursor - 1);
+      }
     } else if (char && !key.ctrl && !key.meta) {
-      // A bulk chunk (a paste / a dropped file path) is normalized: a dropped
-      // file becomes a clean absolute path; ordinary pasted prose is unchanged.
+      // Insert at the caret (a bulk chunk — paste / dropped file path — is
+      // normalized: a dropped file becomes a clean absolute path; prose unchanged).
       const add = char.length > 1 ? normalizeDroppedPaths(char) : char;
       setHistIdx(null);
-      setInput((s) => s + add);
+      setInput(input.slice(0, cursor) + add + input.slice(cursor));
+      setCursor(cursor + add.length);
     }
   });
 
@@ -581,11 +600,15 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
         </Box>
       )}
 
-      {/* the pinned input box — stays at the bottom, conversation scrolls above it */}
+      {/* the pinned input box — stays at the bottom, conversation scrolls above it.
+          The caret is drawn AT its position: the char under it is inverted (a block
+          cursor), with the text before and after around it; at end-of-line the
+          inverted cell is a space. This is what makes ←/→ visibly move the cursor. */}
       <Box borderStyle="round" borderColor={planMode ? "magenta" : "cyan"} paddingX={1} marginTop={1}>
         <Text color={planMode ? "magenta" : "cyan"}>{planMode ? "plan ❯ " : "❯ "}</Text>
-        <Text>{input}</Text>
-        <Text inverse> </Text>
+        <Text>{input.slice(0, cursor)}</Text>
+        <Text inverse>{input.slice(cursor, cursor + 1) || " "}</Text>
+        <Text>{input.slice(cursor + 1)}</Text>
       </Box>
 
       {/* sub-agent list — like Claude Code's agent bar below the input box.
