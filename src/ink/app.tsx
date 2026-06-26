@@ -19,6 +19,7 @@ import { newSessionId, saveSession, listSessions, loadSession } from "../session
 import { isPlanMode, setPlanMode } from "../permissions.js";
 import { findSkill, skillInstructions } from "../skills.js";
 import { extractMemories } from "../memory.js";
+import { displayWidth } from "../editor.js"; // display-width measurement (CJK-aware)
 import { runHooks } from "../hooks.js";
 import { emit } from "../telemetry.js";
 import { makeInkSink, type Item } from "./sink.js"; // turns the loop's output into React state
@@ -603,12 +604,74 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
       {/* the pinned input box — stays at the bottom, conversation scrolls above it.
           The caret is drawn AT its position: the char under it is inverted (a block
           cursor), with the text before and after around it; at end-of-line the
-          inverted cell is a space. This is what makes ←/→ visibly move the cursor. */}
-      <Box borderStyle="round" borderColor={planMode ? "magenta" : "cyan"} paddingX={1} marginTop={1}>
-        <Text color={planMode ? "magenta" : "cyan"}>{planMode ? "plan ❯ " : "❯ "}</Text>
-        <Text>{input.slice(0, cursor)}</Text>
-        <Text inverse>{input.slice(cursor, cursor + 1) || " "}</Text>
-        <Text>{input.slice(cursor + 1)}</Text>
+          inverted cell is a space. This is what makes ←/→ visibly move the cursor.
+          Input is manually wrapped into visual lines so the cursor tracks correctly
+          when text exceeds the terminal width. */}
+      <Box borderStyle="round" borderColor={planMode ? "magenta" : "cyan"} paddingX={1} marginTop={1} flexDirection="column">
+        {(() => {
+          const prompt = planMode ? "plan ❯ " : "❯ ";
+          const promptColor = planMode ? "magenta" : "cyan";
+          const cols = process.stdout.columns || 80;
+          const innerWidth = Math.max(10, cols - 4); // border(2) + paddingX(2)
+          const promptW = displayWidth(prompt);
+          const firstW = Math.max(1, innerWidth - promptW);
+
+          // Build visual lines display-width-aware (CJK, emoji = 2 cols).
+          const lines: string[] = [""];
+          let row = 0;
+          let col = 0;
+          // Cursor tracking: map code-unit offset → (line, display-column).
+          let cursorLine = 0;
+          let cursorCol = 0;
+          let set = false;
+          let cu = 0; // code-unit offset, for matching `cursor`
+
+          for (const ch of input) {
+            if (!set && cu === cursor) { cursorLine = row; cursorCol = col; set = true; }
+            const cw = displayWidth(ch);
+            const limit = row === 0 ? firstW : innerWidth;
+            if (col + cw > limit) { row++; col = 0; lines[row] = ""; }
+            lines[row] += ch;
+            col += cw;
+            cu += ch.length;
+          }
+          if (!set) { cursorLine = row; cursorCol = col; } // cursor at end
+          // Cursor exactly at edge → wrap to start of next line for visibility
+          const edge = cursorLine === 0 ? firstW : innerWidth;
+          if (cursorCol >= edge) { cursorLine++; cursorCol = 0; if (lines.length <= cursorLine) lines.push(""); }
+
+          // Map display-column back to code-unit offset within the target line.
+          const cursorLineText = lines[cursorLine] ?? "";
+          let cuOff = 0;  // code-unit offset into cursorLineText that matches cursorCol
+          let dcol = 0;
+          for (const ch of cursorLineText) {
+            if (dcol >= cursorCol) break;
+            dcol += displayWidth(ch);
+            cuOff += ch.length;
+          }
+
+          return lines.map((line, i) => {
+            if (i === cursorLine) {
+              const before = line.slice(0, cuOff);
+              const at = line.slice(cuOff, cuOff + 1) || " ";
+              const after = line.slice(cuOff + 1);
+              return (
+                <Box key={i}>
+                  {i === 0 && <Text color={promptColor}>{prompt}</Text>}
+                  <Text>{before}</Text>
+                  <Text inverse>{at}</Text>
+                  <Text>{after}</Text>
+                </Box>
+              );
+            }
+            return (
+              <Box key={i}>
+                {i === 0 && <Text color={promptColor}>{prompt}</Text>}
+                <Text>{line}</Text>
+              </Box>
+            );
+          });
+        })()}
       </Box>
 
       {/* sub-agent list — like Claude Code's agent bar below the input box.

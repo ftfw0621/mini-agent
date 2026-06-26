@@ -16,6 +16,7 @@ import { rememberTool, readMemory } from "../memory.js";
 import { loadSkills, buildSkillTool, type Skill } from "../skills.js";
 import { killAllBackground } from "../background.js";
 import { killAllSubAgents } from "../loop.js";
+import { loadDurableJobs, startCronScheduler, stopCronScheduler, listJobs } from "../cron.js"; // cron scheduler (Day s14)
 import { banner } from "../ui.js";
 import type { StatusData } from "./app.js";
 
@@ -79,6 +80,13 @@ export async function buildInkSession(opts: { resume?: boolean } = {}): Promise<
   process.on("exit", disconnectMcp);
   process.on("exit", killAllBackground); // SIGKILL any background job so it never outlives the agent
   process.on("exit", killAllSubAgents); // mark any still-running sub-agents as killed
+  process.on("exit", stopCronScheduler); // Day s14: stop the setInterval on exit
+
+  // Cron scheduler (Day s14): restore durable jobs, start polling.
+  loadDurableJobs();
+  const cronCount = listJobs().length;
+  if (cronCount) notices.push(`(cron: ${cronCount} durable job${cronCount !== 1 ? "s" : ""} loaded)`);
+  startCronScheduler();
 
   const judge = CONFIG.judge.enabled ? new Judge(client, CONFIG.judge.model || CONFIG.model) : undefined;
   if (judge) notices.push(`(permission judge on — model ${CONFIG.judge.model || CONFIG.model})`);

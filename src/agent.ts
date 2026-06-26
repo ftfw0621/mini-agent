@@ -31,6 +31,7 @@ import { launchInk } from "./ink/launch.js"; // the Ink REPL — the default fro
 import { listBackground, hasRunningBackground, killAllBackground } from "./background.js"; // background tasks: /bg view + kill-on-exit (Day 37)
 import { listTeam, resetTeam } from "./team.js"; // agent teams: /team view + reset on clear/resume (Day 38)
 import { boardSummary, resetBoard } from "./board.js"; // task board: /tasks view + reset on clear/resume (Day 40)
+import { loadDurableJobs, startCronScheduler, stopCronScheduler, listJobs } from "./cron.js"; // cron scheduler (Day s14)
 
 // package.json sits one level above both src/ (dev) and dist/ (built) — same path either way.
 const pkg = createRequire(import.meta.url)("../package.json") as { version: string };
@@ -79,6 +80,7 @@ const SESSION_HELP = `commands:
   /bg        list background tasks this session (run_bash_background) and their status
   /team      list the agent team (spawn_teammate): each teammate's role, status, and pending inbox
   /tasks     show the shared task board (create_task/claim_task): each task's status, owner, and dependencies
+  /cron      list scheduled cron jobs (schedule_cron) and their expressions
   /undo      revert the most recent file write (write_file / edit_file) this session
   /diff      show every file changed this session, as a diff from where it started
   /resume    list recent sessions in this project and continue one of them
@@ -167,6 +169,13 @@ async function main() {
   process.on("exit", disconnectMcp); // best-effort cleanup of server subprocesses
   process.on("exit", killAllBackground); // Day 37: SIGKILL any background job (dev server, slow install) so it never outlives the agent as an orphan
   process.on("exit", killAllSubAgents); // mark any still-running sub-agents as killed so they don't leave pending promises
+  process.on("exit", stopCronScheduler); // Day s14: stop the setInterval on exit
+
+  // Cron scheduler (Day s14): restore durable jobs from disk, start the 1s poll.
+  loadDurableJobs();
+  const cronCount = listJobs().length;
+  if (cronCount) console.log(chalk.dim(`(cron: ${cronCount} durable job${cronCount !== 1 ? "s" : ""} loaded)`));
+  startCronScheduler();
 
   // The optional LLM permission judge, built once if a settings file enabled it.
   const judge = CONFIG.judge.enabled ? new Judge(client, CONFIG.judge.model || CONFIG.model) : undefined;
@@ -514,6 +523,19 @@ async function main() {
         // pending, claimed, and done, and who owns what.
         const summary = boardSummary();
         console.log(summary === "(the task board is empty)" ? chalk.dim("(no tasks — the lead adds them with create_task; teammates claim them autonomously)") : chalk.dim(`task board:\n${summary}`));
+        return true;
+      }
+      case "/cron": {
+        // Scheduled cron jobs (schedule_cron): list all currently registered.
+        const jobs = listJobs();
+        if (!jobs.length) {
+          console.log(chalk.dim("(no cron jobs scheduled)"));
+        } else {
+          console.log(chalk.dim(`cron jobs (${jobs.length}):`));
+          for (const j of jobs) {
+            console.log(chalk.dim(`  ${j.id}  "${j.cron}"  → "${j.prompt}"${j.recurring ? " (recurring)" : " (one-shot)"}${j.durable ? " (durable)" : " (session-only)"}`));
+          }
+        }
         return true;
       }
       case "/stats":

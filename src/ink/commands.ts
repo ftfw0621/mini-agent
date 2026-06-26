@@ -7,6 +7,7 @@ import { getTodos, renderTodos } from "../todos.js";
 import { listBackground } from "../background.js";
 import { listTeam } from "../team.js";
 import { boardSummary } from "../board.js";
+import { listJobs } from "../cron.js"; // cron scheduler (Day s14)
 import { undoLast, sessionChanges } from "../undo.js";
 import { renderDiff } from "../diff.js";
 import type { CostMeter } from "../cost.js";
@@ -32,6 +33,7 @@ export const SESSION_HELP = `commands:
   /bg        list background tasks this session (run_bash_background) and their status
   /team      list the agent team (spawn_teammate): each teammate's role, status, and pending inbox
   /tasks     show the shared task board (create_task/claim_task): each task's status, owner, and dependencies
+  /cron      list scheduled cron jobs (schedule_cron) and their expressions
   /undo      revert the most recent file write (write_file / edit_file) this session
   /diff      show every file changed this session, as a diff from where it started
   /resume    list recent sessions in this project and continue one of them
@@ -90,6 +92,12 @@ export function runInfoCommand(line: string, ctx: { skills: Skill[]; costMeter: 
     case "/tasks": {
       const summary = boardSummary();
       return summary === "(the task board is empty)" ? chalk.dim("(no tasks — the lead adds them with create_task; teammates claim them autonomously)") : chalk.dim(`task board:\n${summary}`);
+    }
+
+    case "/cron": {
+      const jobs = listJobs();
+      if (!jobs.length) return chalk.dim("(no cron jobs scheduled)");
+      return chalk.dim(`cron jobs (${jobs.length}):\n`) + jobs.map((j) => chalk.dim(`  ${j.id}  "${j.cron}"  → "${j.prompt}"${j.recurring ? " (recurring)" : " (one-shot)"}${j.durable ? " (durable)" : " (session-only)"}`)).join("\n");
     }
 
     case "/skills": {

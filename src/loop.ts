@@ -17,6 +17,7 @@ import { recordToolCall, recordReasoning } from "./tui.js"; // folded tool-call 
 import { type LoopOutput, type AnswerSink, STDOUT_OUTPUT } from "./output.js"; // where the loop's screen output goes (stdout by default, Ink REPL passes its own)
 import { todoNag, getTodos, renderTodos } from "./todos.js"; // the agent's plan: show it on screen + nag when it goes stale
 import { pendingNotifications } from "./background.js"; // background tasks (Day 37): surface finished jobs as a turn
+import { consumeCronQueue, cronItemsPending, startCronScheduler, loadDurableJobs } from "./cron.js"; // cron scheduler (Day s14): scheduled, recurring work
 
 export const MAX_RETRIES = 10; // total failed API calls per query, across all rounds
 export const MAX_RATE_LIMIT_RETRIES = 3; // 429s get their own, much smaller budget
@@ -1004,6 +1005,33 @@ async function tryCompact(
 // Top-level only: a sub-agent has no separate turn loop to inject into, and the
 // notification belongs to the agent that started the job. Returns true if it
 // injected something. Each finished task notifies exactly once (background.ts).
+// Cron queue consumer: drain triggered cron jobs into the messages array.
+// The scheduler thread writes to cron_queue independently; we drain it here
+// before each round. Sub-agents do not process cron — the top-level does.
+function injectCronMessages(messages: OpenAI.ChatCompletionMessageParam[], opts: LoopOptions): boolean {
+  if (opts.subAgent) return false; // sub-agents don't process cron
+  if (!cronItemsPending()) return false;
+  const fired = consumeCronQueue();
+  let count = 0;
+  for (const job of fired) {
+    const content = [
+      `[Cron job "${job.id}" triggered — ${job.cron}]`,
+      ``,
+      `${job.prompt}`,
+      ``,
+      `Execute this now. When done, report the result directly to the user — make it visible and clear.`,
+      `If the task produces output (e.g. a shell command result, a file change, a value), show it.`,
+      `If there's nothing to show, confirm success with one line.`,
+      ``,
+      `After this, return to idle — do NOT start additional work unless the user asked for a chain of follow-ups.`,
+    ].join("\n");
+    messages.push({ role: "user", content });
+    count++;
+  }
+  if (count && !opts.quiet) sink(opts).note(chalk.cyan(`⏰ cron: ${count} job${count > 1 ? "s" : ""} fired`));
+  return count > 0;
+}
+
 function injectBackgroundNotifications(messages: OpenAI.ChatCompletionMessageParam[], opts: LoopOptions): boolean {
   if (opts.subAgent) return false; // notifications belong to the top-level conversation
   const note = pendingNotifications(); // "" unless a task finished since we last checked
@@ -1244,6 +1272,7 @@ export async function runLoop(
         // model decided to stop. Don't return with an unread result on the table:
         // surface it and run one more round so the model can react. Each notifies
         // once, so this adds at most one round per finished job — never infinite.
+        if (injectCronMessages(messages, opts)) break; // cron triggered → run another round
         if (injectBackgroundNotifications(messages, opts)) break; // exit the inner while → advance the round counter
         if (injectSubAgentResults(messages, opts)) break;
         // Agent teams (Day 38/39): the lead waits for teammate messages and
@@ -1283,6 +1312,10 @@ export async function runLoop(
       if (!opts.quiet && out.toolCalls.length) {
         sink(opts).note(agentIndent(opts) + mark.toolTally(out.toolCalls.map((c) => c.name)) + chalk.dim(" · Ctrl+T"));
       }
+
+      // Cron (Day s14): deliver any triggered scheduled jobs right after this
+      // round's results so the model sees them on the next round.
+      injectCronMessages(messages, opts);
 
       // Background tasks (Day 37): if a job the model started has finished, slip
       // its <task_notification> in here, right after this round's tool results —

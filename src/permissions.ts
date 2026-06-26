@@ -124,6 +124,7 @@ function planSafe(toolName: string, verdict: Verdict): boolean {
     case "skill": // loading a skill's instructions is read-only; what it does is gated per-call
     case "todo_write": // planning is exactly what plan mode is FOR — never block it
     case "bash_output": // reading a background task's output observes, never mutates
+    case "list_crons": // listing cron jobs is read-only
     case "exit_plan_mode": // the way OUT of plan mode must never be blocked by plan mode
       return true;
     case "run_bash":
@@ -246,6 +247,16 @@ function basePermission(toolName: string, argsJson: string): Verdict {
       // Polling a background task only reads its captured output and status —
       // it touches nothing on the user's filesystem. Always safe.
       return { decision: "allow", reason: "reads background task output, no side effects", summary: args.task_id ?? "bash_output" };
+    case "schedule_cron":
+      // Scheduling a cron job writes to .mini-agent/scheduled_tasks.json and
+      // drives future work — worth a confirmation prompt.
+      return { decision: "ask", reason: "schedules a recurring task", summary: `${args.cron ?? ""} → ${args.prompt ?? ""}` };
+    case "list_crons":
+      // Listing cron jobs reads in-memory state only — no side effects.
+      return { decision: "allow", reason: "read-only, no side effects", summary: "list_crons" };
+    case "cancel_cron":
+      // Cancelling a cron job modifies internal state and may write to disk.
+      return { decision: "ask", reason: "cancels a scheduled task", summary: args.id ?? "cancel_cron" };
     case "exit_plan_mode": {
       // Outside plan mode this tool does nothing — let it through silently. In
       // plan mode it is the approval gate: ask the human, showing the plan, and

@@ -8,6 +8,7 @@ import { setPlanMode } from "./permissions.js"; // plan mode (Day 20): exit_plan
 import { recordMutation } from "./undo.js"; // capture the before-state so /undo (Day 22) can restore it
 import { parseTodos, setTodos, summarizeTodos } from "./todos.js"; // the agent's own checklist (Day 36)
 import { startBackground, readBackground } from "./background.js"; // long-running commands that outlive the turn (Day 37)
+import { scheduleJob, cancelJob, listJobs } from "./cron.js"; // cron scheduler (Day s14): scheduled, recurring work
 
 // ============ Session state ============
 // The foundation of "read before edit": which files has this session actually read?
@@ -309,6 +310,75 @@ Boundaries & permissions are identical to run_bash (dangerous commands are still
 // runs forever (npm run dev) never "finishes", so the only way to see "ready on
 // :3000" is to read its output. Reading advances a per-task cursor, so repeated
 // polls show only what's new, not the whole log every time.
+// ============ schedule_cron (Day s14) ============
+const scheduleCron: Tool = {
+  definition: def(
+    "schedule_cron",
+    `Schedule a recurring or one-shot task in the BACKGROUND using a 5-field cron expression.
+Boundaries: max 50 jobs; the scheduler checks every second and delivers the prompt when the cron matches.
+Cron format: minute hour day-of-month month day-of-week. Supports *, */N, N, N-M, N,M,….
+Examples: "0 9 * * *" = every day at 9:00; "*/5 * * * *" = every 5 minutes; "0 9 * * 1-5" = weekdays at 9:00.
+
+IMPORTANT — the "prompt" parameter is what you (the agent) will receive when the job fires.
+Put the user's FULL INTENT here — a complete self-contained instruction that tells you what to do.
+Do NOT just repeat the cron expression — describe the actual task in natural language, as if the user
+was saying it to you directly. Include what to execute, what to check, and how to report back.
+
+Examples of good prompts:
+  "Print 'ftfw' to the terminal by running echo ftfw, then report the output."
+  "Run 'npm test' and report how many tests passed/failed."
+  "Check if the dev server on :3000 is reachable via curl, report UP or DOWN."
+  "Check disk usage with df -h, report the / partition usage percentage."`,
+    {
+      cron: { type: "string", description: '5-field cron expression: "0 9 * * *" = daily at 9am, "*/5 * * * *" = every 5 min' },
+      prompt: { type: "string", description: "The FULL task instruction you will receive when this fires — a self-contained description of what to do and how to report results" },
+      recurring: { type: "string", description: '"true" (default) = repeat, "false" = one-shot' },
+      durable: { type: "string", description: '"true" (default) = persist to disk, "false" = session-only' },
+    },
+    ["cron", "prompt"],
+  ),
+  run: (args) => {
+    const recurring = args.recurring !== "false";
+    const durable = args.durable !== "false";
+    const result = scheduleJob(args.cron, args.prompt, recurring, durable);
+    if (typeof result === "string") {
+      return `Scheduled cron job ${result}: "${args.cron}" → "${args.prompt}"${recurring ? " (recurring)" : " (one-shot)"}${durable ? " (durable)" : " (session-only)"}`;
+    }
+    return fail(result.error);
+  },
+};
+
+// ============ list_crons (Day s14) ============
+const listCrons: Tool = {
+  definition: def(
+    "list_crons",
+    "List all currently scheduled cron jobs (both durable and session-only). Returns id, cron expression, prompt, and flags.",
+    {},
+    [],
+  ),
+  run: () => {
+    const jobs = listJobs();
+    if (!jobs.length) return "No cron jobs scheduled.";
+    return jobs
+      .map((j) => `${j.id}: "${j.cron}" → "${j.prompt}"${j.recurring ? " (recurring)" : " (one-shot)"}${j.durable ? " (durable)" : " (session-only)"}`)
+      .join("\n");
+  },
+};
+
+// ============ cancel_cron (Day s14) ============
+const cancelCron: Tool = {
+  definition: def(
+    "cancel_cron",
+    "Cancel a scheduled cron job by its id (from list_crons). Returns whether the job was found and removed.",
+    { id: { type: "string", description: "The cron job id to cancel, e.g. 'cron_1'" } },
+    ["id"],
+  ),
+  run: (args) => {
+    const ok = cancelJob(args.id);
+    return ok ? `Cancelled cron job ${args.id}.` : fail(`Cron job not found: ${args.id}. Use list_crons to see scheduled jobs.`);
+  },
+};
+
 const bashOutput: Tool = {
   definition: def(
     "bash_output",
@@ -403,6 +473,9 @@ export const tools: Record<string, Tool> = {
   run_bash: runBash,
   run_bash_background: runBashBackground,
   bash_output: bashOutput,
+  schedule_cron: scheduleCron,
+  list_crons: listCrons,
+  cancel_cron: cancelCron,
   exit_plan_mode: exitPlanMode,
   todo_write: todoWrite,
 };

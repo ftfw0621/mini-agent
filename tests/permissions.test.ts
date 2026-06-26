@@ -79,6 +79,12 @@ expectVerdict("bg .env still denied", "run_bash_background", { command: "cat .en
 expectVerdict("bg rm asks", "run_bash_background", { command: "rm old.txt" }, "ask");
 expectVerdict("bash_output always allowed", "bash_output", { task_id: "bg_1" }, "allow");
 
+// ---- cron scheduler (Day s14) ----------------------------------------------------------------
+// list_crons is read-only; schedule_cron/cancel_cron modify internal state + disk.
+expectVerdict("list_crons always allowed", "list_crons", {}, "allow");
+expectVerdict("schedule_cron asks", "schedule_cron", { cron: "0 9 * * *", prompt: "morning report" }, "ask");
+expectVerdict("cancel_cron asks", "cancel_cron", { id: "cron_1" }, "ask");
+
 // ---- user-configured rules (settings files) -----------------------------------------------------
 // The test seam: CONFIG.permissions is intentionally mutable so suites can
 // inject rules without writing temp settings files.
