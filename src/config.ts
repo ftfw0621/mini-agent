@@ -31,15 +31,31 @@ export interface HookDef {
   timeoutMs?: number; // kill the hook after this long (default 10s)
 }
 
-// One MCP server: a process we spawn and speak JSON-RPC to over stdio. Its tools
-// are discovered at startup and exposed to the model as mcp__<server>__<tool>.
+// OAuth client settings for an HTTP MCP server. Most servers (Linear, GitHub…)
+// support Dynamic Client Registration, so nothing needs to be configured: the
+// agent registers itself on first /mcp auth. Some (Slack) do NOT offer DCR and
+// instead publish a pre-registered public client id + a fixed callback port —
+// the same shape Claude Code's plugin config uses, so an entry can be copied over.
+export interface McpOAuthDef {
+  clientId?: string; // pre-registered client id — when set, dynamic client registration is skipped
+  clientSecret?: string; // its secret, if the server issued one (MCP clients are usually public: no secret)
+  callbackPort?: number; // fixed loopback port for the redirect URI http://localhost:<port>/callback (the registered redirect must match)
+  scopes?: string[]; // explicit scopes to request; default: what the server's resource metadata advertises
+}
+
+// One MCP server: a process we spawn and speak JSON-RPC to over stdio, or a URL
+// we POST to. Its tools are discovered at startup and exposed to the model as
+// mcp__<server>__<tool>.
 export interface McpServerDef {
   // A server is reached EITHER by spawning a subprocess (stdio) OR over HTTP.
+  // The transport is chosen from the fields present (url → http, else stdio).
+  type?: "stdio" | "http"; // accepted so an entry copied from Claude Code's config parses as-is; informational only
   command?: string; // stdio: executable, e.g. "npx"
   args?: string[]; // stdio: arguments, e.g. ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
   env?: Record<string, string>; // stdio: extra environment variables for the server
   url?: string; // http: the server endpoint, e.g. "https://example.com/mcp" — when set, HTTP transport is used
-  headers?: Record<string, string>; // http: extra request headers (e.g. an Authorization bearer token)
+  headers?: Record<string, string>; // http: extra request headers (e.g. a static Authorization bearer token)
+  oauth?: McpOAuthDef; // http: OAuth client settings for servers without dynamic client registration
 }
 
 // What a settings file may contain. Unknown keys are ignored.

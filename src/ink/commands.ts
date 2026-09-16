@@ -10,6 +10,7 @@ import { boardSummary } from "../board.js";
 import { listJobs } from "../cron.js"; // cron scheduler (Day s14)
 import { undoLast, sessionChanges } from "../undo.js";
 import { renderDiff } from "../diff.js";
+import type { McpServerInfo } from "../mcp.js"; // /mcp status labels
 import type { CostMeter } from "../cost.js";
 import type { Skill } from "../skills.js";
 
@@ -28,6 +29,7 @@ export const SESSION_HELP = `commands:
   /stats     event counts for this session (local telemetry — nothing leaves this machine)
   /memory    show the durable facts the agent remembers about this project
   /cost      tokens, cache hit rate and estimated spend this session (local)
+  /mcp       list configured MCP servers + status; select one to authenticate / reconnect / disable
   /plan      toggle plan mode — research-only; the agent presents a plan you approve before any change
   /todos     show the agent's current task plan (it maintains one with todo_write on multi-step work)
   /bg        list background tasks this session (run_bash_background) and their status
@@ -44,6 +46,20 @@ export const SESSION_HELP = `commands:
 keys (at the prompt):
   Ctrl+R     reveal the model's thinking for the last answer (collapsed behind a spinner by default)
   Ctrl+T     reveal the folded tool-call trace for the last answer`;
+
+// Colored status word for an MCP server (shared by the Ink + readline /mcp UIs).
+export function mcpStatusText(info: McpServerInfo): string {
+  switch (info.status) {
+    case "connected":
+      return chalk.green("connected");
+    case "needs-auth":
+      return chalk.yellow("needs auth");
+    case "failed":
+      return chalk.red("failed");
+    case "disabled":
+      return chalk.dim("disabled");
+  }
+}
 
 // Run a non-interactive command. Returns the note text to display, or null if
 // `line` isn't one of these (the App handles the rest).

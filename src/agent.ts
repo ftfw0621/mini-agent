@@ -8,10 +8,11 @@ import { runLoop, TerminateReason, MAX_RETRIES, type LoopResult, killAllSubAgent
 import { buildSystemMessage } from "./prompt.js"; // the constitution + optional AGENT.md project memory
 import { forgetFilesExcept, registerExternalTool } from "./tools.js"; // file-state reset + tool registration
 import { compactHistory, estimateHistoryTokens, COMPACT_AT } from "./context.js"; // for the manual /compact command
-import { newSessionId, saveSession, latestSession, listSessions, loadSession } from "./session.js"; // conversation persistence (project-local) + the /resume picker
+import { newSessionId, saveSession, latestSession, listSessions, loadSession, setSessionTitle } from "./session.js"; // conversation persistence (project-local) + the /resume picker
+import { generateSessionTitle } from "./title.js"; // concise session name, generated after the first message
 import { initTelemetry, emit, statsReport } from "./telemetry.js"; // local-only event log + /stats
 import { runHooks } from "./hooks.js"; // SessionStart lifecycle hook
-import { connectMcpServers } from "./mcp.js"; // external tool servers (MCP)
+import { connectMcpServers, listMcpServers, mcpActionsFor, runMcpAction } from "./mcp.js"; // external tool servers (MCP) + /mcp
 import { Judge } from "./judge.js"; // optional LLM permission classifier
 import { isPlanMode, setPlanMode } from "./permissions.js"; // plan mode: research-only until the user approves a plan
 import { undoLast, clearUndo, sessionChanges } from "./undo.js"; // /undo + /diff: take back, or review, this session's writes
@@ -75,6 +76,7 @@ const SESSION_HELP = `commands:
   /stats     event counts for this session (local telemetry — nothing leaves this machine)
   /memory    show the durable facts the agent remembers about this project
   /cost      tokens, cache hit rate and estimated spend this session (local)
+  /mcp       list configured MCP servers + status; select one to authenticate / reconnect / disable
   /plan      toggle plan mode — research-only; the agent presents a plan you approve before any change
   /todos     show the agent's current task plan (it maintains one with todo_write on multi-step work)
   /bg        list background tasks this session (run_bash_background) and their status
@@ -213,6 +215,8 @@ async function main() {
   let running = false; // is a task currently executing?
   let interrupted = false; // has the current task been interrupted?
   let controller = new AbortController(); // aborts the in-flight API request
+  let titleAttempted = false; // one-shot: name the session once, after the first real message
+  let pendingTitle: string | undefined; // the generated title, passed into the next save
 
   // ---- One-shot print mode -------------------------------------------------------
   // The same loop, the same permission gate (fail closed without a TTY), no REPL.
@@ -421,6 +425,51 @@ async function main() {
     apply(models[choice]); // picker is session-only too; "/model save <name>" to persist
   };
 
+  // /mcp — list configured MCP servers + status, then manage one (like Claude Code).
+  const mcpStatusText = (status: string): string =>
+    status === "connected" ? chalk.green("connected") : status === "needs-auth" ? chalk.yellow("needs auth") : status === "failed" ? chalk.red("failed") : chalk.dim("disabled");
+
+  const handleMcpCommand = async (arg: string): Promise<void> => {
+    const parts = arg.trim().split(/\s+/).filter(Boolean);
+    if (parts.length >= 2 && ["reconnect", "auth", "authenticate", "enable", "disable"].includes(parts[0])) {
+      const name = parts.slice(1).join(" ");
+      const action = parts[0] === "auth" || parts[0] === "authenticate" ? "authenticate" : (parts[0] as "reconnect" | "enable" | "disable");
+      try {
+        console.log(chalk.dim(await runMcpAction(name, action, (url) => console.log(chalk.dim(`authenticate in your browser: ${url}`)))));
+      } catch (err) {
+        console.log(chalk.yellow((err as Error).message));
+      }
+      return;
+    }
+
+    const servers = listMcpServers();
+    if (!servers.length) {
+      console.log(chalk.dim("(no MCP servers configured — add an mcpServers map to .mini-agent/settings.json or ~/.config/mini-agent/settings.json)"));
+      return;
+    }
+    console.log(chalk.dim("MCP servers:"));
+    const labels = servers.map((s) => `${s.name}  ·  ${mcpStatusText(s.status)}${s.tools ? `  ·  ${s.tools} tool${s.tools === 1 ? "" : "s"}` : ""}${s.transport === "http" ? "  ·  http" : "  ·  stdio"}`);
+    for (const label of labels) console.log(chalk.dim(`  ${label}`));
+    if (!process.stdin.isTTY) return;
+    const choice = await promptSelect(rl, labels.map((l) => l.replace(/  ·  /g, " — ")));
+    if (choice < 0) {
+      console.log(chalk.dim("(cancelled)"));
+      return;
+    }
+    const server = servers[choice];
+    const actions = mcpActionsFor(server);
+    const actionChoice = await promptSelect(rl, actions.map((a) => a.label));
+    if (actionChoice < 0) {
+      console.log(chalk.dim("(cancelled)"));
+      return;
+    }
+    try {
+      console.log(chalk.dim(await runMcpAction(server.name, actions[actionChoice].action, (url) => console.log(chalk.dim(`authenticate in your browser: ${url}`)))));
+    } catch (err) {
+      console.log(chalk.yellow((err as Error).message));
+    }
+  };
+
   // Handle a /slash command. Returns true if the line was a command.
   const handleCommand = async (line: string): Promise<boolean> => {
     // /model takes an optional argument (/model <name>), so it can't be a plain
@@ -453,6 +502,11 @@ async function main() {
       if (r.reason !== TerminateReason.Done) console.log(chalk.yellow(`\n⚠️ ${EXIT_NOTES[r.reason]}`));
       return true;
     }
+    // /mcp [reconnect|auth|enable|disable <name>]
+    if (line === "/mcp" || line.startsWith("/mcp ")) {
+      await handleMcpCommand(line.slice("/mcp".length).trim());
+      return true;
+    }
     switch (line) {
       case "/skills": {
         if (!skills.length) {
@@ -479,6 +533,8 @@ async function main() {
         clearReasoning(); // drop the collapsed thinking too
         clearToolCalls(); // ...and the folded tool-call trace
         sessionId = newSessionId(); // a fresh conversation is a fresh session file
+        titleAttempted = false; // a fresh session gets its own title on its first message
+        pendingTitle = undefined;
         console.log(chalk.dim("(history cleared)")); // confirm the reset
         return true;
       case "/todos": {
@@ -603,6 +659,8 @@ async function main() {
         }
         messages = [{ role: "system", content: systemMessage }, ...chosen.messages]; // fresh constitution + saved turns
         sessionId = chosen.id; // keep appending to the resumed session's file
+        titleAttempted = false; // a resumed session without a title gets one on its next message
+        pendingTitle = chosen.title;
         forgetFilesExcept([]); // a resumed conversation must re-read files before editing them
         clearUndo(); // the previous session's writes are not ours to undo
         clearTodos(); // the resumed task starts without the old session's stale plan
@@ -725,6 +783,23 @@ async function main() {
     if (attached.length) console.log(chalk.dim(`(attached ${attached.length} file${attached.length === 1 ? "" : "s"}: ${attached.join(", ")})`));
     if (refused.length) console.log(chalk.yellow(`(refused secret file${refused.length === 1 ? "" : "s"}: ${refused.join(", ")})`));
 
+    // Name the session once, after the first real user message. Same as the Ink
+    // REPL: a cheap model call distills the prompt into a 3-7 word title, fired
+    // and forgotten so it never delays the turn; a failure leaves the raw prompt.
+    if (!titleAttempted) {
+      titleAttempted = true;
+      if (!loadSession(sessionId)?.title) {
+        void generateSessionTitle(client, CONFIG.subAgentModel || CONFIG.model, line)
+          .then((title) => {
+            if (title) {
+              pendingTitle = title;
+              setSessionTitle(sessionId, title);
+            }
+          })
+          .catch(() => {});
+      }
+    }
+
     messages.push({ role: "user", content: augmented + injected }); // the new turn (with any attached files + hook context) joins the shared history
     clearReasoning(); // Ctrl+R should reveal THIS turn's thinking, not the previous answer's
     clearToolCalls(); // ...and Ctrl+T should reveal THIS turn's tool calls
@@ -743,7 +818,7 @@ async function main() {
       judge, // optional LLM classifier for the "ask" middle ground
     });
     running = false; // back at the prompt — Ctrl+C means "exit" again
-    saveSession(sessionId, CONFIG.model, messages); // snapshot after every turn — crash-safe by construction
+    saveSession(sessionId, CONFIG.model, messages, pendingTitle); // snapshot after every turn — crash-safe by construction
 
     // Auto-extract memories (opt-in: settings.memory.autoExtract). A cheap pass
     // that saves durable facts — especially user corrections — so memory

@@ -17,6 +17,7 @@ interface SessionFile {
   savedAt: string; // ISO timestamp of the last save
   model: string; // which model the session ran on (informational)
   messages: OpenAI.ChatCompletionMessageParam[]; // the conversation, WITHOUT the system message
+  title?: string; // optional concise title (generated after the first message); falls back to the first prompt
 }
 
 // A fresh, filename-safe session id derived from the wall clock.
@@ -28,22 +29,40 @@ export function newSessionId(): string {
 // history is not append-only — compaction rewrites it — so a snapshot is the
 // only representation that is always correct. Crash mid-write leaves the
 // previous snapshot intact.
-export function saveSession(id: string, model: string, messages: OpenAI.ChatCompletionMessageParam[]): void {
+export function saveSession(id: string, model: string, messages: OpenAI.ChatCompletionMessageParam[], title?: string): void {
   const dir = sessionsDir();
   fs.mkdirSync(dir, { recursive: true }); // first save creates the directory
   const file = path.join(dir, `${id}.json`); // the real destination
-  const existing = fs.existsSync(file) ? (JSON.parse(fs.readFileSync(file, "utf8")) as SessionFile) : null; // to preserve startedAt
+  const existing = fs.existsSync(file) ? (JSON.parse(fs.readFileSync(file, "utf8")) as SessionFile) : null; // to preserve startedAt + title
   const data: SessionFile = {
     id,
     startedAt: existing?.startedAt ?? new Date().toISOString(), // first save stamps it, later saves keep it
     savedAt: new Date().toISOString(), // always refreshed
     model, // informational — resume does not force the same model
+    title: title ?? existing?.title, // a generated title sticks across saves
     messages: messages.filter((m) => m.role !== "system"), // the constitution is rebuilt fresh on resume (AGENT.md may have changed)
   };
   const tmp = `${file}.tmp`; // write next to the destination (same filesystem → rename is atomic)
   fs.writeFileSync(tmp, JSON.stringify(data)); // the new snapshot
   fs.renameSync(tmp, file); // atomic swap
   prune(); // keep the directory bounded
+}
+
+// Overwrite just the title of an existing session. Used when the title model
+// finishes AFTER the first save — the next saveSession would otherwise drop it.
+export function setSessionTitle(id: string, title: string): void {
+  const file = path.join(sessionsDir(), `${id}.json`);
+  let s: SessionFile;
+  try {
+    s = JSON.parse(fs.readFileSync(file, "utf8")) as SessionFile;
+  } catch {
+    return; // the session hasn't been saved yet — the title will land on the next save
+  }
+  s.title = title;
+  s.savedAt = new Date().toISOString(); // a title is a change; keep the list ordering honest
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(s)); // atomic, same as saveSession
+  fs.renameSync(tmp, file);
 }
 
 // Session files on disk, newest (most recently saved) first. Shared by every
@@ -82,7 +101,8 @@ export function loadSession(id: string): SessionFile | null {
 // A one-line, human-readable title for a session: the first thing the user
 // actually typed, with any @file attachment block stripped off and the text
 // flattened to a single trimmed line. This is what makes a session list
-// pickable instead of a wall of timestamps.
+// pickable instead of a wall of timestamps. It's the FALLBACK when no concise
+// generated title has been stored (see saveSession title + setSessionTitle).
 export function sessionTitle(messages: OpenAI.ChatCompletionMessageParam[]): string {
   const firstUser = messages.find((m) => m.role === "user");
   let text = typeof firstUser?.content === "string" ? firstUser.content : "";
@@ -108,7 +128,7 @@ export function listSessions(limit = 10): SessionSummary[] {
     if (out.length >= limit) break;
     try {
       const s = JSON.parse(fs.readFileSync(path.join(sessionsDir(), f), "utf8")) as SessionFile;
-      out.push({ id: s.id, savedAt: s.savedAt, model: s.model, messageCount: s.messages.length, title: sessionTitle(s.messages) });
+      out.push({ id: s.id, savedAt: s.savedAt, model: s.model, messageCount: s.messages.length, title: s.title ?? sessionTitle(s.messages) });
     } catch {
       /* skip a corrupt file */
     }

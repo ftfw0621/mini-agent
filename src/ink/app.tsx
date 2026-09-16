@@ -16,7 +16,8 @@ import { clearReasoning, clearToolCalls, getReasoning, getToolCalls, cleanup as 
 import { expandMentions } from "../mentions.js"; // @file mentions → attach file contents
 import { normalizeDroppedPaths } from "../drop.js"; // drag-and-drop a file → its absolute path in the input
 import { cronItemsPending, consumeCronQueue, cronTriggerContent } from "../cron.js"; // cron scheduler (Day s14): fire scheduled jobs autonomously while idle
-import { newSessionId, saveSession, listSessions, loadSession } from "../session.js";
+import { newSessionId, saveSession, listSessions, loadSession, setSessionTitle } from "../session.js";
+import { generateSessionTitle } from "../title.js"; // concise session name, generated after the first message
 import { isPlanMode, setPlanMode } from "../permissions.js";
 import { findSkill, skillInstructions } from "../skills.js";
 import { extractMemories } from "../memory.js";
@@ -24,7 +25,8 @@ import { displayWidth } from "../editor.js"; // display-width measurement (CJK-a
 import { runHooks } from "../hooks.js";
 import { emit } from "../telemetry.js";
 import { makeInkSink, type Item } from "./sink.js"; // turns the loop's output into React state
-import { runInfoCommand, SESSION_HELP } from "./commands.js"; // the non-interactive slash commands
+import { runInfoCommand, SESSION_HELP, mcpStatusText } from "./commands.js"; // the non-interactive slash commands + /mcp status
+import { listMcpServers, mcpActionsFor, runMcpAction } from "../mcp.js"; // /mcp: list + per-server actions
 import type { TurnHooks } from "./chat.js"; // what one turn needs from the App
 import type { InkSession } from "./setup.js"; // the bootstrapped session context
 
@@ -167,6 +169,8 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
   const sink = useRef(makeInkSink({ setStatus, setLive, pushItem })).current;
   const history = useRef<string[]>([]).current; // past prompts, for ↑/↓ recall
   const turn = useRef<{ controller: AbortController; interrupted: boolean } | null>(null); // the in-flight turn, for Esc-interrupt
+  const titleAttempted = useRef(false); // one-shot: name the session once, after the first real message
+  const pendingTitle = useRef<string | undefined>(undefined); // the generated title, passed into the next save
 
   useEffect(() => {
     const id = setInterval(() => setTick((t) => t + 1), 1000);
@@ -216,7 +220,7 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
     runTurn(content, hooks)
       .then(async (result: LoopResult) => {
         if (result.reason !== TerminateReason.Done) note(chalk.yellow(`⚠️ ${EXIT_NOTES[result.reason] ?? result.reason}`));
-        saveSession(sessionId, model, messages); // snapshot after every turn — crash-safe by construction
+        saveSession(sessionId, model, messages, pendingTitle.current); // snapshot after every turn — crash-safe by construction
         if (CONFIG.memory.autoExtract && result.reason === TerminateReason.Done) {
           try {
             const got = await extractMemories(client, CONFIG.subAgentModel || model, messages);
@@ -269,14 +273,81 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
     const refused = mentions.filter((m) => m.status === "denied").map((m) => m.raw);
     if (attached.length) note(chalk.dim(`(attached ${attached.length} file${attached.length === 1 ? "" : "s"}: ${attached.join(", ")})`));
     if (refused.length) note(chalk.yellow(`(refused secret file${refused.length === 1 ? "" : "s"}: ${refused.join(", ")})`));
+
+    // Name the session once, after the first real user message. A cheap model
+    // call distills the prompt into a 3-7 word title (like Claude Code's aiTitle);
+    // it runs fire-and-forget so it never delays the turn, and a failure just
+    // leaves the raw first prompt as the title. Resumed sessions that already
+    // have a title are left alone.
+    if (!titleAttempted.current) {
+      titleAttempted.current = true;
+      if (!loadSession(sessionId)?.title) {
+        void generateSessionTitle(client, CONFIG.subAgentModel || CONFIG.model, text)
+          .then((title) => {
+            if (title) {
+              pendingTitle.current = title;
+              setSessionTitle(sessionId, title);
+            }
+          })
+          .catch(() => {});
+      }
+    }
+
     runConversationTurn(augmented + injected, { kind: "user", text }); // show the original line; send the augmented content
   };
 
   // Handle a /slash command. Returns true if the line was a command (handled).
+  // /mcp — list configured servers + status, then pick one to manage it.
+  const handleMcpCommand = async (arg: string) => {
+    const parts = arg.trim().split(/\s+/).filter(Boolean);
+
+    // Direct subcommands (scriptable, matching Claude Code): /mcp reconnect|auth|enable|disable <name>
+    if (parts.length >= 2 && ["reconnect", "auth", "authenticate", "enable", "disable"].includes(parts[0])) {
+      const name = parts.slice(1).join(" ");
+      setBusy(true);
+      try {
+        const action = parts[0] === "auth" || parts[0] === "authenticate" ? "authenticate" : (parts[0] as "reconnect" | "enable" | "disable");
+        const msg = await runMcpAction(name, action, (url) => note(chalk.dim(`authenticate in your browser: ${url}`)));
+        note(chalk.dim(msg));
+      } catch (err) {
+        note(chalk.yellow((err as Error).message));
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+
+    const servers = listMcpServers();
+    if (!servers.length) {
+      note(chalk.dim("(no MCP servers configured — add an mcpServers map to .mini-agent/settings.json or ~/.config/mini-agent/settings.json)"));
+      return;
+    }
+    const labels = servers.map((s) => `${s.name}  ·  ${mcpStatusText(s)}${s.tools ? `  ·  ${s.tools} tool${s.tools === 1 ? "" : "s"}` : ""}${s.transport === "http" ? "  ·  http" : "  ·  stdio"}`);
+    openSelect("MCP servers (pick one to manage):", labels, (i) => {
+      if (i < 0) return note(chalk.dim("(cancelled)"));
+      const server = servers[i];
+      const actions = mcpActionsFor(server);
+      openSelect(`${server.name} — ${mcpStatusText(server)}`, actions.map((a) => a.label), (j) => {
+        if (j < 0) return note(chalk.dim("(cancelled)"));
+        setBusy(true);
+        runMcpAction(server.name, actions[j].action, (url) => note(chalk.dim(`authenticate in your browser: ${url}`)))
+          .then((msg) => note(chalk.dim(msg)))
+          .catch((err) => note(chalk.yellow((err as Error).message)))
+          .finally(() => setBusy(false));
+      });
+    });
+  };
+
   const handleCommand = async (line: string): Promise<boolean> => {
     const info = runInfoCommand(line, { skills, costMeter }); // /help /cost /memory /stats /todos /bg /team /tasks /skills /undo /diff
     if (info !== null) {
       note(info);
+      return true;
+    }
+
+    // /mcp [reconnect|auth|enable|disable <name>]
+    if (line === "/mcp" || line.startsWith("/mcp ")) {
+      await handleMcpCommand(line.slice("/mcp".length).trim());
       return true;
     }
 
@@ -346,6 +417,8 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
         clearReasoning();
         clearToolCalls();
         setSessionId(newSessionId());
+        titleAttempted.current = false; // a fresh session gets its own title on its first message
+        pendingTitle.current = undefined;
         note(chalk.dim("(history cleared)"));
         return true;
       case "/plan":
@@ -389,6 +462,8 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
           messages.length = 0;
           messages.push({ role: "system", content: systemMessage }, ...chosen.messages);
           setSessionId(chosen.id);
+          titleAttempted.current = false; // a resumed session without a title gets one on its next message
+          pendingTitle.current = chosen.title;
           forgetFilesExcept([]);
           clearUndo();
           clearTodos();

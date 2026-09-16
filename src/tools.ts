@@ -488,6 +488,12 @@ export function registerExternalTool(tool: Tool): void {
   tools[tool.definition.function.name] = tool;
 }
 
+// Remove an external tool by name (used when an MCP server is disconnected or
+// reconnected — its stale tools must never stay registered under the same name).
+export function unregisterExternalTool(name: string): void {
+  delete tools[name];
+}
+
 // The manuals sent to the model. A function (not a const) since Day 15: MCP
 // tools register after module load, so the list must be computed when asked.
 export function toolDefinitions(): OpenAI.ChatCompletionTool[] {
