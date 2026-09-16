@@ -9,7 +9,7 @@ import { buildSystemMessage } from "./prompt.js"; // the constitution + optional
 import { forgetFilesExcept, registerExternalTool } from "./tools.js"; // file-state reset + tool registration
 import { compactHistory, estimateHistoryTokens, COMPACT_AT } from "./context.js"; // for the manual /compact command
 import { newSessionId, saveSession, latestSession, listSessions, loadSession, setSessionTitle } from "./session.js"; // conversation persistence (project-local) + the /resume picker
-import { generateSessionTitle } from "./title.js"; // concise session name, generated after the first message
+import { generateSessionTitle, setTerminalTitle } from "./title.js"; // concise session name, generated after the first message + the terminal tab that shows it
 import { initTelemetry, emit, statsReport } from "./telemetry.js"; // local-only event log + /stats
 import { runHooks } from "./hooks.js"; // SessionStart lifecycle hook
 import { connectMcpServers, listMcpServers, mcpActionsFor, runMcpAction } from "./mcp.js"; // external tool servers (MCP) + /mcp
@@ -150,17 +150,20 @@ async function main() {
   // -r / --resume picks up the most recent one. The system message is NOT
   // restored from disk — it is rebuilt fresh, because AGENT.md may have changed.
   let sessionId = newSessionId(); // this session's identity (and file name)
+  let initialTitle: string | undefined; // only a resumed session has one already
   const sessionStartedAt = Date.now(); // for the status line's elapsed clock
   if (argv.includes("-r") || argv.includes("--resume")) {
     const prev = latestSession(); // newest snapshot in this directory, if any
     if (prev) {
       messages.push(...prev.messages); // the old conversation joins the fresh constitution
       sessionId = prev.id; // keep appending to the same session file
+      initialTitle = prev.title;
       console.log(chalk.dim(`(resumed session ${prev.id} — ${prev.messages.length} messages; files must be re-read before editing)`));
     } else {
       console.log(chalk.dim("(no previous session here — starting fresh)")); // resume with nothing to resume is not an error
     }
   }
+  if (printTask === null) setTerminalTitle(initialTitle); // name the terminal tab from the start (a one-shot -p run leaves the tab alone)
   initTelemetry(sessionId); // arm the local event log (no-op under MINI_AGENT_NO_TELEMETRY=1)
   emit("agent_session_start", { mode: printTask !== null ? "print" : "repl" }); // how this session was started
 
@@ -535,6 +538,7 @@ async function main() {
         sessionId = newSessionId(); // a fresh conversation is a fresh session file
         titleAttempted = false; // a fresh session gets its own title on its first message
         pendingTitle = undefined;
+        setTerminalTitle(undefined); // the tab no longer describes the old conversation
         console.log(chalk.dim("(history cleared)")); // confirm the reset
         return true;
       case "/todos": {
@@ -661,6 +665,7 @@ async function main() {
         sessionId = chosen.id; // keep appending to the resumed session's file
         titleAttempted = false; // a resumed session without a title gets one on its next message
         pendingTitle = chosen.title;
+        setTerminalTitle(chosen.title ?? sessions[idx].title.slice(0, 40)); // the tab follows the resumed session (raw prompt if never titled)
         forgetFilesExcept([]); // a resumed conversation must re-read files before editing them
         clearUndo(); // the previous session's writes are not ours to undo
         clearTodos(); // the resumed task starts without the old session's stale plan
@@ -794,6 +799,7 @@ async function main() {
             if (title) {
               pendingTitle = title;
               setSessionTitle(sessionId, title);
+              setTerminalTitle(title); // and rename the terminal tab, like Claude Code does
             }
           })
           .catch(() => {});

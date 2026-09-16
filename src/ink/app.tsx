@@ -17,7 +17,7 @@ import { expandMentions } from "../mentions.js"; // @file mentions → attach fi
 import { normalizeDroppedPaths } from "../drop.js"; // drag-and-drop a file → its absolute path in the input
 import { cronItemsPending, consumeCronQueue, cronTriggerContent } from "../cron.js"; // cron scheduler (Day s14): fire scheduled jobs autonomously while idle
 import { newSessionId, saveSession, listSessions, loadSession, setSessionTitle } from "../session.js";
-import { generateSessionTitle } from "../title.js"; // concise session name, generated after the first message
+import { generateSessionTitle, setTerminalTitle } from "../title.js"; // concise session name, generated after the first message + the terminal tab that shows it
 import { isPlanMode, setPlanMode } from "../permissions.js";
 import { findSkill, skillInstructions } from "../skills.js";
 import { extractMemories } from "../memory.js";
@@ -177,6 +177,12 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
     return () => clearInterval(id);
   }, []);
 
+  // Name the terminal tab from the first frame: the resumed session's title,
+  // or just "mini-agent" until the first message earns a real one.
+  useEffect(() => {
+    setTerminalTitle(session.initialTitle);
+  }, [session.initialTitle]);
+
   // Open a one-of-N menu and run `onChoose` with the picked index (-1 = cancel).
   const openSelect = (header: string, options: string[], onChoose: (i: number) => void) => {
     setMenuSel(0);
@@ -287,6 +293,7 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
             if (title) {
               pendingTitle.current = title;
               setSessionTitle(sessionId, title);
+              setTerminalTitle(title); // and rename the terminal tab, like Claude Code does
             }
           })
           .catch(() => {});
@@ -419,6 +426,7 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
         setSessionId(newSessionId());
         titleAttempted.current = false; // a fresh session gets its own title on its first message
         pendingTitle.current = undefined;
+        setTerminalTitle(undefined); // the tab no longer describes the old conversation
         note(chalk.dim("(history cleared)"));
         return true;
       case "/plan":
@@ -464,6 +472,7 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
           setSessionId(chosen.id);
           titleAttempted.current = false; // a resumed session without a title gets one on its next message
           pendingTitle.current = chosen.title;
+          setTerminalTitle(chosen.title ?? sessions[i].title.slice(0, 40)); // the tab follows the resumed session (raw prompt if never titled)
           forgetFilesExcept([]);
           clearUndo();
           clearTodos();

@@ -34,6 +34,7 @@ export interface InkSession {
   messages: OpenAI.ChatCompletionMessageParam[]; // the whole conversation — mutated IN PLACE (so /clear etc. keep the same ref)
   systemMessage: string; // rebuilt fresh each session (AGENT.md may have changed); the constant prefix of `messages`
   initialSessionId: string;
+  initialTitle?: string; // a resumed session's stored title, so the terminal tab is named from the first frame
   startedAt: number;
   costMeter: CostMeter;
   skills: Skill[];
@@ -58,6 +59,7 @@ export async function buildInkSession(opts: { resume?: boolean } = {}): Promise<
 
   const notices: string[] = [];
   let sessionId = newSessionId();
+  let initialTitle: string | undefined; // only a resumed session has one already
   const startedAt = Date.now();
 
   if (opts.resume) {
@@ -65,6 +67,7 @@ export async function buildInkSession(opts: { resume?: boolean } = {}): Promise<
     if (prev) {
       messages.push(...prev.messages);
       sessionId = prev.id; // keep appending to the same file
+      initialTitle = prev.title;
       notices.push(`(resumed session ${prev.id} — ${prev.messages.length} messages; files must be re-read before editing)`);
     } else {
       notices.push("(no previous session here — starting fresh)");
@@ -126,6 +129,7 @@ export async function buildInkSession(opts: { resume?: boolean } = {}): Promise<
     messages,
     systemMessage,
     initialSessionId: sessionId,
+    initialTitle,
     startedAt,
     costMeter,
     skills,

@@ -5,6 +5,28 @@ import type OpenAI from "openai"; // the client is injected so title generation 
 // producing a 3-7 word sentence-case title, stored as the session's aiTitle).
 // It runs once, fire-and-forget, after the first real user message, so it never
 // blocks the turn and a failure silently falls back to the raw first prompt.
+//
+// The title has two consumers: the /resume picker (read from the session file)
+// and the TERMINAL TAB — the same OSC escape Claude Code uses to rename its tab
+// to "✳ <title>", so a row of sessions is tellable apart in the terminal's
+// sidebar/tabs without opening each one.
+
+const TAB_PREFIX = "✳ "; // the glyph Claude Code puts before its tab titles — familiar to anyone who has both open
+
+// The OSC 0 sequence that sets a terminal's window/tab title. Pure so the
+// escape framing is unit-testable; newlines and control bytes are stripped so a
+// malicious title can't inject a second escape.
+export function terminalTitleSequence(title: string): string {
+  const safe = title.replace(/[\x00-\x1f\x7f]/g, " ").replace(/\s+/g, " ").trim();
+  return `\x1b]0;${safe}\x07`;
+}
+
+// Rename the terminal tab. Silent when stdout isn't a terminal (pipes, tests,
+// print mode) — an escape sequence in a log file is just noise.
+export function setTerminalTitle(title: string | undefined): void {
+  if (!process.stdout.isTTY) return;
+  process.stdout.write(terminalTitleSequence(title ? `${TAB_PREFIX}${title}` : "mini-agent"));
+}
 
 // The prompt is quoted inside <prompt> tags and the system message says so
 // explicitly: sent bare, a chat-tuned model reads "有没有app能…?" as a question

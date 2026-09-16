@@ -1,4 +1,4 @@
-import { cleanSessionTitle } from "../src/title.js"; // the pure half of session naming
+import { cleanSessionTitle, terminalTitleSequence } from "../src/title.js"; // the pure half of session naming
 import { check, finish } from "./helpers.js"; // assertions
 
 // The model call itself is not under test (no network in the suite); what IS
@@ -21,5 +21,9 @@ check("a trailing comma is rejected too", cleanSessionTitle("Sure, here are a fe
 check("a long sentence is rejected", cleanSessionTitle("Investigate and fix the issue where the login button does not respond on mobile devices at all") === "");
 check("echoed wrapper is rejected", cleanSessionTitle("<prompt>fix the cart bug</prompt>") === "");
 check("empty reply is empty", cleanSessionTitle("   \n  ") === "");
+
+// ---- terminal tab title: OSC 0 framing, control bytes neutralised ------------------------
+check("tab title is an OSC 0 sequence", terminalTitleSequence("✳ Fix login") === "\x1b]0;✳ Fix login\x07");
+check("tab title strips control bytes (no escape injection)", terminalTitleSequence("a\x1b]0;evil\x07b\n") === "\x1b]0;a ]0;evil b\x07");
 
 finish();
