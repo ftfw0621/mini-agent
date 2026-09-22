@@ -1,9 +1,11 @@
+import { execFileSync } from "node:child_process";
 import type OpenAI from "openai";
 
 export interface ReviewAction {
+  callId?: string; // provenance of the untrusted observation
   tool: string;
   input: unknown;
-  outcome: "returned" | "denied" | "failed" | "skipped";
+  outcome: "returned" | "denied" | "auto_denied" | "failed" | "skipped";
   resultData?: unknown; // untrusted structured facts, NEVER new authorization
   resultDataOmitted?: true;
 }
@@ -49,8 +51,8 @@ export function reviewHistory(messages: readonly OpenAI.ChatCompletionMessagePar
     for (const call of message.tool_calls ?? []) {
       if (call.type !== "function" || !results.has(call.id)) continue;
       const result = results.get(call.id)!;
-      actions.push({ tool: call.function.name, input: projectInput(call.function.name, call.function.arguments),
-        outcome: /^\[follow-up\]/.test(result) ? "skipped" : /^\[(?:permission|hook)\]/.test(result) ? "denied" : /^\[error\]/.test(result) ? "failed" : "returned", ...resultEvidence(result) });
+      actions.push({ callId: call.id, tool: call.function.name, input: projectInput(call.function.name, call.function.arguments),
+        outcome: /^\[permission\] Auto-denied/.test(result) ? "auto_denied" : /^\[follow-up\]/.test(result) ? "skipped" : /^\[(?:permission|hook)\]/.test(result) ? "denied" : /^\[error\]/.test(result) ? "failed" : "returned", ...resultEvidence(result) });
     }
   }
   let bytes = 0;
@@ -62,4 +64,48 @@ export function reviewHistory(messages: readonly OpenAI.ChatCompletionMessagePar
     start--;
   }
   return { actions: actions.slice(start), omittedActions: (inherited?.omittedActions ?? 0) + start };
+}
+
+// Only identity facts cross the new policy boundary. Small JSON is not trusted
+// simply because it is small. Keep nesting for provenance, discard prose and
+// instruction-shaped fields; these observations still cannot authorize actions.
+export function ruleHistory(history: ReviewHistory): ReviewHistory {
+  const project = (value: unknown, depth = 0): unknown => {
+    if (depth > 6 || !value || typeof value !== "object") return undefined;
+    if (Array.isArray(value)) {
+      const entries = value.slice(0, 30).map((v) => project(v, depth + 1)).filter((v) => v !== undefined);
+      return entries.length ? entries : undefined;
+    }
+    const facts: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) {
+      if (/^(id|user_id|channel_id|name|display_name|real_name|email|username)$/.test(key)
+        && typeof item === "string" && item.length <= 200 && !/[\r\n]/.test(item)) facts[key] = item;
+      else if (/^(results|users|members|data|profile)$/.test(key)) {
+        const nested = project(item, depth + 1);
+        if (nested !== undefined) facts[key] = nested;
+      }
+    }
+    return Object.keys(facts).length ? facts : undefined;
+  };
+  return { ...history, actions: history.actions.map(({ resultData, ...action }) => {
+    const facts = project(resultData);
+    return { ...action, ...(facts === undefined ? {} : { resultData: facts }),
+      ...(resultData !== undefined && JSON.stringify(facts) !== JSON.stringify(resultData) ? { resultDataOmitted: true as const } : {}) };
+  }) };
+}
+
+// Read once at startup. Later tool edits to git config must not expand the set
+// of established destinations. Do not send URL credentials/query tokens.
+export function startupRemotes(cwd: string): { name: string; kind: "fetch" | "push"; url: string }[] {
+  try {
+    const output = execFileSync("git", ["config", "--get-regexp", "^remote\\..*\\.(url|pushurl)$"], { cwd, encoding: "utf8", timeout: 1000, stdio: ["ignore", "pipe", "ignore"] });
+    return output.trim().split("\n").flatMap((line) => {
+      const entry = /^remote\.(.+)\.(url|pushurl) (.+)$/.exec(line);
+      if (!entry) return [];
+      let value = entry[3];
+      try { const url = new URL(value); url.username = ""; url.password = ""; url.search = ""; url.hash = ""; value = url.toString(); }
+      catch { value = value.replace(/^[^@/]+@/, ""); }
+      return [{ name: entry[1], kind: entry[2] === "pushurl" ? "push" as const : "fetch" as const, url: value }];
+    });
+  } catch { return []; }
 }

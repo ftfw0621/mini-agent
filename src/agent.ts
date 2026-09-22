@@ -15,6 +15,8 @@ import { runHooks } from "./hooks.js"; // SessionStart lifecycle hook
 import { connectMcpServers, listMcpServers, mcpActionsFor, runMcpAction } from "./mcp.js"; // external tool servers (MCP) + /mcp
 import { Judge } from "./judge.js"; // optional LLM permission classifier
 import { AutoMode } from "./auto.js";
+import { effortMenu, setEffort } from "./effort.js";
+import { FollowUpQueue } from "./follow-up.js";
 import { reviewDebugCommand } from "./auto-debug.js";
 import { isPlanMode, setPlanMode } from "./permissions.js"; // plan mode: research-only until the user approves a plan
 import { undoLast, clearUndo, sessionChanges } from "./undo.js"; // /undo + /diff: take back, or review, this session's writes
@@ -61,6 +63,7 @@ In a session, type /help for the in-session commands.`;
 
 // What we tell the user for every way a query can end. No raw stack traces.
 const EXIT_NOTES: Record<Exclude<TerminateReason, TerminateReason.Done>, string> = {
+  [TerminateReason.ReviewLimit]: "Repeated automatic denials — stopped. Tell the agent how to proceed; prohibited actions were not executed.",
   [TerminateReason.CircuitBreaker]: "3 API failures in a row — stopping here instead of burning money.",
   [TerminateReason.RetryBudgetExhausted]: `${MAX_RETRIES} failed API calls in this query — giving up. Check your network and try again.`,
   [TerminateReason.RateLimitBudgetExhausted]: "The provider keeps rate-limiting us. Wait a minute, then try again.",
@@ -82,6 +85,7 @@ const SESSION_HELP = `commands:
   /cost      tokens, cache hit rate and estimated spend this session (local)
   /mcp       list configured MCP servers + status; select one to authenticate / reconnect / disable
   /plan      toggle plan mode — research-only; the agent presents a plan you approve before any change
+  /effort [level]  list/select the current model’s supported reasoning effort
   /auto      toggle auto mode — risky or uncertain actions still require approval
   /auto debug [on|off|status]  inspect permission reviewer requests and replies
   /todos     show the agent's current task plan (it maintains one with todo_write on multi-step work)
@@ -287,6 +291,7 @@ async function main() {
   // Bonus: in a terminal, lines typed while a task runs queue up as the next
   // commands instead of vanishing.
   const pendingLines: string[] = []; // lines that arrived before anyone asked
+  const followUps = new FollowUpQueue();
   const lineWaiters: ((line: string) => void)[] = []; // askers waiting for a line
   let stdinDone = false; // has stdin ended?
   const history: string[] = []; // past prompts, for ↑/↓ recall in the editor
@@ -348,7 +353,21 @@ async function main() {
   process.on("SIGINT", onSigint); // covers non-TTY runs
   rl.on("SIGINT", onSigint); // covers TTY raw mode, where readline swallows the signal itself
 
-  // Ask the human to approve a dangerous action — shares the session readline.
+  // Menus keep a text editor for follow-ups, sharing the session readline.
+  const enqueuePromptFollowUp = async (text: string): Promise<boolean> => {
+    if (!running) { pendingLines.push(text); return true; }
+    const hook = await runHooks("UserPromptSubmit", { prompt: text });
+    if (hook.block) return false;
+    const { augmented } = expandMentions(text);
+    followUps.enqueue({ text, content: augmented + (hook.stdout ? `\n\n[context added by a UserPromptSubmit hook]\n${hook.stdout}` : "") });
+    return true;
+  };
+  const select = async (options: string[]): Promise<number> => {
+    editing = true;
+    try { return await promptSelect(rl, options, process.stdin, enqueuePromptFollowUp); }
+    finally { editing = false; }
+  };
+
   // Fail closed: in a non-interactive session nobody can say yes, so the
   // answer is no. MINI_AGENT_AUTO_APPROVE=1 bypasses the QUESTION, but hard
   // denies were already enforced in permissions.ts before we get here.
@@ -366,7 +385,7 @@ async function main() {
     // option lets the user stop being asked about this tool for the session.
     const allowLabel = toolName ? `Yes, and don't ask again for ${toolName} this session` : "Yes, and don't ask again this session";
     const options = autoMode.enabled ? ["Yes, once", "No — let me tell the agent what to do instead"] : ["Yes", allowLabel, "No — let me tell the agent what to do instead"];
-    const choice = await promptSelect(rl, options);
+    const choice = await select(options);
     const approved = choice === 0 || (!autoMode.enabled && choice === 1);
     if (!autoMode.enabled && choice === 1 && toolName) {
       CONFIG.permissions.allow.push(`tool:${toolName}`); // remember the grant for the rest of the session
@@ -381,7 +400,9 @@ async function main() {
   // plain text instead.
   const askUser = async (questions: { question: string; options: string[] }[]) => {
     if (!process.stdin.isTTY) return null;
-    return promptForm(rl, questions);
+    editing = true;
+    try { return await promptForm(rl, questions, process.stdin, enqueuePromptFollowUp); }
+    finally { editing = false; }
   };
 
   // Ask the endpoint what models it serves (the OpenAI-compatible /models API).
@@ -436,7 +457,7 @@ async function main() {
       return;
     }
     console.log(chalk.dim("switch model (this session):"));
-    const choice = await promptSelect(rl, formatModelChoices(models, CONFIG.model));
+    const choice = await select(formatModelChoices(models, CONFIG.model));
     if (choice < 0 || models[choice] === CONFIG.model) {
       console.log(chalk.dim("(model unchanged)"));
       return;
@@ -470,14 +491,14 @@ async function main() {
     const labels = servers.map((s) => `${s.name}  ·  ${mcpStatusText(s.status)}${s.tools ? `  ·  ${s.tools} tool${s.tools === 1 ? "" : "s"}` : ""}${s.transport === "http" ? "  ·  http" : "  ·  stdio"}`);
     for (const label of labels) console.log(chalk.dim(`  ${label}`));
     if (!process.stdin.isTTY) return;
-    const choice = await promptSelect(rl, labels.map((l) => l.replace(/  ·  /g, " — ")));
+    const choice = await select(labels.map((l) => l.replace(/  ·  /g, " — ")));
     if (choice < 0) {
       console.log(chalk.dim("(cancelled)"));
       return;
     }
     const server = servers[choice];
     const actions = mcpActionsFor(server);
-    const actionChoice = await promptSelect(rl, actions.map((a) => a.label));
+    const actionChoice = await select(actions.map((a) => a.label));
     if (actionChoice < 0) {
       console.log(chalk.dim("(cancelled)"));
       return;
@@ -491,6 +512,24 @@ async function main() {
 
   // Handle a /slash command. Returns true if the line was a command.
   const handleCommand = async (line: string): Promise<boolean> => {
+    if (line.startsWith("/skills ")) line = `/skill ${line.slice(8).trim()}`;
+    if (line === "/effort" || line.startsWith("/effort ")) {
+      const target = CONFIG.model;
+      const value = line.slice("/effort".length).trim();
+      if (value) console.log(chalk.dim(setEffort(target, value)));
+      else {
+        const menu = effortMenu(target);
+        console.log(chalk.dim(menu.header));
+        if (menu.values.length) {
+          if (!process.stdin.isTTY) console.log(menu.labels.join("\n"));
+          else {
+            const selected = await select(menu.labels);
+            if (selected >= 0) console.log(chalk.dim(setEffort(target, menu.values[selected])));
+          }
+        }
+      }
+      return true;
+    }
     const debug = reviewDebugCommand(line);
     if (debug !== null) { console.log(chalk.dim(debug)); return true; }
     if (line === "/auto") {
@@ -522,7 +561,7 @@ async function main() {
       running = true;
       interrupted = false;
       controller = new AbortController();
-      const r = await runLoop(messages, { client, model: CONFIG.model, signal: controller.signal, isInterrupted: () => interrupted, confirm, askUser, subAgentModel: CONFIG.subAgentModel, judge, autoMode, canPrompt: !!process.stdin.isTTY });
+      const r = await runLoop(messages, { client, model: CONFIG.model, signal: controller.signal, isInterrupted: () => interrupted, confirm, askUser, followUps, onFollowUp: (text) => console.log(sentMessage(text)), subAgentModel: CONFIG.subAgentModel, judge, autoMode, canPrompt: !!process.stdin.isTTY });
       running = false;
       saveSession(sessionId, CONFIG.model, messages);
       if (r.reason !== TerminateReason.Done) console.log(chalk.yellow(`\n⚠️ ${EXIT_NOTES[r.reason]}`));
@@ -847,6 +886,8 @@ async function main() {
       isInterrupted: () => interrupted, // for stopping between steps
       confirm, // for permission prompts
       askUser, // the multi-question form the model can pop
+      followUps,
+      onFollowUp: (text) => console.log(sentMessage(text)),
       subAgentModel: CONFIG.subAgentModel, // delegated work may run on a different tier
       judge, // optional LLM classifier for the "ask" middle ground
       autoMode,

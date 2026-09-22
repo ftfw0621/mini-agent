@@ -2,6 +2,7 @@ import fs from "node:fs"; // reading .env and settings files
 import os from "node:os"; // home directory for the global settings path
 import path from "node:path"; // path joining
 import chalk from "chalk"; // colored error output
+import type { EffortProfile } from "./effort.js";
 
 // Minimal .env loader: lets `npx mini-agent` work in any directory that has a
 // .env file — no dotenv dependency, no --env-file flag to remember.
@@ -60,6 +61,7 @@ export interface McpServerDef {
 
 // What a settings file may contain. Unknown keys are ignored.
 interface SettingsFile {
+  effortProfiles?: Record<string, EffortProfile>;
   model?: string; // which model to call
   subAgentModel?: string; // model for delegated sub-agents (task tool); defaults to the main model
   baseURL?: string; // which OpenAI-compatible endpoint
@@ -78,6 +80,7 @@ interface SettingsFile {
     model?: string; // judge model (defaults to the main model); a cheaper one is ideal
   };
   autoMode?: {
+    policy?: "scores" | "rules"; // rules is opt-in until held-out live evaluation
     enabled?: boolean; // opt-in tool review: Jev with a key, current vendor otherwise
     model?: string; // Jev model only; the vendor fallback uses judge.model or model
   };
@@ -128,6 +131,7 @@ export const CONFIG = {
     process.env.DEEPSEEK_API_KEY || // ...over the back-compat one
     "", // empty = missing; requireApiKey() turns that into a helpful error
   model: process.env.MINI_AGENT_MODEL || projectSettings.model || globalSettings.model || "deepseek-chat", // must support function calling
+  effortProfiles: { ...(globalSettings.effortProfiles ?? {}), ...(projectSettings.effortProfiles ?? {}) } as Record<string, EffortProfile>,
   // Sub-agents (the task tool) can run on a DIFFERENT model than the orchestrator:
   // a cheap/fast one for grunt work (reading many files, broad search), or a
   // strong one as an "advisor" to double-check. undefined → use the main model.
@@ -161,6 +165,7 @@ export const CONFIG = {
     model: projectSettings.judge?.model || globalSettings.judge?.model || undefined, // undefined → use the main model
   },
   autoMode: {
+    policy: (process.env.MINI_AGENT_AUTO_POLICY ?? projectSettings.autoMode?.policy ?? globalSettings.autoMode?.policy ?? "scores") === "rules" ? "rules" as const : "scores" as const,
     enabled: process.env.MINI_AGENT_AUTO_MODE !== undefined ? process.env.MINI_AGENT_AUTO_MODE === "1" : (projectSettings.autoMode?.enabled ?? globalSettings.autoMode?.enabled ?? false),
     model: projectSettings.autoMode?.model || globalSettings.autoMode?.model || "jev-1.13.0",
   },

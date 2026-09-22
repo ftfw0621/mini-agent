@@ -104,6 +104,34 @@ Linux needs the corresponding helper installed and a graphical clipboard session
 
 ## Verification
 
+`PastedTextStore` in `pasted-text.ts` is independent of terminal and clipboard
+APIs. Bulk paste and clipboard text share the same folding rule (at least four
+lines or 1,000 UTF-16 code units). Capsules keep exact original bytes in memory
+for this process, including after sending so input history remains usable.
+Expansion runs once, before prompt hooks and model submission; label-shaped text
+inside a paste is not recursively expanded. Follow-up `text` remains the full
+human input for permission provenance, while optional `displayText` contains
+the compact preview. Sent messages show the preview and saved model history
+contains the expanded text. Arrow movement and Backspace treat capsules as
+single editing units. The Ink UI uses this abstraction for paste folding.
+
+Command suggestions in the default Ink UI are supplied by `completion.ts`,
+independently of rendering and keyboard handling in `ink/completion.tsx`.
+Typing `/` shows the command catalog; partial names filter it. Skills, effort,
+models, MCP actions and auto-review logging have argument suggestions. Model
+IDs are loaded lazily from the active endpoint and cached for the session;
+typing other commands makes no provider request. Arrow keys scroll through all
+matches in a bounded window, Tab completes, Enter selects and Esc dismisses
+without erasing the draft. The readline fallback retains command submission
+and menus without inline suggestions.
+
+While an approval or question is pending, printable input belongs to the draft.
+Enter with text cancels the pending selection and queues a follow-up; empty
+Enter selects. Follow-up submission blocks duplicate Enter events while hooks
+run, so a second Enter cannot accidentally approve the old action. A single
+question submits on explicit option selection; multiple questions retain their
+final submit row. Both Ink and readline implement this behavior.
+
 Automated tests cover real-loop tool grouping and hidden details, concurrent
 spinner completion, stream cancellation, separate worker progress and transcripts,
 provider token accounting, keyboard selection, all platform adapter contracts,
@@ -124,3 +152,6 @@ frames with keyboard events for busy input, image paste, queued previews,
 delivery, Escape and modified Enter. Resizing to 42 columns by 12 rows reproduces
 the former repeated-screen bug; the regression verifies a bounded detail view
 without recurring full-screen clears, including long CJK tool results/drafts.
+The same UI fixture checks command filtering, argument completion, cached model
+listing, selection-time follow-ups and single-question submission. Completion
+windows are also exercised at 42 columns by 12 rows.

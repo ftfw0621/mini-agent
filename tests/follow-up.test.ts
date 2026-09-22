@@ -90,5 +90,26 @@ try {
   check("immediate send interrupts without losing queued input", (await running).reason === TerminateReason.UserInterrupt && queue.size === 1);
   await makeRunTurn(finalClient as never, resumeMessages)(null, { ...base, followUps: queue });
   check("restart delivers exactly one follow-up without a synthetic empty user turn", resumeMessages.filter((m) => m.role === "user").length === 2 && queue.size === 0);
+
+  let approvalRound = 0;
+  const approvalRequests: OpenAI.ChatCompletionMessageParam[][] = [];
+  const approvalClient = { chat: { completions: { create: async (params: { messages: OpenAI.ChatCompletionMessageParam[] }) => {
+    approvalRequests.push(structuredClone(params.messages));
+    return (async function* () {
+      if (approvalRound++ === 0) yield { choices: [{ delta: { tool_calls: [tool("pending", "mcp__follow_test__first", 0), tool("stale", "mcp__follow_test__second", 1)] } }] };
+      else yield { choices: [{ delta: { content: "Following the new request." } }] };
+    })();
+  } } } };
+  const askMode = new AutoMode(undefined, { apiKey: "fake", request: async () => new Response('{"answers":{"authorized":{"type":"noul","noul":0},"risky":{"type":"noul","noul":0}}}') });
+  askMode.enabled = true; askMode.recordRequest("Do the original task.");
+  const beforeFirst = firstRuns;
+  let approvalDisplay = "";
+  await runLoop([{ role: "user", content: "Do the original task." }], { ...base, client: approvalClient as never, model: "fake", quiet: true, autoMode: askMode, followUps: queue,
+    confirm: async () => { queue.enqueue({ text: "Stop these actions and inspect instead.", displayText: "[Pasted text #1 +13 lines]", content: "Stop these actions and inspect instead." }); return false; },
+    onFollowUp: (text) => { approvalDisplay = text; },
+  });
+  check("follow-up at approval executes neither pending action nor stale sibling", firstRuns === beforeFirst && secondRuns === 0);
+  check("approval follow-up reaches the same loop once after paired results", approvalRequests.length === 2 && approvalRequests[1].filter((m) => m.role === "tool").length === 2 && approvalRequests[1].at(-1)?.content === "Stop these actions and inspect instead." && askMode.snapshot().at(-1) === "Stop these actions and inspect instead.");
+  check("compact display is kept separate from provider content and authorization", approvalDisplay === "[Pasted text #1 +13 lines]" && !JSON.stringify(askMode.snapshot()).includes("Pasted text"));
 } finally { CONFIG.hooks = hooksBefore; }
 finish();

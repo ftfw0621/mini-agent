@@ -1,0 +1,25 @@
+import { PastedTextStore } from "../src/pasted-text.js";
+import { check, finish } from "./helpers.js";
+
+const store = new PastedTextStore();
+const original = Array.from({ length: 14 }, (_, i) => `line ${i + 1}`).join("\n");
+const label = store.fold(original);
+check("long paste has a numbered line-count capsule", label === "[Pasted text #1 +13 lines]");
+check("short input stays editable as plain text", store.fold("one\ntwo") === "one\ntwo");
+check("full paste expands between surrounding text", store.expand(`before ${label} after`) === `before ${original} after`);
+const unicode = "长".repeat(1200);
+const second = store.fold(unicode);
+check("long single-line Unicode paste folds by size", second === "[Pasted text #2 +1200 chars]");
+check("multiple capsules expand in input order", store.expand(second + label) === unicode + original);
+check("deleting a capsule excludes its content", store.expand("before after") === "before after");
+check("recalling history still restores the old paste", store.expand(label) === original);
+const nested = store.fold(label + "\n2\n3\n4");
+check("pasted label-shaped text is not recursively expanded", store.expand(nested) === label + "\n2\n3\n4");
+check("unknown labels remain literal text", store.expand("[Pasted text #999 +4 lines]") === "[Pasted text #999 +4 lines]");
+const crlf = "a\r\nb\r\nc\r\nd";
+check("line ending bytes survive folding and expansion", store.expand(store.fold(crlf)) === crlf);
+check("left arrow and backspace treat a capsule as one unit", store.at("hi " + label, 3 + label.length, "left")?.start === 3);
+check("right arrow crosses a whole capsule", store.at("hi " + label, 3, "right")?.end === 3 + label.length);
+check("caret inside a capsule resolves to its whole span", store.at(label, 4, "left")?.end === label.length);
+check("ordinary text has no capsule span", store.at("plain", 5, "left") === undefined);
+finish();

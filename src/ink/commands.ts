@@ -31,6 +31,7 @@ export const SESSION_HELP = `commands:
   /cost      tokens, cache hit rate and estimated spend this session (local)
   /mcp       list configured MCP servers + status; select one to authenticate / reconnect / disable
   /plan      toggle plan mode — research-only; the agent presents a plan you approve before any change
+  /effort [level]  list/select the current model’s supported reasoning effort
   /auto      toggle auto mode — risky or uncertain actions still require approval
   /auto debug [on|off|status]  inspect permission reviewer requests and replies
   /todos     show the agent's current task plan (it maintains one with todo_write on multi-step work)
@@ -46,6 +47,8 @@ export const SESSION_HELP = `commands:
   exit       leave (Ctrl+C does the same)
 
 keys (during or after a turn):
+  /          show command suggestions below the input (while idle)
+  ↑↓ / Tab   choose / complete a suggestion; Enter selects; Esc closes
   Enter      while working, queue a follow-up for the next tool boundary
   Ctrl+Enter interrupt and send now (Esc also sends already-queued messages)
   Ctrl+V     paste an image as [Image #1], or paste text

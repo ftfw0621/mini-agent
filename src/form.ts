@@ -26,10 +26,10 @@ export interface FormAnswer {
   answer: string;
 }
 
-// The rows are a flat list: every option of every question, then one submit row.
-// rowCount = total options + 1. The cursor walks this flat list.
+// The cursor walks a flat list of options. Multiple questions add a submit row;
+// with one question, explicitly choosing an option submits it immediately.
 export function formRowCount(questions: FormQuestion[]): number {
-  return questions.reduce((n, q) => n + q.options.length, 0) + 1; // +1 for "Submit"
+  return questions.reduce((n, q) => n + q.options.length, 0) + (questions.length > 1 ? 1 : 0);
 }
 
 // Map a flat cursor to either a question/option, or the submit row.
@@ -70,7 +70,7 @@ export function reduceForm(questions: FormQuestion[], state: FormState, action: 
   }
   const selections = state.selections.slice();
   selections[row.q] = row.opt; // set this question's answer (single-select)
-  return { state: { ...state, selections } };
+  return { state: { ...state, selections }, ...(questions.length === 1 ? { done: true } : {}) };
 }
 
 // Turn a completed form into question→answer pairs for the model.
@@ -101,8 +101,10 @@ export function renderForm(questions: FormQuestion[], state: FormState): string 
   const onSubmit = state.cursor === flat; // the submit row is last
   const allAnswered = state.selections.every((s) => s >= 0);
   const submitText = allAnswered ? "▶ Submit answers" : "▶ Submit answers (answer every question first)";
-  lines.push(onSubmit ? chalk.green.bold(`❯ ${submitText}`) : chalk.dim(`  ${submitText}`));
-  lines.push("");
+  if (questions.length > 1) {
+    lines.push(onSubmit ? chalk.green.bold(`❯ ${submitText}`) : chalk.dim(`  ${submitText}`));
+    lines.push("");
+  }
   lines.push(FORM_HINT);
   return lines.join("\n");
 }

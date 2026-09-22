@@ -1,5 +1,95 @@
 # Auto mode implementation notes
 
+## Rules preview (`effects-v1`)
+
+Start with `MINI_AGENT_AUTO_POLICY=rules npm start -- --auto`, or set
+`autoMode.policy` to `"rules"` in settings. Policy is selected at startup;
+`/auto` still toggles review on/off. The unchanged `scores` rollout fallback
+remains the default until live held-out evaluation supports a switch. The score
+thresholds and cascade described below apply only to that fallback.
+
+Rules review first uses Jev when `JEV_API_KEY` or `TYPESAFE_API_KEY` is set.
+A clear screen skips the model; otherwise one review uses `judge.model` at the
+current vendor, or the current main model.
+A single model assessment lists matched rule IDs with evidence and explicit
+uncertainty. The shared resolver chooses `allow`, `deny` or `ask`; missing fields,
+unknown rules and malformed output never become an implicit approval. There is
+no retry to obtain a more favorable judgment. Destructive changes, infrastructure
+writes, security changes and out-of-workspace writes retain human checkpoints.
+Explicit scope violations and sensitive-data disclosure are denials, not override
+prompts. Readiness checks, tests and ordinary requested commit/push do not need
+an additional authorization score. These are semantic criteria, not proof that
+any model will always recognize an effect correctly.
+
+The same execution gate enforces this result before dispatch and after a hook
+rewrites arguments. A denial returns a non-executed tool result to the agent and
+is recorded separately from a human refusal. After three consecutive or twenty
+total automatic denials the task stops for human direction. Successful executed
+operations reset only the consecutive count. The root budget is shared by
+subagents/teammates and retained across queued follow-ups and Ink interrupt/resume;
+a new idle human task starts a fresh budget. At exhaustion, pending tool IDs are
+resolved as not executed; the UI returns to the prompt. Existing in-flight work
+is not undone.
+
+The reviewer receives original user requests, startup project instructions,
+startup working directory and credential-stripped remote names/URLs. Remote
+configuration changes do not update this trusted snapshot. New-policy history
+keeps only bounded identity observations from structured results (with producing
+call IDs), not arbitrary small JSON objects. Partial/dropped observations and
+history are explicitly marked. Relevant script writes remain in the bounded
+input history; missing effects of an opaque script require review. Assistant
+prose and synthetic notifications never supply user authority.
+
+`/auto debug on` logs the actual provider messages, raw reply, assessment and
+final result under one review ID and policy version. It remains opt-in and local.
+Jev's rule adapter preserves probabilities. `screenRules` permits a fast pass
+only when every blocking-rule predicate and `uncertain_effects` is at most 0.05,
+and no historical actions were omitted. A single concern routes to model review;
+scores are never averaged and cannot supply user authority. The model receives
+the identical evidence without the first-stage scores. It independently resolves
+suspected matches, retaining mandatory human checkpoints for confirmed effects.
+There is no retry for a different judgment.
+
+This is the provisional `jev-screen-v1` routing policy for the opt-in preview,
+not a measured aggregate false-allow probability. Missing/invalid Jev responses,
+quota exhaustion, rate limiting and timeouts fall back to the model. A one-time
+tip reports the reason and disables further Jev attempts for that session;
+user cancellation aborts both paths. No key goes straight to the model and shows
+a setup tip. Protected paths, configured denies and deterministic human-only
+checks still precede both reviewers.
+
+`tests/auto-rules.test.ts` exercises the real loop and UI turn adapter with fake
+provider responses. It validates decision precedence, cancellation, hook checks,
+shared budgets, context projection and correlated logs, not semantic accuracy.
+`tests/auto-rule-cascade.test.ts` additionally checks fast passes, each routing
+threshold, identical evidence, failure fallback and the real execution gate.
+The 26-case synthetic review-only corpus in `eval/auto-rules-cases.ts` includes
+Chinese/English supporting steps, long quoted commit data, deletion, infrastructure,
+MCP scope, substitutions, injection and missing script evidence. Development and
+held-out subsets have separate labels; expected labels never enter review state.
+
+```sh
+# Zero requests: inspect the manifest first.
+node --import tsx eval/auto-rules.ts --split=all
+# Explicit live synthetic review; no proposed action is ever executed.
+node --env-file=.env --import tsx eval/auto-rules.ts --live --provider=model --split=heldout --repeat=3
+# Measure the actual screening policy and second-stage rate (synthetic only).
+node --env-file=.env --import tsx eval/auto-rules.ts --live --provider=cascade --split=heldout --repeat=3
+# Jev-only mode emits raw predicates for calibration.
+node --env-file=.env --import tsx eval/auto-rules.ts --live --provider=jev --split=development
+```
+
+No live calls were made for this implementation. Evaluation reports counts and
+latency; model summaries include false blocks, false allows and human-review
+outcomes. Provider billing is not estimated. Further task-level usage/latency
+measurement and a larger untouched evaluation set remain prerequisites for
+claiming a measured improvement or making the preview the default.
+The [TypeSafe cascade cookbook](https://docs.typesafe.ai/cookbooks/sde_cascade)
+describes verification followed by selective reasoning; its example thresholds
+are not permission-review calibration values.
+
+## Existing score policy
+
 ## Reference behavior
 
 The local `../claude-code-sourcemap` repository identifies its snapshot as a
@@ -52,8 +142,13 @@ or make independent allow/ask decisions.
    `/auto` is toggled off and on or the app restarts. HTTP 402 and explicit quota
    codes are distinguished from ordinary HTTP 429 rate limiting; unknown errors
    are described as unavailable, never guessed to be exhausted credits.
-4. A valid Jev risk/uncertainty result goes to human approval, never to a second
-   model for a more permissive answer. Three consecutive failures of available
+4. Risk above 0.1 or authorization below 0.5 goes directly to human approval.
+   When risk is at most 0.1 and authorization is in [0.5, 0.8), one vendor-model
+   review evaluates the identical state and both policy questions. It must return
+   `authorized: true, risky: false` to approve. This is an uncertainty-routing
+   branch, not service failover: Jev remains preferred for the next action.
+   No retries seek a different answer; absent, failed or negative second-stage
+   results require a human. Three consecutive failures of available
    review backends disable automatic review until toggled or restarted. User
    cancellation stops the review without starting a fallback call.
 
@@ -62,7 +157,7 @@ in the CLI; standalone callers of the original `Judge` retain its older API.
 
 Jev receives two independent Noul questions in one request: whether the action is
 authorized, and whether it meets a mandatory-human-review category. Code allows only
-authorization >= 0.8 AND risk <= 0.1. The vendor fallback answers the same policy
+authorization >= 0.8 AND risk <= 0.1 without a second review. The vendor fallback answers the same policy
 questions as strict JSON booleans, requiring `authorized: true` and `risky: false`.
 Each provider has a 30-second timeout. Invalid results or errors alone never grant
 permission: the fallback must explicitly approve, or the human decides. Oversized
@@ -70,6 +165,28 @@ input and cancellation cannot auto-approve. These are initial policy thresholds,
 not a measured guarantee of safety. The vendor fallback reserves 2,048 output
 tokens for models that reason before emitting the small JSON result; missing or
 truncated JSON still requires manual approval.
+
+The narrow authorization-review route is defined separately in
+`needsAuthorizationReview`; approval still uses `decideReview`. The 0.5 routing
+floor is a local policy choice, not a TypeSafe-recommended permission threshold.
+This follows the general pattern of sending uncertain cases to another reviewer
+described in [TypeSafe's uncertainty guidance](https://docs.typesafe.ai/confidence).
+No executable, command prefix or service gets a special bypass.
+
+On 2026-09-22 the captured request `84abe565-6194-40e4-b293-5d7bce345401`
+contained the user's commit-and-push request and the proposed
+`npm test 2>&1 | tail -30`. Jev returned authorization 0.56 and risk 0.08.
+The context and policy already included customary validation steps; the former
+flow nevertheless sent every below-threshold authorization directly to a human.
+`tests/auto-cascade.test.ts` replays these scores through `AutoMode.classify`,
+checking identical-state review, independent risk veto, cancellation, malformed
+results, failure handling and continued Jev preference. These are mocked provider
+tests; a live replay was blocked by the execution environment's approval review.
+The model's semantic accuracy on this real example has not yet been verified.
+
+With review debugging enabled, `authorization-review` records the original state,
+Jev assessment, second-stage reviewer and final assessment/error. The model
+adapter separately records its actual messages and response as usual.
 
 Risk is about consequential effects, not transport. A task-scoped query can
 pass whether invoked through a local command, an API or MCP. Explicitly requested

@@ -1,5 +1,7 @@
+import { AutoReviewBudget } from "./auto-budget.js";
 import OpenAI from "openai"; // types + client for the chat completions API
 import chalk from "chalk"; // terminal colors for status lines
+import { effortMessages, effortParameters, retainsReasoning } from "./effort.js";
 import { toolDefinitions, dispatch, snapshotFileState, restoreFileState, isReadOnlyTool } from "./tools.js"; // the tool manuals + the executor + file-state isolation
 import { classifyError, ApiErrorKind } from "./errors.js"; // failure taxonomy
 import { checkPermission } from "./permissions.js"; // the allow/ask/deny gate
@@ -34,6 +36,7 @@ const STALL_WARN_MS = 30_000; // events arriving slowly → log only. Slow is no
 // A query has many ways to die. Name every one of them — each gets its own
 // user-facing explanation and exit code, instead of a generic "error".
 export enum TerminateReason {
+  ReviewLimit = "review_limit", // human direction required after repeated automatic denials
   Done = "done", // the model produced a final answer
   CircuitBreaker = "circuit_breaker", // N consecutive failures — stop burning money
   RetryBudgetExhausted = "retry_budget_exhausted", // too many failures overall
@@ -66,6 +69,7 @@ export interface LoopOptions {
   subAgentModel?: string; // model to run delegated sub-agents on; falls back to `model`
   judge?: Judge; // optional LLM classifier that auto-allows clearly-safe "ask" commands
   autoMode?: AutoMode;
+  reviewBudget?: AutoReviewBudget; // root-owned; descendants and follow-ups share it
   autoHistory?: ReviewHistory; // inherited tool context, never authorization
   delegatedTask?: string; // parent-authored context for a worker
   autoRequests?: readonly string[]; // genuine user requests, snapshotted per turn and inherited by children
@@ -465,7 +469,7 @@ let modelCallSeq = 0; // increments per model call — seeds the rotating spinne
 async function streamModelCall(
   messages: OpenAI.ChatCompletionMessageParam[], // the full history to send
   opts: LoopOptions, // client/model/signal
-): Promise<{ content: string; toolCalls: AssembledCall[] }> {
+): Promise<{ content: string; toolCalls: AssembledCall[]; reasoning?: string }> {
   const idleAbort = new AbortController(); // the watchdog's own kill switch
   const signal = AbortSignal.any([opts.signal, idleAbort.signal]); // either the user or the watchdog can abort
   const word = thinkingWord(modelCallSeq++); // a rotating "thinking" word for this call
@@ -514,7 +518,7 @@ async function streamModelCall(
       // The tool manual depends on the agent kind (Lead / teammate / sub-agent)
       // — see toolsFor(). This is also where nested spawning is prevented: a
       // teammate's manual simply omits spawn_teammate and task.
-      { model: opts.model, messages, tools: toolsFor(opts), stream: true, stream_options: { include_usage: true } },
+      { model: opts.model, messages: effortMessages(opts.model, messages), ...effortParameters(opts.model), tools: toolsFor(opts), stream: true, stream_options: { include_usage: true } },
       { signal }, // abortable by user AND watchdog
     );
     let content = ""; // accumulated answer text
@@ -542,9 +546,8 @@ async function streamModelCall(
 
       // Reasoning models (e.g. deepseek-reasoner / R1) stream their thinking in a
       // separate `reasoning_content` field BEFORE the answer. We do NOT print it
-      // (it buries the actual reply) and do NOT keep it (it must not be replayed
-      // in later turns): we let the spinner keep spinning, stash the trace, and
-      // surface it only behind Ctrl+R.
+      // (it buries the actual reply). Provider capabilities determine whether it
+      // must be retained for tool-call continuation; the UI stays collapsed.
       const reasoning = (delta as { reasoning_content?: string }).reasoning_content;
       if (reasoning) {
         streamedChars += reasoning.length; // count reasoning toward the live token estimate
@@ -580,7 +583,7 @@ async function streamModelCall(
       }
     }
     flushReasoning();
-    return { content, toolCalls: calls.filter(Boolean) }; // sparse array → dense
+    return { content, toolCalls: calls.filter(Boolean), ...(retainsReasoning(opts.model) ? { reasoning: reasoningBuf } : {}) };
   } finally {
     ans?.end(); // cancel delayed repaints even when the API throws or is interrupted
     if (opts.progress) { opts.progress.finishModelCall(reportedTokens); opts.progress.append("\n"); }
@@ -619,6 +622,7 @@ async function runOneCall(call: AssembledCall, opts: LoopOptions): Promise<{ id:
   try {
     const refusal = await authorizeCall(call, opts);
     const content = refusal ?? await runWithHooks(call, opts);
+    if (!/^\[(?:permission|hook|error|follow-up)\]/.test(content) && !["task", "spawn_teammate", "send_message", "ask_user"].includes(call.name)) opts.reviewBudget?.executed();
     if (trace) recordToolResult(trace, content);
     opts.progress?.append(`result: ${content}\n`);
     if (call.name === "todo_write" && !opts.quiet && !content.startsWith("[error]")) {
@@ -639,9 +643,11 @@ async function runOneCall(call: AssembledCall, opts: LoopOptions): Promise<{ id:
 // different action. There is no recursive hook invocation on re-authorization.
 async function authorizeCall(call: AssembledCall, opts: LoopOptions): Promise<string | null> {
   if (opts.signal.aborted || opts.isInterrupted()) return "[permission] Interrupted before execution.";
+  if (opts.reviewBudget?.exhausted) return "[permission] Review limit reached. Stop and wait for human direction; this action was not executed.";
   const auto = opts.autoMode?.enabled ?? false;
   const v = checkPermission(call.name, call.args, auto);
   if (v.decision === "deny") {
+    if (auto && opts.autoMode?.policy === "rules") opts.reviewBudget?.deny();
     emit("agent_tool_denied", { tool: call.name }); // hard blocks, per tool
     if (!opts.quiet) sink(opts).note(mark.denied(v.reason)); // tell the user we blocked it
     return `[permission] Denied: ${v.reason}. This is a hard rule — do not try to work around it; pick a different approach or ask the user.`;
@@ -659,6 +665,13 @@ async function authorizeCall(call: AssembledCall, opts: LoopOptions): Promise<st
         description, history: opts.autoHistory, delegatedTask: opts.delegatedTask,
         notify: (message) => { if (!opts.quiet) sink(opts).note(chalk.yellow(`  ⎿ ${message}`)); },
       });
+      if (opts.signal.aborted || opts.isInterrupted()) return "[permission] Interrupted before execution.";
+      if (review.decision === "deny") {
+        opts.reviewBudget?.deny();
+        emit("agent_tool_auto_denied", { tool: call.name, rules: (review.ruleIds ?? []).join(",") });
+        if (!opts.quiet) recordToolDetail(call.id, review.reason);
+        return `[permission] Auto-denied (not a user refusal): ${review.reason}. Not executed. Choose a permitted approach or report the restriction. Do not retry the same prohibited effect through another tool, wrapper or worker.`;
+      }
       autoAllowed = review.decision === "allow";
       reviewReason = review.reason;
       if (!opts.quiet) recordToolDetail(call.id, review.reason);
@@ -684,6 +697,7 @@ async function authorizeCall(call: AssembledCall, opts: LoopOptions): Promise<st
     if (!ok && !opts.quiet) sink(opts).note(mark.declined); // make the refusal visible
     if (!ok) return `[permission] Action not approved${reviewReason ? `: ${reviewReason}` : ". The user declined this action"}. Ask the user how to proceed, or choose a safer alternative.`;
   }
+  if (opts.reviewBudget?.exhausted) return "[permission] Review limit reached; not executed. Wait for human direction.";
   return opts.signal.aborted || opts.isInterrupted() ? "[permission] Interrupted before execution." : null;
 }
 
@@ -695,6 +709,7 @@ async function authorizeCall(call: AssembledCall, opts: LoopOptions): Promise<st
 // wrote"). Sub-agents skip hooks: hooks are about the human's project policy,
 // not internal delegation.
 async function runWithHooks(call: AssembledCall, opts: LoopOptions): Promise<string> {
+  if (opts.reviewBudget?.exhausted) return "[permission] Review limit reached; not executed.";
   if (opts.subAgent) return execute(call, opts); // sub-agents run hook-free
 
   const pre = await runHooks("PreToolUse", { tool: call.name, args: call.args }); // before
@@ -719,6 +734,7 @@ async function runWithHooks(call: AssembledCall, opts: LoopOptions): Promise<str
   }
 
   if (opts.signal.aborted || opts.isInterrupted()) return "[permission] Interrupted before execution.";
+  if (opts.reviewBudget?.exhausted) return "[permission] Review limit reached; not executed.";
   const result = await execute(call, opts); // the actual work
 
   const post = await runHooks("PostToolUse", { tool: call.name, args: call.args, result }); // after
@@ -1203,7 +1219,7 @@ export async function runLoop(
 ): Promise<LoopResult> {
   // Children inherit this snapshot. Later human turns cannot silently grant
   // broader authorization to already-running background work.
-  opts = { ...opts, autoRequests: opts.autoRequests ?? opts.autoMode?.snapshot(), followUps: opts.subAgent ? undefined : opts.followUps };
+  opts = { ...opts, reviewBudget: opts.reviewBudget ?? new AutoReviewBudget(), autoRequests: opts.autoRequests ?? opts.autoMode?.snapshot(), followUps: opts.subAgent ? undefined : opts.followUps };
   const recordHumanInput = (text: string): void => {
     opts.autoMode?.recordRequest(text);
     opts.autoRequests = [...(opts.autoRequests ?? []), text];
@@ -1229,7 +1245,7 @@ export async function runLoop(
     for (const message of pending) {
       messages.push({ role: "user", content: message.content });
       recordHumanInput(message.text);
-      opts.onFollowUp?.(message.text);
+      opts.onFollowUp?.(message.displayText ?? message.text);
     }
     return pending.length > 0;
   };
@@ -1249,6 +1265,7 @@ export async function runLoop(
     // The inner loop retries the model call until it succeeds or a budget dies.
     while (true) {
       if (opts.isInterrupted()) return { reason: TerminateReason.UserInterrupt }; // user asked us to stop — obey before spending money
+      if (opts.reviewBudget?.exhausted) return { reason: TerminateReason.ReviewLimit };
       receiveFollowUps();
 
       // Proactive compaction: act BEFORE the API rejects us. Waiting for the
@@ -1261,7 +1278,7 @@ export async function runLoop(
           return { reason: TerminateReason.CompactionFailed, detail: `${compaction.failures} consecutive compaction failures` }; // the compaction circuit breaker
       }
 
-      let out: { content: string; toolCalls: AssembledCall[] }; // the assembled reply for this round
+      let out: Awaited<ReturnType<typeof streamModelCall>>;
       try {
         out = await streamModelCall(messages, opts); // streaming call with spinner + watchdog
       } catch (err) {
@@ -1321,6 +1338,7 @@ export async function runLoop(
       messages.push({
         role: "assistant", // the model's turn
         content: out.content || null, // null when the turn was tool calls only
+        ...(out.reasoning !== undefined ? { reasoning_content: out.reasoning } : {}),
         ...(out.toolCalls.length
           ? { tool_calls: out.toolCalls.map((c) => ({ id: c.id, type: "function" as const, function: { name: c.name, arguments: c.args } })) }
           : {}), // omit the field entirely when there were no calls

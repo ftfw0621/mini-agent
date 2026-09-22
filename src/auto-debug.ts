@@ -24,13 +24,13 @@ export function reviewDebugCommand(line: string): string | null {
 // Headers are deliberately never accepted here. Redact known credential values
 // even when they appear in free-form text; arbitrary tool payloads can still be
 // sensitive, so this log must remain local and opt-in.
-export function beginReviewDebug(backend: string, request: unknown, secrets: string[] = []): (event: string, fields: Record<string, unknown>) => void {
+export function beginReviewDebug(backend: string, request: unknown, secrets: string[] = [], reviewId?: string): (event: string, fields: Record<string, unknown>) => void {
   const file = reviewDebugPath();
   if (!file) return () => {};
   const credentials = [...secrets, ...Object.entries(process.env)
     .filter(([key]) => /(?:API_KEY|TOKEN|PASSWORD|SECRET)$/.test(key))
     .map(([, value]) => value ?? "")].filter(Boolean).sort((a, b) => b.length - a.length);
-  const id = randomUUID();
+  const id = reviewId ?? randomUUID();
   const started = Date.now();
   const redact = (value: unknown): unknown => {
     if (typeof value === "string") {

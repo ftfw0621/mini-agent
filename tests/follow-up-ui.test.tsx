@@ -13,6 +13,7 @@ import { CONFIG } from "../src/config.js";
 import { CostMeter, DEFAULT_PRICING } from "../src/cost.js";
 import { TerminateReason } from "../src/loop.js";
 import { clearToolCalls, recordToolCall, recordToolResult } from "../src/tui.js";
+import { parseSkill } from "../src/skills.js";
 import { check, finish } from "./helpers.js";
 
 const sleep = (ms = 100) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -20,6 +21,9 @@ const cwd = process.cwd();
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "mini-follow-ui-"));
 process.chdir(temp);
 const previousHooks = CONFIG.hooks;
+const previousModel = CONFIG.model;
+const previousURL = CONFIG.baseURL;
+CONFIG.model = "deepseek-flash"; CONFIG.baseURL = "https://api.deepseek.com";
 const previousMemory = CONFIG.memory.autoExtract;
 CONFIG.hooks = {}; CONFIG.memory.autoExtract = false;
 const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => {}, ref: () => {}, unref: () => {} });
@@ -35,16 +39,28 @@ stdout.on("data", (bytes) => {
   if (plain.includes("ctx")) frame = plain;
 });
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=", "base64");
-const client = { chat: { completions: { create: async () => ({ choices: [{ message: { content: "UI title" } }] }) } } };
+let modelLists = 0;
+const client = { models: { list: async () => { modelLists++; return { data: [{ id: "deepseek-flash" }, { id: "deepseek-v4-pro" }] }; } }, chat: { completions: { create: async () => ({ choices: [{ message: { content: "UI title" } }] }) } } };
 const autoMode = new AutoMode(undefined, { apiKey: "" });
-const session = { client, messages: [], systemMessage: "test", initialSessionId: "ui-test", startedAt: Date.now(), costMeter: new CostMeter(DEFAULT_PRICING), skills: [], autoMode, model: "test", dir: "demo", branch: null, bannerText: "Follow-up fixture", notices: [], getStatus: () => ({ ctxPct: 1, cost: 0, elapsedMs: 1000 }), disconnectMcp: () => {} } as unknown as InkSession;
+const session = { client, messages: [], systemMessage: "test", initialSessionId: "ui-test", startedAt: Date.now(), costMeter: new CostMeter(DEFAULT_PRICING), skills: [parseSkill("---\ndescription: Review this project\n---\nInspect files", "review")], autoMode, model: "test", dir: "demo", branch: null, bannerText: "Follow-up fixture", notices: [], getStatus: () => ({ ctxPct: 1, cost: 0, elapsedMs: 1000 }), disconnectMcp: () => {} } as unknown as InkSession;
 let hooks!: TurnHooks;
 let turns = 0;
-const app = render(<App session={session} clipboard={{ read: async () => ({ image: png }) }} runTurn={async (_input, h) => {
+let approved: boolean | undefined;
+let answers: unknown;
+const submitted: string[] = [];
+const submittedContent: unknown[] = [];
+let clipboardText: string | undefined;
+const app = render(<App session={session} clipboard={{ read: async () => clipboardText === undefined ? { image: png } : { text: clipboardText } }} runTurn={async (_input, h) => {
   turns++; hooks = h;
   if (_input === null) {
-    for (const message of h.followUps!.drain()) h.onFollowUp?.(message.text);
+    for (const message of h.followUps!.drain()) h.onFollowUp?.(message.displayText ?? message.text);
     return { reason: TerminateReason.Done, finalText: "Follow-up processed" };
+  }
+  if (_input === "Approval task" || _input === "Form task") {
+    if (_input === "Approval task") approved = await h.confirm("Do the pending action?", "example");
+    else answers = await h.askUser!([{ question: "Which option?", options: ["First", "Second"] }]);
+    for (const message of h.followUps!.drain()) { submitted.push(message.text); submittedContent.push(message.content); h.onFollowUp?.(message.displayText ?? message.text); }
+    return { reason: TerminateReason.Done };
   }
   const call = recordToolCall("external lookup", "args: {}", { id: "lookup", name: "external_lookup", args: "{}" });
   recordToolResult(call, "长结果 🔍 " .repeat(200));
@@ -76,10 +92,71 @@ try {
   await key("Another task"); await key("\r");
   await key("Take this new direction"); await key("\x1b[13;5u"); await sleep();
   check("Ctrl+Enter submits and interrupts without leaking its escape sequence", turns === 4 && !hooks.signal.aborted && !allOutput.includes("[13;5u"));
+  await key("/effort");
+  check("effort completion opens under input before submission", frame.includes("/effort max") && !frame.includes("medium") && !frame.includes("empty input selects"));
+  await key("\x1b[B"); await key("\x1b[B"); await key("\r");
+  check("effort choice applies without starting a model turn", turns === 4 && allOutput.includes("deepseek-flash → low"));
+  await key("Approval task"); await key("\r");
+  await key("Please inspect only");
+  check("approval menu keeps text input editable", frame.includes("Please inspect only") && approved === undefined);
+  await key("\x16");
+  CONFIG.hooks = { UserPromptSubmit: [{ command: 'node -e "setTimeout(() => {}, 350)"' }] };
+  await key("\r"); await key("\r");
+  check("second Enter cannot approve while follow-up hooks run", approved === undefined);
+  await sleep(500); CONFIG.hooks = {};
+  check("text submission declines pending action and delivers image follow-up", approved === false && submitted.at(-1)?.includes("Please inspect only[Image #2]") === true);
+  await key("Form task"); await key("\r");
+  check("single-question UI omits submit answers row", frame.includes("Which option?") && !frame.includes("Submit answers"));
+  await key("\x1b[B"); await key("\r");
+  check("single-question UI chooses and submits with one Enter", JSON.stringify(answers).includes("Second"));
+  await key("Form task"); await key("\r");
+  await key("Use another approach"); await key("\r"); await sleep();
+  check("form text becomes follow-up instead of an answer", answers === null && submitted.at(-1) === "Use another approach");
+  await key("Form task"); await key("\r");
+  const longText = Array.from({ length: 14 }, (_, i) => `Long pasted line ${i + 1}`).join("\n");
+  await key("Please inspect: "); await key(longText);
+  check("multiline paste becomes a compact capsule", frame.includes("[Pasted text #1 +13 lines]") && !frame.includes("Long pasted line 1"));
+  await key("\x16"); await key("\r"); await sleep();
+  check("folded paste submits full text alongside real image data", submitted.at(-1) === `Please inspect: ${longText}[Image #3]` && JSON.stringify(submittedContent.at(-1)).includes("data:image/png;base64,"));
+  check("sent follow-up keeps the compact display", allOutput.includes("> Please inspect: [Pasted text #1 +13 lines][Image #3]"));
+  await key("/");
+  check("slash opens described command list below the input", frame.indexOf("Switch the model") > frame.indexOf("❯ /") && frame.includes("Choose this model"));
+  await key("\x1b[A");
+  check("command navigation reaches choices beyond the visible window", frame.includes("› /resume"));
+  const listClears = clears; await sleep(1100);
+  check("large command list stays inside viewport without repeated clears", clears === listClears && frame.trimEnd().split("\n").length < stdout.rows);
+  stdout.columns = 42; stdout.rows = 12; stdout.emit("resize"); await sleep();
+  check("completion window shrinks to fit small terminals", frame.trimEnd().split("\n").length < stdout.rows);
+  stdout.columns = 80; stdout.rows = 24; stdout.emit("resize"); await sleep();
+  await key("\x1b");
+  check("Escape dismisses suggestions and preserves the draft", frame.includes("❯ /") && !frame.includes("↑↓ choose"));
+  await key("ef"); await key("\t");
+  check("typing filters and Tab completes a command without executing it", frame.includes("❯ /effort") && frame.includes("/effort max") && !frame.includes("empty input selects"));
+  await key("high"); await key("\r");
+  check("Enter submits the completed effort argument", allOutput.includes("deepseek-flash → high"));
+  await key("/skills");
+  check("skills shows available names and descriptions inline", frame.includes("/skill review") && frame.includes("Review this project"));
+  await key("\t");
+  check("skill completion fills the executable invocation", frame.includes("❯ /skill review"));
+  for (let i = 0; i < "/skill review".length; i++) await key("\x7f");
+  await key("/model"); await sleep();
+  check("model options come from the active endpoint", frame.includes("/model deepseek-v4-pro") && modelLists === 1);
+  await key(" "); await key("\x7f");
+  check("model list is cached across keystrokes", modelLists === 1);
+  for (let i = 0; i < "/model".length; i++) await key("\x7f");
+  clipboardText = longText;
+  await key("\x16");
+  check("native clipboard text uses the same folding abstraction", frame.includes("[Pasted text #2 +13 lines]"));
+  await key("\x1b[D"); await key("X");
+  check("left arrow crosses the entire capsule", frame.includes("X[Pasted text #2 +13 lines]"));
+  await key("\x1b[C"); await key("\x7f");
+  check("Backspace removes the entire pasted-text capsule", !frame.includes("Pasted text #2") && frame.includes("❯ X"));
+  await key("\x7f");
   await key("很长的输入".repeat(300));
   check("long editable drafts stay inside the dynamic viewport", frame.trimEnd().split("\n").length < stdout.rows);
 } finally {
   app.unmount(); app.cleanup(); clearToolCalls();
+  CONFIG.model = previousModel; CONFIG.baseURL = previousURL;
   CONFIG.hooks = previousHooks; CONFIG.memory.autoExtract = previousMemory;
   process.chdir(cwd); fs.rmSync(temp, { recursive: true, force: true });
 }

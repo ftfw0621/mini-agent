@@ -2,6 +2,7 @@ import type OpenAI from "openai";
 
 export interface FollowUpMessage {
   text: string; // original human text, separate from hooks/attachments
+  displayText?: string; // optional compact UI text; never used as authorization
   content: OpenAI.ChatCompletionUserMessageParam["content"];
 }
 

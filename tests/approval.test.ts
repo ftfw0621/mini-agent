@@ -81,4 +81,22 @@ check("session grant upgrades ask → allow", checkPermission("run_bash", ask).d
 check("a hard deny still denies even with the grant", checkPermission("run_bash", deny).decision === "deny");
 CONFIG.permissions.allow.length = 0; // clean up for any later suite
 
+{
+  const input = fakeStdin();
+  let text = "";
+  const p = promptSelect(rlStub, ["Yes", "No"], input, (value) => { text = value; return true; });
+  (input as unknown as EventEmitter).emit("keypress", "Do not send", {});
+  key(input, { name: "left" });
+  (input as unknown as EventEmitter).emit("keypress", "!", {});
+  key(input, { name: "return" });
+  check("typed follow-up cancels the choice without approving", (await p) === -1 && text === "Do not sen!d");
+}
+{
+  const input = fakeStdin();
+  let calls = 0;
+  const p = promptSelect(rlStub, ["Yes", "No"], input, async () => { calls++; await new Promise((r) => setTimeout(r, 10)); return true; });
+  (input as unknown as EventEmitter).emit("keypress", "Wait", {});
+  key(input, { name: "return" }); key(input, { name: "return" });
+  check("double Enter during follow-up submission cannot approve", (await p) === -1 && calls === 1);
+}
 finish();

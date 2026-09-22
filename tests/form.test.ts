@@ -43,6 +43,10 @@ check("answers pair questions with chosen options", answers[0].answer === "Postg
 
 // ---- rendering -------------------------------------------------------------------------
 const view = renderForm(QS, { cursor: 0, selections: [-1, -1] });
+const single = [QS[0]];
+check("single question has no extra submit row", formRowCount(single) === 2 && !renderForm(single, initFormState(single)).includes("Submit answers"));
+const picked = reduceForm(single, { cursor: 1, selections: [-1] }, "select");
+check("single question submits only after an explicit selection", picked.done === true && collectAnswers(single, picked.state)[0].answer === "SQLite" && !reduceForm(single, initFormState(single), "down").done);
 checkContains("render shows the question", view, "Which database?");
 checkContains("render marks the cursor row", view, "❯");
 checkContains("render has a submit row", view, "Submit answers");
@@ -88,4 +92,18 @@ function fakeNonTty(): NodeJS.ReadStream {
   return s as unknown as NodeJS.ReadStream;
 }
 
+{
+  const input = fakeStdin();
+  const p = promptForm(rlStub, [QS[0]], input);
+  press(input, { name: "down" }); press(input, { name: "return" });
+  check("single-question terminal form submits on selection", (await p)?.[0].answer === "SQLite");
+}
+{
+  const input = fakeStdin();
+  let text = "";
+  const p = promptForm(rlStub, QS, input, (value) => { text = value; return true; });
+  (input as unknown as EventEmitter).emit("keypress", "换个方案", {});
+  press(input, { name: "return" });
+  check("form supports Chinese follow-up without fabricating an answer", (await p) === null && text === "换个方案");
+}
 finish();

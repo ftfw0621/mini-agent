@@ -1,3 +1,4 @@
+import { effortMessages } from "./effort.js";
 import fs from "node:fs"; // re-reading files from disk during recovery
 import OpenAI from "openai"; // API types + client type
 import chalk from "chalk"; // status lines
@@ -35,6 +36,7 @@ export function estimateHistoryTokens(messages: OpenAI.ChatCompletionMessagePara
     total += Array.isArray(m.content) ? m.content.reduce((sum, part) => sum + (part.type === "image_url" ? 4096 : estimateTokens(JSON.stringify(part), isDense)), 0) + 8
       : estimateTokens(m.content ?? "", isDense) + 8;
     if ("tool_calls" in m && m.tool_calls) total += estimateTokens(JSON.stringify(m.tool_calls), true); // count the call arguments too
+    if ("reasoning_content" in m && typeof m.reasoning_content === "string") total += estimateTokens(m.reasoning_content);
   }
   return total;
 }
@@ -97,7 +99,7 @@ export async function compactHistory(
   const res = await client.chat.completions.create(
     {
       model, // same model — no need for a fancier one to summarize
-      messages: [...messages, { role: "user", content: SUMMARY_PROMPT }], // full history + the summary instruction
+      messages: [...effortMessages(model, messages), { role: "user", content: SUMMARY_PROMPT }], // full history + the summary instruction
       // Deliberately NO `tools` parameter: with no tools declared, the API
       // cannot accept a tool call — that is the hard guarantee. The CRITICAL
       // lines in the prompt are the soft second layer of the same defense.

@@ -5,6 +5,8 @@ import { formatElapsed, renderMenu, MENU_HINT, formatModelChoices } from "../ui.
 import { renderMarkdown } from "../markdown.js"; // model speaks markdown → ANSI, same as the non-Ink REPL
 import { initFormState, reduceForm, renderForm, collectAnswers, type FormQuestion, type FormState, type FormAnswer } from "../form.js"; // the ask_user form: pure state machine + renderer
 import { CONFIG, saveGlobalSetting } from "../config.js"; // session allowlist + /model save
+import { effortMenu, setEffort } from "../effort.js";
+import { useSlashCompletion } from "./completion.js";
 import { TerminateReason, type LoopResult, listAgentViews } from "../loop.js"; // how a turn can end
 import { compactHistory, COMPACT_AT } from "../context.js"; // /compact
 import { forgetFilesExcept } from "../tools.js"; // /clear resets the file read-state
@@ -28,6 +30,7 @@ import { reviewDebugCommand } from "../auto-debug.js";
 import type { ClipboardSource } from "../clipboard.js";
 import { readClipboard, imageLabel, imagesInInput, userContent, MAX_IMAGES, type ImageAttachment } from "../images.js";
 import { FollowUpQueue } from "../follow-up.js";
+import { PastedTextStore } from "../pasted-text.js";
 import { AgentList, moveAgentFocus } from "./agents.js";
 import { detailPage, summarizeActivity } from "./activity.js";
 import { useTerminalSize } from "./viewport.js";
@@ -135,6 +138,7 @@ function StatusBar({ model, dir, branch, status }: { model: string; dir: string;
 
 // One human note per non-Done ending, so the user always learns why a turn stopped.
 const EXIT_NOTES: Partial<Record<TerminateReason, string>> = {
+  [TerminateReason.ReviewLimit]: "Repeated automatic denials — stopped. Tell the agent how to proceed; prohibited actions were not executed.",
   [TerminateReason.CircuitBreaker]: "3 API failures in a row — stopping here.",
   [TerminateReason.RetryBudgetExhausted]: "Too many failed API calls — giving up. Check your network.",
   [TerminateReason.RateLimitBudgetExhausted]: "The provider keeps rate-limiting us. Wait a minute, then retry.",
@@ -159,9 +163,12 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
   const [images, setImages] = useState<ImageAttachment[]>([]);
   const pasting = useRef(false);
   const imageSeq = useRef(0);
+  const pastedTexts = useRef(new PastedTextStore()).current;
   const [cursor, setCursor] = useState(0); // caret position WITHIN `input` (0..input.length), for ←/→ editing
   const [busy, setBusy] = useState(false); // a turn is in flight
-  const [pending, setPending] = useState<Pending | null>(null); // a prompt/menu blocking input
+  const [pending, setPending] = useState<Pending | null>(null); // a prompt/menu awaiting a choice or follow-up
+  const [completionModels, setCompletionModels] = useState<string[]>([]);
+  const modelListEndpoint = useRef<string | null>(null);
   const [menuSel, setMenuSel] = useState(0); // the select menu's cursor
   const [formState, setFormState] = useState<FormState | null>(null); // the ask_user form's state
   const [sessionId, setSessionId] = useState(session.initialSessionId); // changes on /clear, /resume
@@ -183,6 +190,17 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
   const turn = useRef<{ controller: AbortController; interrupted: boolean } | null>(null); // the in-flight turn, for Esc-interrupt
   const titleAttempted = useRef(false); // one-shot: name the session once, after the first real message
   const pendingTitle = useRef<string | undefined>(undefined); // the generated title, passed into the next save
+
+  const completing = !busy && !pending && !details && subAgentFocus === null && !subAgentDetail;
+  const wantsModels = completing && /^\/model(?:\s|$)/.test(input);
+  useEffect(() => {
+    if (!wantsModels || modelListEndpoint.current === CONFIG.baseURL) return;
+    modelListEndpoint.current = CONFIG.baseURL;
+    void client.models.list().then((page) => setCompletionModels(page.data.map((m) => m.id))).catch(() => {});
+  }, [wantsModels, client]);
+  const completion = useSlashCompletion(input, completing, {
+    model: CONFIG.model, skills, models: completionModels, servers: listMcpServers().map((s) => s.name),
+  }, rows - 10);
 
   useEffect(() => {
     const id = setInterval(() => setTick((t) => t + 1), 1000);
@@ -295,13 +313,14 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
 
   // A normal (non-command) prompt: run UserPromptSubmit hooks, expand @file
   // mentions, then start the turn. Mirrors agent.ts's submit path.
-  const submitLine = async (text: string, attachments: readonly ImageAttachment[] = [], immediate = false) => {
-    if (turn.current && (text.startsWith("/") || text === "exit" || text === "quit")) {
+  const submitLine = async (draft: string, attachments: readonly ImageAttachment[] = [], immediate = false) => {
+    if (!pending && turn.current && (draft.startsWith("/") || draft === "exit" || draft === "quit")) {
       note(chalk.dim("Commands are available when the agent is idle; use Esc to interrupt."));
       return;
     }
-    if (text === "exit" || text === "quit") return doExit();
-    if (await handleCommand(text)) return; // slash commands never reach the model
+    if (!pending && (draft === "exit" || draft === "quit")) return doExit();
+    if (!pending && await handleCommand(draft)) return;
+    const text = pastedTexts.expand(draft);
     const hook = await runHooks("UserPromptSubmit", { prompt: text });
     if (hook.block) return note(chalk.yellow(`(prompt blocked by a UserPromptSubmit hook: ${hook.feedback.slice(0, 150)})`));
     const injected = hook.stdout ? `\n\n[context added by a UserPromptSubmit hook]\n${hook.stdout}` : "";
@@ -331,13 +350,21 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
       }
     }
 
-    if (turn.current || followUps.size) {
-      followUps.enqueue({ text, content: userContent(augmented + injected, attachments) });
+    if (pending || turn.current || followUps.size) {
+      followUps.enqueue({ text, displayText: draft, content: userContent(augmented + injected, attachments) });
+      // Queue FIRST, then release the blocked tool without approving it. The
+      // loop consumes the new instruction at its next tool boundary.
+      if (pending) {
+        setPending(null);
+        setFormState(null);
+        if (pending.kind === "form") pending.resolve(null);
+        else pending.onChoose(-1);
+      }
       if (immediate) interruptForFollowUp();
       return;
     }
     autoMode.recordRequest(text); // before attached files or hook output can masquerade as user intent
-    runConversationTurn(augmented + injected, { kind: "user", text }, attachments); // show the original line; send the augmented content
+    runConversationTurn(augmented + injected, { kind: "user", text: draft }, attachments);
   };
 
   const interruptForFollowUp = () => {
@@ -391,6 +418,18 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
   };
 
   const handleCommand = async (line: string): Promise<boolean> => {
+    if (line.startsWith("/skills ")) line = `/skill ${line.slice(8).trim()}`;
+    if (line === "/effort" || line.startsWith("/effort ")) {
+      const target = CONFIG.model;
+      const value = line.slice("/effort".length).trim();
+      if (value) note(setEffort(target, value));
+      else {
+        const menu = effortMenu(target);
+        if (!menu.values.length) note(menu.header);
+        else openSelect(menu.header, menu.labels, (i) => { if (i >= 0) note(setEffort(target, menu.values[i])); });
+      }
+      return true;
+    }
     const debug = reviewDebugCommand(line);
     if (debug !== null) { note(chalk.dim(debug)); return true; }
     if (line === "/auto") {
@@ -564,7 +603,11 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
       return exit(); // Ctrl+C quits immediately (process.on exit cleans up MCP/background)
     }
 
-    if (key.ctrl && char === "v" && !pending && subAgentFocus === null) {
+    const modifiedReturn = char === "[13;5u" || char === "[27;5;13~";
+    // A submitted follow-up may still be passing hooks. A second Enter must
+    // not approve the old action while that asynchronous preparation runs.
+    if (pending && submitting.current && (key.return || modifiedReturn || key.escape || key.upArrow || key.downArrow)) return;
+    if (key.ctrl && char === "v" && subAgentFocus === null) {
       if (pasting.current) return;
       pasting.current = true;
       const id = ++imageSeq.current;
@@ -579,8 +622,9 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
           setInput((current) => current.slice(0, cursor) + label + current.slice(cursor));
           setCursor(cursor + label.length);
         } else if (clipboard.text) {
-          setInput((current) => current.slice(0, cursor) + clipboard.text + current.slice(cursor));
-          setCursor(cursor + clipboard.text.length);
+          const text = pastedTexts.fold(clipboard.text);
+          setInput((current) => current.slice(0, cursor) + text + current.slice(cursor));
+          setCursor(cursor + text.length);
         } else note(chalk.dim("Clipboard has no image or text."));
       }).catch(() => note(chalk.yellow("Could not read the clipboard. Check clipboard access and image size (5 MB max). Linux requires wl-paste or xclip.")))
         .finally(() => { pasting.current = false; });
@@ -626,22 +670,22 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
     // A select menu is up (approval / model / resume): ↑↓ move, Enter choose, Esc cancel.
     if (pending?.kind === "select") {
       const n = pending.options.length;
-      if (key.upArrow) setMenuSel((i) => (i - 1 + n) % n);
-      else if (key.downArrow) setMenuSel((i) => (i + 1) % n);
-      else if (key.return || key.escape) {
+      if (key.upArrow) { setMenuSel((i) => (i - 1 + n) % n); return; }
+      else if (key.downArrow) { setMenuSel((i) => (i + 1) % n); return; }
+      else if (((key.return || modifiedReturn) && !input.trim()) || key.escape) {
         const choice = key.escape ? -1 : menuSel;
         const onChoose = pending.onChoose;
         setPending(null);
         onChoose(choice);
+        return;
       }
-      return;
     }
 
     // The ask_user form is up: reuse form.ts's pure state machine verbatim.
     if (pending?.kind === "form" && formState) {
-      if (key.upArrow) setFormState(reduceForm(pending.questions, formState, "up").state);
-      else if (key.downArrow || key.tab) setFormState(reduceForm(pending.questions, formState, "down").state);
-      else if (key.return || char === " ") {
+      if (key.upArrow) { setFormState(reduceForm(pending.questions, formState, "up").state); return; }
+      else if (key.downArrow || key.tab) { setFormState(reduceForm(pending.questions, formState, "down").state); return; }
+      else if ((key.return || modifiedReturn) && !input.trim()) {
         const next = reduceForm(pending.questions, formState, "select");
         setFormState(next.state);
         if (next.done) {
@@ -649,18 +693,22 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
           setPending(null);
           setFormState(null);
         }
+        return;
       } else if (key.escape) {
         pending.resolve(null);
         setPending(null);
         setFormState(null);
+        return;
       }
-      return;
     }
+
+    const completionAction = completion.handleKey(key, (value) => { setInput(value); setCursor(value.length); setHistIdx(null); });
+    if (completionAction.handled && !completionAction.submit) return;
 
     // Agent navigation has its own focus. Typing/history keeps arrow keys
     // until Tab, left at the input boundary, or down from an empty input.
     const ids = ["main", ...listAgentViews().map((a) => a.id)];
-    if (ids.length > 1) {
+    if (!pending && ids.length > 1) {
       if (subAgentFocus !== null) {
         if (key.escape || key.rightArrow) { setSubAgentFocus(null); setSubAgentDetail(null); return; }
         if (key.upArrow || key.downArrow || key.tab) {
@@ -691,7 +739,6 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
     }
 
     // Ink 5 strips the leading ESC from CSI-u / modifyOtherKeys sequences.
-    const modifiedReturn = char === "[13;5u" || char === "[27;5;13~";
     if (key.return || modifiedReturn) {
       if (submitting.current || (busy && !turn.current)) return;
       const immediate = key.ctrl || modifiedReturn;
@@ -700,7 +747,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
       setDetails(null);
       setSubAgentDetail(null);
       setSubAgentFocus(null);
-      const text = input.trim();
+      const text = completionAction.submit ?? input.trim();
       setInput("");
       setCursor(0);
       setHistIdx(null);
@@ -713,9 +760,9 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
         .catch((error) => note(chalk.yellow(`Could not submit message: ${error instanceof Error ? error.message : String(error)}`)))
         .finally(() => { submitting.current = false; });
     } else if (key.leftArrow) {
-      setCursor((c) => Math.max(0, c - 1)); // move the caret left within the line
+      setCursor((c) => pastedTexts.at(input, c, "left")?.start ?? Math.max(0, c - 1));
     } else if (key.rightArrow) {
-      setCursor((c) => Math.min(input.length, c + 1)); // ...and right
+      setCursor((c) => pastedTexts.at(input, c, "right")?.end ?? Math.min(input.length, c + 1));
     } else if (key.ctrl && char === "a") {
       setCursor(0); // Home — jump to the start of the line
     } else if (key.ctrl && char === "e") {
@@ -744,7 +791,11 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
       // Delete the char BEFORE the caret. Both Backspace and macOS DEL land here,
       // so this is always a backward delete (forward-delete is rare; we skip it).
       const attachment = images.find((image) => input.slice(0, cursor).endsWith(imageLabel(image.id)));
-      if (attachment) {
+      const paste = pastedTexts.at(input, cursor, "left");
+      if (paste) {
+        setInput(input.slice(0, paste.start) + input.slice(paste.end));
+        setCursor(paste.start);
+      } else if (attachment) {
         const length = imageLabel(attachment.id).length;
         setInput(input.slice(0, cursor - length) + input.slice(cursor));
         setCursor(cursor - length);
@@ -756,7 +807,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
     } else if (char && !key.ctrl && !key.meta) {
       // Insert at the caret (a bulk chunk — paste / dropped file path — is
       // normalized: a dropped file becomes a clean absolute path; prose unchanged).
-      const add = char.length > 1 ? normalizeDroppedPaths(char) : char;
+      const add = char.length > 1 ? pastedTexts.fold(normalizeDroppedPaths(char)) : char;
       setHistIdx(null);
       setInput(input.slice(0, cursor) + add + input.slice(cursor));
       setCursor(cursor + add.length);
@@ -837,6 +888,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
           <Text>{renderForm(pending.questions, formState)}</Text>
         </Box>
       )}
+      {pending && <Text dimColor wrap="truncate-end">Type a follow-up · Enter sends text; empty input selects · Esc cancels</Text>}
 
       {/* the pinned input box — stays at the bottom, conversation scrolls above it.
           The caret is drawn AT its position: the char under it is inverted (a block
@@ -847,7 +899,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
       {!details && !selectedAgent && !pending && followUps.size > 0 && (
         <Box flexDirection="column" marginTop={rows >= 20 ? 1 : 0}>
           <Text dimColor wrap="truncate-end">Messages queued for the next tool boundary · Esc / Ctrl+Enter interrupt and send</Text>
-          {followUps.pending.slice(rows >= 20 ? -2 : -1).map((message, i) => <Text key={i} dimColor wrap="truncate-end">  ↳ {message.text}</Text>)}
+          {followUps.pending.slice(rows >= 20 ? -2 : -1).map((message, i) => <Text key={i} dimColor wrap="truncate-end">  ↳ {message.displayText ?? message.text}</Text>)}
           {followUps.size > 2 && <Text dimColor>  … {followUps.size - 2} earlier messages queued</Text>}
         </Box>
       )}
@@ -896,7 +948,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
 
           // Long drafts must not grow the redraw region. Keep the cursor's
           // neighborhood visible; the complete draft remains in input state.
-          const visibleRows = details || selectedAgent || followUps.size || rows < 20 ? 1 : 3;
+          const visibleRows = details || selectedAgent || followUps.size || completion.visible || rows < 20 ? 1 : 3;
           const startLine = Math.max(0, cursorLine - visibleRows + 1);
           return lines.slice(startLine, startLine + visibleRows).map((line, offset) => {
             const i = startLine + offset;
@@ -922,9 +974,10 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
           });
         })()}
       </Box>
+      {completion.view}
       {rows >= 20 && busy && !details && !selectedAgent && !pending && <Text dimColor wrap="truncate-end">Enter queue follow-up · Ctrl+Enter interrupt and send now</Text>}
 
-      {rows >= 20 && !details && !selectedAgent && !pending && <AgentList agents={agents} focus={subAgentFocus} viewing={subAgentDetail} mainBusy={busy} maxRows={Math.max(2, Math.min(3, rows - 24))} />}
+      {rows >= 20 && !details && !selectedAgent && !pending && !completion.visible && <AgentList agents={agents} focus={subAgentFocus} viewing={subAgentDetail} mainBusy={busy} maxRows={Math.max(2, Math.min(3, rows - 24))} />}
       <StatusBar model={CONFIG.model} dir={dir} branch={branch} status={getStatus()} />
       </Box>
     </Box>

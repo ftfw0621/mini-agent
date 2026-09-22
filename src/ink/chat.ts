@@ -1,3 +1,4 @@
+import { AutoReviewBudget } from "../auto-budget.js";
 import type OpenAI from "openai"; // types + the client passed in
 import { runLoop, type LoopResult } from "../loop.js"; // the REAL agent loop — tools, permissions, retries, the lot
 import { CONFIG } from "../config.js"; // model + sub-agent tier
@@ -28,7 +29,9 @@ export interface TurnHooks {
 // REPL relies on — so we only push the user turn here and let the loop do the
 // rest. All screen output flows through hooks.output (the Ink sink).
 export function makeRunTurn(client: OpenAI, messages: OpenAI.ChatCompletionMessageParam[]) {
+  let reviewBudget = new AutoReviewBudget();
   return async (input: string | null, hooks: TurnHooks): Promise<LoopResult> => {
+    if (input !== null) reviewBudget = new AutoReviewBudget();
     if (input !== null) messages.push({ role: "user", content: userContent(input, hooks.images ?? []) });
     return runLoop(messages, {
       client,
@@ -39,6 +42,7 @@ export function makeRunTurn(client: OpenAI, messages: OpenAI.ChatCompletionMessa
       askUser: hooks.askUser,
       judge: hooks.judge,
       autoMode: hooks.autoMode,
+      reviewBudget,
       followUps: hooks.followUps,
       onFollowUp: hooks.onFollowUp,
       canPrompt: !!process.stdin.isTTY,
