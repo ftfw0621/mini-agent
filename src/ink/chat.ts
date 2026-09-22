@@ -3,6 +3,7 @@ import { runLoop, type LoopResult } from "../loop.js"; // the REAL agent loop â€
 import { CONFIG } from "../config.js"; // model + sub-agent tier
 import type { Judge } from "../judge.js"; // optional LLM permission classifier
 import type { AutoMode } from "../auto.js";
+import type { FollowUpQueue } from "../follow-up.js";
 import { userContent, type ImageAttachment } from "../images.js";
 import type { LoopOutput } from "../output.js"; // the Ink sink implements this
 
@@ -18,6 +19,8 @@ export interface TurnHooks {
   isInterrupted: () => boolean; // polled between steps for a clean stop
   judge?: Judge; // the session's optional LLM permission classifier
   autoMode?: AutoMode;
+  followUps?: FollowUpQueue;
+  onFollowUp?: (text: string) => void;
 }
 
 // Drive one real turn through the loop. The loop mutates `messages` in place
@@ -25,8 +28,8 @@ export interface TurnHooks {
 // REPL relies on â€” so we only push the user turn here and let the loop do the
 // rest. All screen output flows through hooks.output (the Ink sink).
 export function makeRunTurn(client: OpenAI, messages: OpenAI.ChatCompletionMessageParam[]) {
-  return async (input: string, hooks: TurnHooks): Promise<LoopResult> => {
-    messages.push({ role: "user", content: userContent(input, hooks.images ?? []) });
+  return async (input: string | null, hooks: TurnHooks): Promise<LoopResult> => {
+    if (input !== null) messages.push({ role: "user", content: userContent(input, hooks.images ?? []) });
     return runLoop(messages, {
       client,
       model: CONFIG.model,
@@ -36,6 +39,8 @@ export function makeRunTurn(client: OpenAI, messages: OpenAI.ChatCompletionMessa
       askUser: hooks.askUser,
       judge: hooks.judge,
       autoMode: hooks.autoMode,
+      followUps: hooks.followUps,
+      onFollowUp: hooks.onFollowUp,
       canPrompt: !!process.stdin.isTTY,
       subAgentModel: CONFIG.subAgentModel,
       output: hooks.output,

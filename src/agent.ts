@@ -15,6 +15,7 @@ import { runHooks } from "./hooks.js"; // SessionStart lifecycle hook
 import { connectMcpServers, listMcpServers, mcpActionsFor, runMcpAction } from "./mcp.js"; // external tool servers (MCP) + /mcp
 import { Judge } from "./judge.js"; // optional LLM permission classifier
 import { AutoMode } from "./auto.js";
+import { reviewDebugCommand } from "./auto-debug.js";
 import { isPlanMode, setPlanMode } from "./permissions.js"; // plan mode: research-only until the user approves a plan
 import { undoLast, clearUndo, sessionChanges } from "./undo.js"; // /undo + /diff: take back, or review, this session's writes
 import { clearTodos, getTodos, renderTodos } from "./todos.js"; // the agent's plan: /todos to view, cleared with the conversation
@@ -82,6 +83,7 @@ const SESSION_HELP = `commands:
   /mcp       list configured MCP servers + status; select one to authenticate / reconnect / disable
   /plan      toggle plan mode — research-only; the agent presents a plan you approve before any change
   /auto      toggle auto mode — risky or uncertain actions still require approval
+  /auto debug [on|off|status]  inspect permission reviewer requests and replies
   /todos     show the agent's current task plan (it maintains one with todo_write on multi-step work)
   /bg        list background tasks this session (run_bash_background) and their status
   /team      list the agent team (spawn_teammate): each teammate's role, status, and pending inbox
@@ -489,6 +491,8 @@ async function main() {
 
   // Handle a /slash command. Returns true if the line was a command.
   const handleCommand = async (line: string): Promise<boolean> => {
+    const debug = reviewDebugCommand(line);
+    if (debug !== null) { console.log(chalk.dim(debug)); return true; }
     if (line === "/auto") {
       console.log(chalk.dim(autoMode.toggle()));
       return true;

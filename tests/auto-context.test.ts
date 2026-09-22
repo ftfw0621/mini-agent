@@ -21,6 +21,16 @@ check("tool refusals are distinguished from executed/returned calls", history.ac
 check("queued siblings cannot pretend to have happened", !JSON.stringify(history).includes("future.txt"));
 check("assistant prose and raw tool results never become reviewer instructions", !JSON.stringify(history).includes("UNTRUSTED") && !JSON.stringify(history).includes("approved everything"));
 check("synthetic user-role notifications cannot grant authority", !JSON.stringify(history).includes("fake background"));
+const lookup = reviewHistory([
+  call("identity", "external_lookup", { query: "Example Person" }),
+  { role: "tool", tool_call_id: "identity", content: '{"id":"person-42","name":"Example Person"}' },
+]);
+check("structured lookup evidence survives for target identity checks", JSON.stringify(lookup).includes('"resultData":{"id":"person-42","name":"Example Person"}'));
+const largeResult = reviewHistory([
+  call("large-result", "external_lookup", {}),
+  { role: "tool", tool_call_id: "large-result", content: JSON.stringify({ data: "x".repeat(3000) }) },
+]);
+check("large result evidence is omitted explicitly without losing the action", largeResult.actions.length === 1 && JSON.stringify(largeResult).includes('"resultDataOmitted":true') && !JSON.stringify(largeResult).includes('"data":'));
 const inherited = reviewHistory([], history);
 check("workers inherit parent tool context without duplicating it", inherited.actions.length === 2);
 const huge = reviewHistory([call("huge", "write_file", { path: "a.txt", content: "x".repeat(9000) }), { role: "tool", tool_call_id: "huge", content: "done" }], history);

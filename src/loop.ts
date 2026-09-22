@@ -14,6 +14,7 @@ import type { Judge } from "./judge.js"; // optional LLM permission classifier
 import { reviewHistory, type ReviewHistory } from "./auto-context.js";
 import { AgentProgress, type AgentView } from "./agent-progress.js";
 import type { AutoMode } from "./auto.js"; // Jev review, shared by all tool execution paths
+import type { FollowUpQueue } from "./follow-up.js";
 import { recordUsage } from "./cost.js"; // meter token usage from the stream
 import { mark, thinkingWord, spinnerText } from "./ui.js"; // centralized terminal styling (markers, spinner)
 import { recordToolCall, recordToolResult, recordToolDetail, recordReasoning } from "./tui.js"; // folded tool-call trace (Ctrl+T) + the model's hidden thinking (Ctrl+R)
@@ -68,6 +69,8 @@ export interface LoopOptions {
   autoHistory?: ReviewHistory; // inherited tool context, never authorization
   delegatedTask?: string; // parent-authored context for a worker
   autoRequests?: readonly string[]; // genuine user requests, snapshotted per turn and inherited by children
+  followUps?: FollowUpQueue;
+  onFollowUp?: (text: string) => void; // delivered, not merely queued
   canPrompt?: boolean; // false for print mode and unattended teammates
   askUser?: (questions: { question: string; options: string[] }[]) => Promise<{ question: string; answer: string }[] | null>; // present a multi-question form (Day 30); null if cancelled/non-interactive
   progress?: AgentProgress; // per-worker activity, tokens and bounded transcript
@@ -1162,6 +1165,7 @@ async function continueForTeam(messages: OpenAI.ChatCompletionMessageParam[], op
   if (opts.subAgent) return false; // a plain sub-agent has no team
   // The lead: wait for the team to act rather than spinning or ending early.
   while (inboxCount(LEAD) === 0 && anyTeammateBusy() && !opts.isInterrupted()) {
+    if (opts.followUps?.size) return true;
     await interruptibleSleep(TEAM_POLL_MS, opts.isInterrupted); // yield to the teammates; they message us when they have something
   }
   return consumeInbox(messages, opts); // process whatever is waiting; false if the team is quiescent (→ the lead may finish)
@@ -1199,7 +1203,36 @@ export async function runLoop(
 ): Promise<LoopResult> {
   // Children inherit this snapshot. Later human turns cannot silently grant
   // broader authorization to already-running background work.
-  opts = { ...opts, autoRequests: opts.autoRequests ?? opts.autoMode?.snapshot() };
+  opts = { ...opts, autoRequests: opts.autoRequests ?? opts.autoMode?.snapshot(), followUps: opts.subAgent ? undefined : opts.followUps };
+  const recordHumanInput = (text: string): void => {
+    opts.autoMode?.recordRequest(text);
+    opts.autoRequests = [...(opts.autoRequests ?? []), text];
+  };
+  // Capture at the actual UI callback, never by parsing an ask_user tool result
+  // (which can also be restored or forged). Close over this loop's opts so the
+  // answer reaches subsequent calls despite per-call option copies below.
+  const askUser = opts.askUser;
+  if (askUser && !opts.subAgent) opts.askUser = async (questions) => {
+    const answers = await askUser(questions);
+    if (!opts.signal.aborted && !opts.isInterrupted()) {
+      for (const answer of answers ?? []) {
+        const question = questions.find((q) => q.question === answer.question);
+        if (question && typeof answer.answer === "string" && answer.answer.trim()) {
+          recordHumanInput(`Human form reply (question is context; only the submitted answer expresses the user's choice): ${JSON.stringify({ question: question.question, answer: answer.answer })}`);
+        }
+      }
+    }
+    return answers;
+  };
+  const receiveFollowUps = (): boolean => {
+    const pending = opts.followUps?.drain() ?? [];
+    for (const message of pending) {
+      messages.push({ role: "user", content: message.content });
+      recordHumanInput(message.text);
+      opts.onFollowUp?.(message.text);
+    }
+    return pending.length > 0;
+  };
   // The loop's mutable state: budgets and counters, rewritten every iteration.
   const attempts = { total: 0, rateLimited: 0, consecutive: 0 };
   const compaction = { count: 0, failures: 0 }; // compaction score card for this query
@@ -1216,6 +1249,7 @@ export async function runLoop(
     // The inner loop retries the model call until it succeeds or a budget dies.
     while (true) {
       if (opts.isInterrupted()) return { reason: TerminateReason.UserInterrupt }; // user asked us to stop — obey before spending money
+      receiveFollowUps();
 
       // Proactive compaction: act BEFORE the API rejects us. Waiting for the
       // hard limit means the failure already happened.
@@ -1294,6 +1328,7 @@ export async function runLoop(
       if (out.content) lastText = out.content; // remember the latest answer text — the round-cap path returns it
 
       if (!out.toolCalls.length) {
+        if (receiveFollowUps()) break; // new human input takes precedence over finishing
         // The model wants to stop. A Stop hook gets the last word: if it exits
         // 2, the agent is NOT done — its stderr becomes a new instruction and
         // the loop continues. This is how you build test-driven AI: a Stop hook
@@ -1320,6 +1355,7 @@ export async function runLoop(
         // shutdown handshake (or its idle backstop). If there's something to
         // process, run another round instead of stopping.
         if (await continueForTeam(messages, opts)) break; // exit the inner while → advance the round counter
+        if (receiveFollowUps()) break;
         // The lead is really finishing: disband any teammates still idling so
         // they exit cleanly (Day 39) instead of being orphaned.
         if (!opts.subAgent && !opts.teammate) await shutdownTeam(opts);
@@ -1334,6 +1370,13 @@ export async function runLoop(
       // Claude Code parallelizes safe reads while serializing risky work.
       let i = 0; // index into out.toolCalls
       while (i < out.toolCalls.length) {
+        if (opts.followUps?.size && !opts.isInterrupted()) {
+          // Resolve every outstanding tool ID BEFORE adding a user message.
+          // Unstarted actions came from the old intent and must be replanned.
+          for (const call of out.toolCalls.slice(i)) messages.push({ role: "tool", tool_call_id: call.id, content: "[follow-up] Not executed: new user input arrived. Reconsider this action using the latest instructions." });
+          receiveFollowUps();
+          break;
+        }
         const batch: AssembledCall[] = []; // a run of safe, parallelizable calls
         while (i < out.toolCalls.length && isReadOnlyTool(out.toolCalls[i].name)) batch.push(out.toolCalls[i++]);
         if (batch.length) {

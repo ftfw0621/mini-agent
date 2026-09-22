@@ -32,6 +32,7 @@ export const SESSION_HELP = `commands:
   /mcp       list configured MCP servers + status; select one to authenticate / reconnect / disable
   /plan      toggle plan mode — research-only; the agent presents a plan you approve before any change
   /auto      toggle auto mode — risky or uncertain actions still require approval
+  /auto debug [on|off|status]  inspect permission reviewer requests and replies
   /todos     show the agent's current task plan (it maintains one with todo_write on multi-step work)
   /bg        list background tasks this session (run_bash_background) and their status
   /team      list the agent team (spawn_teammate): each teammate's role, status, and pending inbox
@@ -45,13 +46,15 @@ export const SESSION_HELP = `commands:
   exit       leave (Ctrl+C does the same)
 
 keys (during or after a turn):
+  Enter      while working, queue a follow-up for the next tool boundary
+  Ctrl+Enter interrupt and send now (Esc also sends already-queued messages)
   Ctrl+V     paste an image as [Image #1], or paste text
   Tab / ←    focus the agent list (← at the input boundary)
   ↑ / ↓      select an agent; Enter views it; Esc returns to main
   Ctrl+R     toggle thinking details
   Ctrl+T     toggle tool arguments and results
   ↑ / ↓      page through open details (PgUp/PgDn also work)
-  Esc        close details first; otherwise interrupt the turn`;
+  Esc        close details first; otherwise interrupt and process queued input`;
 
 // Colored status word for an MCP server (shared by the Ink + readline /mcp UIs).
 export function mcpStatusText(info: McpServerInfo): string {

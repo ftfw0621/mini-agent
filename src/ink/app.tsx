@@ -24,10 +24,13 @@ import { extractMemories } from "../memory.js";
 import { displayWidth } from "../editor.js"; // display-width measurement (CJK-aware)
 import { runHooks } from "../hooks.js";
 import { emit } from "../telemetry.js";
+import { reviewDebugCommand } from "../auto-debug.js";
 import type { ClipboardSource } from "../clipboard.js";
-import { readClipboard, imageLabel, imagesInInput, MAX_IMAGES, type ImageAttachment } from "../images.js";
+import { readClipboard, imageLabel, imagesInInput, userContent, MAX_IMAGES, type ImageAttachment } from "../images.js";
+import { FollowUpQueue } from "../follow-up.js";
 import { AgentList, moveAgentFocus } from "./agents.js";
 import { detailPage, summarizeActivity } from "./activity.js";
+import { useTerminalSize } from "./viewport.js";
 import { makeInkSink, type Item } from "./sink.js"; // turns the loop's output into React state
 import { runInfoCommand, SESSION_HELP, mcpStatusText } from "./commands.js"; // the non-interactive slash commands + /mcp status
 import { listMcpServers, mcpActionsFor, runMcpAction } from "../mcp.js"; // /mcp: list + per-server actions
@@ -62,14 +65,12 @@ const SPINNER_FRAMES = ["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "
 // and the cursor math drifts (sudden blank gaps). So we never let the in-flight
 // answer render more than the rows we can spare; the FULL reply still commits to
 // <Static> (formatted as markdown) the moment it finishes.
-function liveTail(s: string): string {
-  const rows = process.stdout.rows || 24;
+function liveTail(s: string, rows: number, columns: number, queued: boolean): string {
   // Keep the preview SMALL (≤10 lines) even on a tall terminal: Ink repaints this
   // whole region on every (throttled) update, and a smaller block repaints with
   // far less flicker. The full reply still lands in <Static> on commit.
-  const maxLines = Math.max(3, Math.min(10, rows - 20)); // reserve rows for the input box + status bar + agent bar + margins
-  const cols = process.stdout.columns || 80;
-  const page = detailPage(s, 0, maxLines, Math.max(1, cols - 2));
+  const maxLines = Math.max(1, Math.min(10, rows - (queued ? 26 : 20)));
+  const page = detailPage(s, 0, maxLines, Math.max(1, columns - 2));
   return (page.pages > 1 ? "… " : "") + page.text;
 }
 
@@ -121,14 +122,14 @@ function StatusBar({ model, dir, branch, status }: { model: string; dir: string;
     <Text key="t" dimColor>⏱ {formatElapsed(status.elapsedMs)}</Text>,
   ];
   return (
-    <Box>
+    <Text wrap="truncate-end">
       {parts.map((p, i) => (
         <React.Fragment key={i}>
           {i > 0 && <Text dimColor>{"  ·  "}</Text>}
           {p}
         </React.Fragment>
       ))}
-    </Box>
+    </Text>
   );
 }
 
@@ -144,7 +145,8 @@ const EXIT_NOTES: Partial<Record<TerminateReason, string>> = {
   [TerminateReason.UserInterrupt]: "Interrupted — back at the prompt.",
 };
 
-export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSource; session: InkSession; runTurn: (input: string, hooks: TurnHooks) => Promise<LoopResult> }) {
+export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSource; session: InkSession; runTurn: (input: string | null, hooks: TurnHooks) => Promise<LoopResult> }) {
+  const { rows, columns } = useTerminalSize();
   const { client, messages, systemMessage, costMeter, skills, judge, autoMode, model, dir, branch, getStatus } = session;
 
   // Seed the scrollback with the welcome banner + the dim startup notices.
@@ -170,6 +172,8 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
   const [agentPage, setAgentPage] = useState(0);
   const [subAgentDetail, setSubAgentDetail] = useState<string | null>(null); // the id of the sub-agent whose output is shown in detail
   const [, setTick] = useState(0); // forces a re-render once a second so the clock / cost tick
+  const followUps = useRef(new FollowUpQueue(() => setTick((t) => t + 1))).current;
+  const submitting = useRef(false);
   const { exit } = useApp();
 
   const pushItem = useRef((it: Item) => setItems((xs) => [...xs, it])).current;
@@ -202,10 +206,10 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
   // as the prompt (a user highlight bar, or a note for /skill); the loop appends
   // `content` to `messages` itself. The permission menu + ask_user form raise a
   // `pending` prompt that returns a promise the loop awaits.
-  const runConversationTurn = (content: string, display: Item, attachments: readonly ImageAttachment[] = []) => {
+  const runConversationTurn = (content: string | null, display?: Item, attachments: readonly ImageAttachment[] = []) => {
     setDetails(null);
     setDetailOffset(0);
-    pushItem(display);
+    if (display) pushItem(display);
     clearReasoning(); // Ctrl+R should reveal THIS turn's thinking
     clearToolCalls(); // ...and Ctrl+T THIS turn's tool calls
     setBusy(true);
@@ -237,10 +241,12 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
       isInterrupted: () => tstate.interrupted, // polled between steps for a clean stop
       judge,
       autoMode,
+      followUps,
+      onFollowUp: (text) => pushItem({ kind: "user", text }),
     };
     runTurn(content, hooks)
       .then(async (result: LoopResult) => {
-        if (result.reason !== TerminateReason.Done) note(chalk.yellow(`⚠️ ${EXIT_NOTES[result.reason] ?? result.reason}`));
+        if (result.reason !== TerminateReason.Done && !(result.reason === TerminateReason.UserInterrupt && followUps.size)) note(chalk.yellow(`⚠️ ${EXIT_NOTES[result.reason] ?? result.reason}`));
         saveSession(sessionId, model, messages, pendingTitle.current); // snapshot after every turn — crash-safe by construction
         if (CONFIG.memory.autoExtract && result.reason === TerminateReason.Done) {
           try {
@@ -260,6 +266,12 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
       });
   };
 
+  // Covers immediate interruption and a message arriving as the turn finishes.
+  // The queue survives the old turn; the new controller has a fresh abort signal.
+  useEffect(() => {
+    if (!busy && !pending && !turn.current && followUps.size) runConversationTurn(null);
+  });
+
   // The cron IDLE PROCESSOR (Day s14): the scheduler fires jobs into a queue, but
   // injectCronMessages only drains it mid-turn — so a job that fires while you're
   // at the prompt would never run on its own. Here, while idle (no turn, no menu),
@@ -268,7 +280,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
   // Effect re-subscribes on busy/pending changes so the closure always sees the
   // current `runConversationTurn`; it only installs the poll when truly idle.
   useEffect(() => {
-    if (busy || pending) return; // only fire scheduled work when the agent is idle
+    if (busy || pending || followUps.size) return; // human follow-ups take priority
     const id = setInterval(() => {
       if (!cronItemsPending()) return;
       const fired = consumeCronQueue();
@@ -283,7 +295,11 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
 
   // A normal (non-command) prompt: run UserPromptSubmit hooks, expand @file
   // mentions, then start the turn. Mirrors agent.ts's submit path.
-  const submitLine = async (text: string, attachments: readonly ImageAttachment[] = []) => {
+  const submitLine = async (text: string, attachments: readonly ImageAttachment[] = [], immediate = false) => {
+    if (turn.current && (text.startsWith("/") || text === "exit" || text === "quit")) {
+      note(chalk.dim("Commands are available when the agent is idle; use Esc to interrupt."));
+      return;
+    }
     if (text === "exit" || text === "quit") return doExit();
     if (await handleCommand(text)) return; // slash commands never reach the model
     const hook = await runHooks("UserPromptSubmit", { prompt: text });
@@ -315,8 +331,21 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
       }
     }
 
+    if (turn.current || followUps.size) {
+      followUps.enqueue({ text, content: userContent(augmented + injected, attachments) });
+      if (immediate) interruptForFollowUp();
+      return;
+    }
     autoMode.recordRequest(text); // before attached files or hook output can masquerade as user intent
     runConversationTurn(augmented + injected, { kind: "user", text }, attachments); // show the original line; send the augmented content
+  };
+
+  const interruptForFollowUp = () => {
+    const current = turn.current;
+    if (!current || current.interrupted || !followUps.size) return;
+    current.interrupted = true;
+    current.controller.abort();
+    note(chalk.dim("(interrupting the current step to process your follow-up)"));
   };
 
   // Handle a /slash command. Returns true if the line was a command (handled).
@@ -362,6 +391,8 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
   };
 
   const handleCommand = async (line: string): Promise<boolean> => {
+    const debug = reviewDebugCommand(line);
+    if (debug !== null) { note(chalk.dim(debug)); return true; }
     if (line === "/auto") {
       note(chalk.dim(autoMode.toggle()));
       setAutoEnabled(autoMode.enabled);
@@ -533,7 +564,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
       return exit(); // Ctrl+C quits immediately (process.on exit cleans up MCP/background)
     }
 
-    if (key.ctrl && char === "v" && !busy && !pending && subAgentFocus === null) {
+    if (key.ctrl && char === "v" && !pending && subAgentFocus === null) {
       if (pasting.current) return;
       pasting.current = true;
       const id = ++imageSeq.current;
@@ -582,6 +613,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
     // Esc while a turn runs (and no menu is up): interrupt it — like the first
     // Ctrl+C of the readline REPL, without the force-quit escalation.
     if (key.escape && busy && !pending) {
+      if (followUps.size) { interruptForFollowUp(); return; }
       const t = turn.current;
       if (t && !t.interrupted) {
         t.interrupted = true; // the loop polls this between steps
@@ -651,15 +683,19 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
         }
         return; // the input buffer stays untouched while selecting an agent
       }
-      if (key.tab || (key.leftArrow && (busy || cursor === 0)) || (key.downArrow && (busy || (!input && histIdx === null)))) {
+      if (key.tab || (key.leftArrow && cursor === 0) || (key.downArrow && !input && histIdx === null)) {
         setSubAgentFocus("main");
         setDetails(null);
         return;
       }
     }
 
-    if (busy) return; // a turn in flight with no prompt — ignore typing for now (type-ahead is later)
-    if (key.return) {
+    // Ink 5 strips the leading ESC from CSI-u / modifyOtherKeys sequences.
+    const modifiedReturn = char === "[13;5u" || char === "[27;5;13~";
+    if (key.return || modifiedReturn) {
+      if (submitting.current || (busy && !turn.current)) return;
+      const immediate = key.ctrl || modifiedReturn;
+      if (!input.trim() && immediate && followUps.size) { interruptForFollowUp(); return; }
       // Dismiss the sub-agent detail/focus on a normal submit.
       setDetails(null);
       setSubAgentDetail(null);
@@ -672,7 +708,10 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
       setImages([]);
       if (!text) return;
       if (text.trim()) history.push(text); // remember non-empty entries for ↑/↓
-      void submitLine(text, attachments);
+      submitting.current = true;
+      void submitLine(text, attachments, immediate)
+        .catch((error) => note(chalk.yellow(`Could not submit message: ${error instanceof Error ? error.message : String(error)}`)))
+        .finally(() => { submitting.current = false; });
     } else if (key.leftArrow) {
       setCursor((c) => Math.max(0, c - 1)); // move the caret left within the line
     } else if (key.rightArrow) {
@@ -724,24 +763,27 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
     }
   });
 
-  const rows = process.stdout.rows || 24;
   const agents = listAgentViews();
   const selectedAgent = agents.find((a) => a.id === subAgentDetail);
-  const agentDetailView = detailPage(selectedAgent?.transcript || "(Waiting for activity…)", agentPage, Math.max(2, Math.min(10, rows - 19)), Math.max(10, (process.stdout.columns || 80) - 4));
-  const detailView = detailPage(details === "tools" ? getToolCalls() ?? "No tool calls this turn." : details === "reasoning" ? getReasoning() ?? "No thinking recorded this turn." : "", detailOffset, Math.max(3, Math.min(12, rows - (agents.length ? 21 : 16))), Math.max(10, (process.stdout.columns || 80) - 4));
-  const activity = busy && !details && !pending && !subAgentDetail ? summarizeActivity(getToolActivity(), Date.now(), rows >= 30 && !agents.length ? 2 : 1) : [];
+  const agentDetailView = detailPage(selectedAgent?.transcript || "(Waiting for activity…)", agentPage, Math.max(1, Math.min(10, rows - 10)), Math.max(1, columns - 4));
+  const detailView = detailPage(details === "tools" ? getToolCalls() ?? "No tool calls this turn." : details === "reasoning" ? getReasoning() ?? "No thinking recorded this turn." : "", detailOffset, Math.max(1, Math.min(12, rows - 9)), Math.max(1, columns - 4));
+  const activity = rows >= 20 && busy && !details && !pending && !subAgentDetail && !followUps.size ? summarizeActivity(getToolActivity(), Date.now(), rows >= 30 && !agents.length ? 2 : 1) : [];
 
   return (
     <Box flexDirection="column">
       {/* committed conversation — rendered once each, then left in the scrollback */}
       <Static items={items}>{(item, i) => <ItemView key={i} item={item} />}</Static>
 
+      {/* Ink must be able to erase this entire region. Static scrollback is
+          outside the bound; dynamic panels can never grow to a full screen. */}
+      <Box flexDirection="column" height={!pending && (details || selectedAgent) ? Math.max(1, rows - 1) : undefined} overflow="hidden">
+
       {/* the live, streaming reply (moves into <Static> when it finishes) */}
       {live !== null && !details && !pending && !selectedAgent && (
-        <Box marginTop={1} flexDirection="row">
+        <Box marginTop={rows >= 20 ? 1 : 0} flexDirection="row">
           <Text color="green">⏺ </Text>
           <Box flexGrow={1}>
-            <Text>{live === "" ? chalk.dim("…") : liveTail(live)}</Text>
+            <Text>{live === "" ? chalk.dim("…") : liveTail(live, rows, columns, followUps.size > 0)}</Text>
           </Box>
         </Box>
       )}
@@ -755,19 +797,19 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
       ))}
 
       {/* The animation remains active while calling a model or executing tools. */}
-      {!pending && !selectedAgent && (status !== null || busy) && (
-        <Box marginTop={1}>
+      {!details && !pending && !selectedAgent && (status !== null || busy) && (
+        <Box marginTop={rows >= 20 ? 1 : 0}>
           <Spinner />
           <Text color="#D77757" wrap="truncate-end"> {status?.replace("Ctrl+C to interrupt", "Esc to interrupt") ?? (live !== null ? "Writing…" : "Working…")}</Text>
         </Box>
       )}
-      {!pending && (busy || getToolCallCount() > 0 || details) && (
+      {rows >= 20 && !details && !selectedAgent && !pending && (busy || getToolCallCount() > 0) && (
         <Text dimColor wrap="truncate-end">  {getToolCallCount()} tool calls · Ctrl+T details · Ctrl+R thinking{busy ? " · Esc interrupt" : ""}</Text>
       )}
 
       {details && !pending && (
         <Box flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1}>
-          <Text dimColor wrap="truncate-end">{details === "tools" ? "Tool details" : "Thinking"} · {detailView.pages - detailView.page}/{detailView.pages} · ↑↓ page · Esc close</Text>
+          <Text dimColor wrap="truncate-end">{details === "tools" ? "Tool details" : "Thinking"} · {detailView.pages - detailView.page}/{detailView.pages} · ↑↓ page · Esc close{followUps.size ? ` · ${followUps.size} queued` : ""}</Text>
           <Text>{detailView.text}</Text>
         </Box>
       )}
@@ -802,11 +844,18 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
           inverted cell is a space. This is what makes ←/→ visibly move the cursor.
           Input is manually wrapped into visual lines so the cursor tracks correctly
           when text exceeds the terminal width. */}
-      <Box borderStyle="round" borderColor={planMode ? "magenta" : autoEnabled ? "yellow" : "cyan"} paddingX={1} marginTop={1} flexDirection="column">
+      {!details && !selectedAgent && !pending && followUps.size > 0 && (
+        <Box flexDirection="column" marginTop={rows >= 20 ? 1 : 0}>
+          <Text dimColor wrap="truncate-end">Messages queued for the next tool boundary · Esc / Ctrl+Enter interrupt and send</Text>
+          {followUps.pending.slice(rows >= 20 ? -2 : -1).map((message, i) => <Text key={i} dimColor wrap="truncate-end">  ↳ {message.text}</Text>)}
+          {followUps.size > 2 && <Text dimColor>  … {followUps.size - 2} earlier messages queued</Text>}
+        </Box>
+      )}
+      <Box borderStyle="round" borderColor={planMode ? "magenta" : autoEnabled ? "yellow" : "cyan"} paddingX={1} marginTop={rows >= 20 ? 1 : 0} flexDirection="column" flexShrink={0}>
         {(() => {
           const prompt = planMode ? "plan ❯ " : autoEnabled ? "auto ❯ " : "❯ ";
           const promptColor = planMode ? "magenta" : autoEnabled ? "yellow" : "cyan";
-          const cols = process.stdout.columns || 80;
+          const cols = columns;
           const innerWidth = Math.max(10, cols - 4); // border(2) + paddingX(2)
           const promptW = displayWidth(prompt);
           const firstW = Math.max(1, innerWidth - promptW);
@@ -845,7 +894,12 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
             cuOff += ch.length;
           }
 
-          return lines.map((line, i) => {
+          // Long drafts must not grow the redraw region. Keep the cursor's
+          // neighborhood visible; the complete draft remains in input state.
+          const visibleRows = details || selectedAgent || followUps.size || rows < 20 ? 1 : 3;
+          const startLine = Math.max(0, cursorLine - visibleRows + 1);
+          return lines.slice(startLine, startLine + visibleRows).map((line, offset) => {
+            const i = startLine + offset;
             if (i === cursorLine) {
               const before = line.slice(0, cuOff);
               const at = line.slice(cuOff, cuOff + 1) || " ";
@@ -868,9 +922,11 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
           });
         })()}
       </Box>
+      {rows >= 20 && busy && !details && !selectedAgent && !pending && <Text dimColor wrap="truncate-end">Enter queue follow-up · Ctrl+Enter interrupt and send now</Text>}
 
-      {!details && !pending && <AgentList agents={agents} focus={subAgentFocus} viewing={subAgentDetail} mainBusy={busy} maxRows={Math.max(2, Math.min(5, rows - 20))} />}
+      {rows >= 20 && !details && !selectedAgent && !pending && <AgentList agents={agents} focus={subAgentFocus} viewing={subAgentDetail} mainBusy={busy} maxRows={Math.max(2, Math.min(3, rows - 24))} />}
       <StatusBar model={CONFIG.model} dir={dir} branch={branch} status={getStatus()} />
+      </Box>
     </Box>
   );
 }

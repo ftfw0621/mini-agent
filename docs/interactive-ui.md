@@ -22,6 +22,12 @@ not claim Claude hides every tool by default. Assistant prose remains visible;
 routine thinking/tool-round/background-completion announcements stop accumulating.
 Approval dialogs, denials and service fallback tips remain explicit.
 
+The details viewport reads the same output stream dimensions as Ink and
+repaginates on resize. The tool/reasoning panel stays below the terminal height,
+with a bounded editor and a one-line status bar. This prevents oversized redraws
+from repeatedly clearing/reprinting the screen after Ctrl+T. Detail panels also
+hide redundant transient activity rows while open.
+
 ## Ownership
 
 - `loop.ts` reports execution and model activity. Permission checks remain on
@@ -44,6 +50,29 @@ This change does not add a durable job scheduler or reduce background polling.
 Background processes still survive turn interruption, but not session exit.
 Their completion notifications are delivered at existing loop checkpoints;
 finishing after the parent turn has ended does not itself start another turn.
+
+## Follow-up input
+
+During a running turn, Enter queues prepared human input (including image parts)
+in `FollowUpQueue`. The UI shows a bounded pending preview; it becomes a committed
+user message only when the lead consumes it. The loop consumes at model/tool
+boundaries, after any in-flight tool returns. Unstarted calls based on the old
+request receive explicit skipped tool results before new user messages enter
+history; the next model call replans with the new instructions. This preserves
+the API's tool-call/result pairing.
+
+Ctrl+Enter requests interruption and immediate processing. Esc does the same
+when messages are queued, after closing any open detail panel first. The current
+controller is aborted, then the same history/queue resumes with a fresh controller;
+there are never two active lead loops. Already completed side effects cannot be
+undone by inserting a message. Terminals must encode modified Enter distinctly;
+Enter followed by Esc provides a portable alternative.
+
+Only original human text updates authorization at delivery. Hook/file content
+and images stay separate, and existing children cannot consume the lead's queue
+or silently inherit new grants. Messages arriving at final-answer or turn-cleanup
+time are handled too. Slash commands remain idle-only to avoid changing session
+state underneath a running loop. This interaction is available in the Ink UI.
 
 ## Image input boundary
 
@@ -87,3 +116,11 @@ attachment removal and sending. macOS AppKit TIFF-to-PNG conversion was exercise
 on an image fixture without modifying the clipboard. Windows and Linux native
 helpers were tested with simulated command responses, not on those operating
 systems. The readline fallback remains a text interface.
+
+`tests/follow-up.test.ts` exercises delivery between real loop tool calls,
+skipping stale calls, ordered multimodal input, permission provenance, worker
+isolation and interrupt/resume. `tests/follow-up-ui.test.tsx` renders real Ink
+frames with keyboard events for busy input, image paste, queued previews,
+delivery, Escape and modified Enter. Resizing to 42 columns by 12 rows reproduces
+the former repeated-screen bug; the regression verifies a bounded detail view
+without recurring full-screen clears, including long CJK tool results/drafts.

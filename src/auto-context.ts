@@ -3,10 +3,24 @@ import type OpenAI from "openai";
 export interface ReviewAction {
   tool: string;
   input: unknown;
-  outcome: "returned" | "denied" | "failed";
+  outcome: "returned" | "denied" | "failed" | "skipped";
+  resultData?: unknown; // untrusted structured facts, NEVER new authorization
+  resultDataOmitted?: true;
 }
 export interface ReviewHistory { actions: readonly ReviewAction[]; omittedActions: number }
 const HISTORY_BYTES = 8000;
+const RESULT_BYTES = 2000;
+
+function resultEvidence(result: string): Pick<ReviewAction, "resultData" | "resultDataOmitted"> {
+  if (!result) return {};
+  if (Buffer.byteLength(result, "utf8") <= RESULT_BYTES) {
+    try {
+      const value: unknown = JSON.parse(result);
+      if (value !== null && typeof value === "object") return { resultData: value };
+    } catch { /* prose is not structured evidence */ }
+  }
+  return { resultDataOmitted: true };
+}
 
 function projectInput(tool: string, args: string): unknown {
   try {
@@ -21,7 +35,8 @@ function projectInput(tool: string, args: string): unknown {
 
 // This projection deliberately cannot create user authorization. Only completed
 // tool-call/result pairs contribute context; queued sibling actions, assistant
-// prose, raw tool output and synthetic user-role notifications are excluded.
+// prose and synthetic user-role notifications are excluded. Small structured
+// results retain target/effect evidence; arbitrary prose and large results do not.
 // User requests/project rules/current action are separately kept in full.
 export function reviewHistory(messages: readonly OpenAI.ChatCompletionMessageParam[], inherited?: ReviewHistory): ReviewHistory {
   const results = new Map<string, string>();
@@ -35,7 +50,7 @@ export function reviewHistory(messages: readonly OpenAI.ChatCompletionMessagePar
       if (call.type !== "function" || !results.has(call.id)) continue;
       const result = results.get(call.id)!;
       actions.push({ tool: call.function.name, input: projectInput(call.function.name, call.function.arguments),
-        outcome: /^\[(?:permission|hook)\]/.test(result) ? "denied" : /^\[error\]/.test(result) ? "failed" : "returned" });
+        outcome: /^\[follow-up\]/.test(result) ? "skipped" : /^\[(?:permission|hook)\]/.test(result) ? "denied" : /^\[error\]/.test(result) ? "failed" : "returned", ...resultEvidence(result) });
     }
   }
   let bytes = 0;
