@@ -31,6 +31,7 @@ export const SESSION_HELP = `commands:
   /cost      tokens, cache hit rate and estimated spend this session (local)
   /mcp       list configured MCP servers + status; select one to authenticate / reconnect / disable
   /plan      toggle plan mode — research-only; the agent presents a plan you approve before any change
+  /auto      toggle auto mode — risky or uncertain actions still require approval
   /todos     show the agent's current task plan (it maintains one with todo_write on multi-step work)
   /bg        list background tasks this session (run_bash_background) and their status
   /team      list the agent team (spawn_teammate): each teammate's role, status, and pending inbox
@@ -43,9 +44,14 @@ export const SESSION_HELP = `commands:
   /skill <name>  run a skill yourself (works even for user-only skills)
   exit       leave (Ctrl+C does the same)
 
-keys (at the prompt):
-  Ctrl+R     reveal the model's thinking for the last answer (collapsed behind a spinner by default)
-  Ctrl+T     reveal the folded tool-call trace for the last answer`;
+keys (during or after a turn):
+  Ctrl+V     paste an image as [Image #1], or paste text
+  Tab / ←    focus the agent list (← at the input boundary)
+  ↑ / ↓      select an agent; Enter views it; Esc returns to main
+  Ctrl+R     toggle thinking details
+  Ctrl+T     toggle tool arguments and results
+  ↑ / ↓      page through open details (PgUp/PgDn also work)
+  Esc        close details first; otherwise interrupt the turn`;
 
 // Colored status word for an MCP server (shared by the Ink + readline /mcp UIs).
 export function mcpStatusText(info: McpServerInfo): string {

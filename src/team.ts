@@ -22,6 +22,7 @@
 // needed. (Cross-process is out of scope: one CLI instance per project.)
 import fs from "node:fs"; // mailboxes are real files
 import path from "node:path"; // path joining
+import type { AgentProgress, AgentView } from "./agent-progress.js";
 
 // The mailbox name of the coordinator. Teammates message "lead" to report back;
 // the Lead reads its own inbox under this name.
@@ -77,6 +78,7 @@ let reqSeq = 0; // increments per request — seeds the id
 // A spawned teammate as the registry tracks it. The promise lets the Lead (and
 // shutdown) know when the worker's loop has actually ended.
 export interface Teammate {
+  progress?: AgentProgress;
   name: string; // unique within the team; chosen by the Lead
   role: string; // one-line description of its specialty, for display
   status: "running" | "done" | "failed"; // lifecycle
@@ -211,14 +213,22 @@ export function teammateCount(): number {
 }
 
 // Record a newly spawned teammate. The caller supplies the promise for its loop.
-export function registerTeammate(name: string, role: string, done: Promise<void>): void {
-  teammates.set(name, { name, role, status: "running", state: "active", startedAt: Date.now(), done });
+export function registerTeammate(name: string, role: string, done: Promise<void>, progress?: AgentProgress): void {
+  teammates.set(name, { name, role, status: "running", state: "active", startedAt: Date.now(), done, progress });
 }
 
 // Mark a teammate finished. `ok=false` means its loop ended on a non-Done reason.
 export function finishTeammate(name: string, ok: boolean): void {
   const t = teammates.get(name);
-  if (t) t.status = ok ? "done" : "failed";
+  if (t) { t.status = ok ? "done" : "failed"; t.progress?.finish(); }
+}
+
+// Unlike /team, this snapshot does not read mailboxes on each UI repaint.
+export function listTeammateViews(): AgentView[] {
+  return [...teammates.values()].flatMap((t) => t.progress ? [t.progress.view(
+    `team:${t.name}`, t.name, t.role,
+    t.status === "running" ? t.state === "idle" ? "idle" : "running" : t.status,
+  )] : []);
 }
 
 // How many teammates are still running — at least one running teammate means the

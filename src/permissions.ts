@@ -1,4 +1,5 @@
 import path from "node:path"; // used to resolve and split file paths
+import fs from "node:fs"; // resolve symlinks before auto mode grants file access
 import { CONFIG } from "./config.js"; // user-configured allow/deny rules from settings files
 
 // Three verdicts, checked in strict order. The invariant that holds the whole
@@ -12,6 +13,7 @@ export interface Verdict {
   decision: Decision; // allow / ask / deny
   reason: string; // why — shown to the user and fed back to the model
   summary: string; // what we show the user in the confirmation prompt
+  requiresHuman?: boolean; // an ask that no automatic reviewer may approve
 }
 
 // ---- The no-fly zone --------------------------------------------------------
@@ -73,7 +75,7 @@ function userBashRules(): { allow: string[]; deny: string[] } {
 }
 
 // Decide what a bash command deserves: deny, ask, or allow.
-function checkBash(command: string): Verdict {
+function checkBash(command: string, auto = false): Verdict {
   const summary = command.trim(); // what the user will see in the prompt
   const user = userBashRules(); // the user's configured additions
   // Order is the security model: built-in deny, then user deny, then ask,
@@ -81,6 +83,9 @@ function checkBash(command: string): Verdict {
   for (const [re, why] of BASH_DENY) if (re.test(command)) return { decision: "deny", reason: why, summary };
   for (const d of user.deny)
     if (command.toLowerCase().includes(d.toLowerCase())) return { decision: "deny", reason: `denied by your settings ("${d}")`, summary };
+  // node/npm/npx, git aliases and tool-wide grants can run arbitrary code.
+  // Auto mode must inspect the actual command, including background commands.
+  if (auto) return { decision: "ask", reason: "auto mode reviews every shell command", summary };
   for (const [re, why] of BASH_ASK) if (re.test(command)) return { decision: "ask", reason: why, summary };
   // Compound commands (&&, ;, |, $(), ``) are too hard to reason about — ask.
   if (/[;&|]|\$\(|`/.test(command)) return { decision: "ask", reason: "compound command", summary };
@@ -140,8 +145,8 @@ function planSafe(toolName: string, verdict: Verdict): boolean {
 // applied as an outer filter: it can only TIGHTEN the base decision (downgrade a
 // mutating allow/ask to deny), never loosen one — a base "deny" keeps its more
 // specific reason, because deny always wins.
-export function checkPermission(toolName: string, argsJson: string): Verdict {
-  const base = basePermission(toolName, argsJson);
+export function checkPermission(toolName: string, argsJson: string, auto = false): Verdict {
+  const base = basePermission(toolName, argsJson, auto);
   if (planMode && base.decision !== "deny" && !planSafe(toolName, base)) {
     return {
       decision: "deny",
@@ -153,7 +158,7 @@ export function checkPermission(toolName: string, argsJson: string): Verdict {
 }
 
 // The underlying rules, plan-mode-agnostic. Wrapped by checkPermission above.
-function basePermission(toolName: string, argsJson: string): Verdict {
+function basePermission(toolName: string, argsJson: string, auto: boolean): Verdict {
   // A user-configured tool block beats everything, including built-in allows.
   if (CONFIG.permissions.deny.includes(`tool:${toolName}`)) {
     return { decision: "deny", reason: `tool blocked by your settings ("tool:${toolName}")`, summary: toolName };
@@ -162,9 +167,30 @@ function basePermission(toolName: string, argsJson: string): Verdict {
   let args: Record<string, string>; // the parsed tool arguments
   try {
     args = JSON.parse(argsJson); // arguments arrive as a raw JSON string from the model
+    if (auto && (typeof args !== "object" || args === null || Array.isArray(args))) {
+      return { decision: "deny", reason: "tool arguments must be an object", summary: toolName };
+    }
   } catch {
     // Let dispatch produce the proper JSON error for the model.
+    if (auto) return { decision: "deny", reason: "invalid JSON arguments", summary: toolName };
     return { decision: "allow", reason: "unparseable args", summary: toolName };
+  }
+
+  if (auto && ["read_file", "write_file", "edit_file"].includes(toolName)) {
+    if (typeof args.path !== "string" || !args.path.trim()) return { decision: "deny", reason: "a non-empty file path is required", summary: toolName };
+    try {
+      const resolved = resolveFileTarget(args.path);
+      const reason = toolName === "read_file"
+        ? (SECRET_FILE_RE.test(path.resolve(args.path)) || SECRET_FILE_RE.test(resolved) ? "file path contains secrets" : null)
+        : noFlyHit(args.path) || noFlyHit(resolved);
+      if (reason) return { decision: "deny", reason, summary: args.path };
+      const relative = path.relative(fs.realpathSync(process.cwd()), resolved);
+      if (toolName !== "read_file" && (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))) {
+        return { decision: "ask", requiresHuman: true, reason: "resolved write target is outside the project", summary: `${args.path} → ${resolved}` };
+      }
+    } catch {
+      return { decision: "deny", reason: "cannot resolve the file target safely", summary: args.path };
+    }
   }
 
   switch (toolName) {
@@ -223,7 +249,7 @@ function basePermission(toolName: string, argsJson: string): Verdict {
       // The user may pre-approve write tools ("tool:edit_file") to skip the
       // prompt — note this runs AFTER the no-fly check, so it widens "ask",
       // never "deny".
-      if (CONFIG.permissions.allow.includes(`tool:${toolName}`)) {
+      if (!auto && CONFIG.permissions.allow.includes(`tool:${toolName}`)) {
         return { decision: "allow", reason: "pre-approved by your settings", summary: p };
       }
       return { decision: "ask", reason: "writes to your filesystem", summary: p }; // normal writes need a human yes
@@ -233,12 +259,13 @@ function basePermission(toolName: string, argsJson: string): Verdict {
       // Backgrounding changes WHEN output comes back, never WHAT runs — so a
       // background command gets the exact same input-aware analysis as a
       // foreground one. The danger is in the command, not the blocking.
-      const verdict = checkBash(args.command ?? ""); // bash gets input-aware analysis
+      if (auto && typeof args.command !== "string") return { decision: "deny", reason: "a shell command is required", summary: toolName };
+      const verdict = checkBash(args.command ?? "", auto); // bash gets input-aware analysis
       // "Don't ask again for run_bash this session" (chosen in the approval menu)
       // upgrades an ASK to ALLOW — but a hard DENY (rm -rf /, .git, .env…) always
       // stands. Convenience never overrides the no-fly rules. A grant for either
       // shell tool covers the other: the command is what was vouched for.
-      if (verdict.decision === "ask" && (CONFIG.permissions.allow.includes(`tool:${toolName}`) || CONFIG.permissions.allow.includes("tool:run_bash"))) {
+      if (!auto && verdict.decision === "ask" && (CONFIG.permissions.allow.includes(`tool:${toolName}`) || CONFIG.permissions.allow.includes("tool:run_bash"))) {
         return { decision: "allow", reason: "bash pre-approved for this session", summary: verdict.summary };
       }
       return verdict;
@@ -269,9 +296,23 @@ function basePermission(toolName: string, argsJson: string): Verdict {
       // gets the most suspicious treatment, not the least: ask. The user can
       // pre-approve a trusted MCP tool with "tool:mcp__server__tool" in
       // settings, or block one with "tool:..." in deny (checked at the top).
-      if (CONFIG.permissions.allow.includes(`tool:${toolName}`)) {
+      if (!auto && CONFIG.permissions.allow.includes(`tool:${toolName}`)) {
         return { decision: "allow", reason: "pre-approved by your settings", summary: toolName };
       }
       return { decision: "ask", reason: toolName.startsWith("mcp__") ? "external MCP tool" : "unknown tool", summary: toolName };
   }
+}
+
+// New files need their nearest existing parent resolved too: a symlinked
+// directory must not hide a write into .git or another protected location.
+function resolveFileTarget(target: string): string {
+  let current = path.resolve(target);
+  const missing: string[] = [];
+  while (!fs.existsSync(current)) {
+    const parent = path.dirname(current);
+    if (parent === current) throw new Error("No existing ancestor");
+    missing.unshift(path.basename(current));
+    current = parent;
+  }
+  return path.join(fs.realpathSync(current), ...missing);
 }

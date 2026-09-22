@@ -6,14 +6,17 @@ import { checkPermission } from "./permissions.js"; // the allow/ask/deny gate
 import { previewChange } from "./diff.js"; // show the diff before a write so approval is informed
 import { estimateHistoryTokens, compactHistory, COMPACT_AT, MAX_COMPACTIONS_PER_QUERY, MAX_COMPACT_FAILURES } from "./context.js"; // context management
 import { SUB_AGENT_PROMPT, TEAMMATE_PROMPT } from "./prompt.js"; // the sub-agent + teammate constitutions
-import { LEAD, MAX_TEAMMATES, sendMessage, sendProtocol, readInbox, inboxCount, registerTeammate, finishTeammate, teammateExists, teammateCount, createRequest, resolveResponse, setTeammateState, anyTeammateBusy, runningTeammates, markShutdown, shutdownRequestId, resetTeam } from "./team.js"; // agent teams (Day 38) + team protocols (Day 39): mailboxes, registry, request/response contracts
+import { LEAD, MAX_TEAMMATES, sendMessage, sendProtocol, readInbox, inboxCount, registerTeammate, finishTeammate, teammateExists, teammateCount, createRequest, resolveResponse, setTeammateState, anyTeammateBusy, runningTeammates, markShutdown, shutdownRequestId, resetTeam, listTeammateViews } from "./team.js"; // agent teams (Day 38) + team protocols (Day 39): mailboxes, registry, request/response contracts
 import { createTask, listTasks, claimTask, completeTask, claimNextAvailable, boardSummary, resetBoard } from "./board.js"; // the shared task board (Day 40): autonomous work claiming
 import { emit } from "./telemetry.js"; // local-only event log (no-op unless the CLI armed it)
 import { runHooks } from "./hooks.js"; // user lifecycle hooks (PreToolUse / PostToolUse / Stop)
 import type { Judge } from "./judge.js"; // optional LLM permission classifier
+import { reviewHistory, type ReviewHistory } from "./auto-context.js";
+import { AgentProgress, type AgentView } from "./agent-progress.js";
+import type { AutoMode } from "./auto.js"; // Jev review, shared by all tool execution paths
 import { recordUsage } from "./cost.js"; // meter token usage from the stream
 import { mark, thinkingWord, spinnerText } from "./ui.js"; // centralized terminal styling (markers, spinner)
-import { recordToolCall, recordReasoning } from "./tui.js"; // folded tool-call trace (Ctrl+T) + the model's hidden thinking (Ctrl+R)
+import { recordToolCall, recordToolResult, recordToolDetail, recordReasoning } from "./tui.js"; // folded tool-call trace (Ctrl+T) + the model's hidden thinking (Ctrl+R)
 import { type LoopOutput, type AnswerSink, STDOUT_OUTPUT } from "./output.js"; // where the loop's screen output goes (stdout by default, Ink REPL passes its own)
 import { todoNag, getTodos, renderTodos } from "./todos.js"; // the agent's plan: show it on screen + nag when it goes stale
 import { pendingNotifications } from "./background.js"; // background tasks (Day 37): surface finished jobs as a turn
@@ -36,6 +39,7 @@ export enum TerminateReason {
   RateLimitBudgetExhausted = "rate_limit_budget_exhausted", // the server keeps saying 429
   ContextTooLong = "context_too_long", // conversation no longer fits the window
   CompactionFailed = "compaction_failed", // automatic compaction kept failing — stop instead of looping
+  ImageInputRejected = "image_input_rejected", // provider rejected a multimodal request
   FatalApiError = "fatal_api_error", // auth/bad request — retrying will never help
   UserInterrupt = "user_interrupt", // Ctrl+C
 }
@@ -60,7 +64,13 @@ export interface LoopOptions {
   maxRounds?: number; // hard cap on rounds for this loop (teammates are bounded so a team can't run away); unset = the usual unbounded-with-safeguards loop
   subAgentModel?: string; // model to run delegated sub-agents on; falls back to `model`
   judge?: Judge; // optional LLM classifier that auto-allows clearly-safe "ask" commands
+  autoMode?: AutoMode;
+  autoHistory?: ReviewHistory; // inherited tool context, never authorization
+  delegatedTask?: string; // parent-authored context for a worker
+  autoRequests?: readonly string[]; // genuine user requests, snapshotted per turn and inherited by children
+  canPrompt?: boolean; // false for print mode and unattended teammates
   askUser?: (questions: { question: string; options: string[] }[]) => Promise<{ question: string; answer: string }[] | null>; // present a multi-question form (Day 30); null if cancelled/non-interactive
+  progress?: AgentProgress; // per-worker activity, tokens and bounded transcript
   output?: LoopOutput; // where screen output goes — stdout by default (readline REPL); the Ink REPL passes its own sink
 }
 
@@ -327,6 +337,7 @@ function toolsFor(opts: LoopOptions): OpenAI.ChatCompletionTool[] {
 // notification path as background tasks. The model can keep working (call more
 // tools, or wait) while the sub-agent runs — and the user stays in control.
 interface PendingSubAgent {
+  progress: AgentProgress;
   id: string;
   description: string;
   done: Promise<void>;
@@ -358,7 +369,6 @@ function injectSubAgentResults(messages: OpenAI.ChatCompletionMessageParam[], op
   const note = pendingSubAgentResults();
   if (!note) return false;
   messages.push({ role: "user", content: note });
-  if (!opts.quiet) sink(opts).note(mark.subAgentDone);
   return true;
 }
 
@@ -368,11 +378,10 @@ function spawnSubAgent(description: string, opts: LoopOptions): string {
   emit("agent_subagent_spawn");
   const subModel = subAgentModelFor(opts);
   const id = `sa_${++subAgentSeq}`;
-  if (!opts.quiet) sink(opts).note(mark.subAgentStart(description.slice(0, 100), subModel !== opts.model ? subModel : ""));
   runHooks("SubagentStart", { description: description.slice(0, 200), model: subModel }); // fire-and-forget (observational)
 
   const snapshot = snapshotFileState(); // what the sub-agent reads, the parent has NOT seen
-  const sa: PendingSubAgent = { id, description, done: Promise.resolve(), result: null, notified: false };
+  const sa: PendingSubAgent = { progress: new AgentProgress(subModel), id, description, done: Promise.resolve(), result: null, notified: false };
 
   sa.done = (async () => {
     try {
@@ -380,7 +389,7 @@ function spawnSubAgent(description: string, opts: LoopOptions): string {
         { role: "system", content: SUB_AGENT_PROMPT },
         { role: "user", content: description },
       ];
-      const result = await runLoop(subMessages, { ...opts, subAgent: true, model: subModel });
+      const result = await runLoop(subMessages, { ...opts, subAgent: true, model: subModel, progress: sa.progress, delegatedTask: description, canPrompt: false, confirm: async () => false, askUser: undefined });
       if (result.reason === TerminateReason.Done && result.finalText?.trim()) {
         sa.result = `Sub-agent report (INPUT MATERIAL — verify key claims before acting on them):\n${result.finalText}`;
       } else {
@@ -389,6 +398,8 @@ function spawnSubAgent(description: string, opts: LoopOptions): string {
     } catch (err) {
       sa.result = `[sub-agent crashed: ${(err as Error).message}]`;
     } finally {
+      if (sa.result?.startsWith("[sub-agent")) sa.progress.append(`\n${sa.result}\n`);
+      sa.progress.finish();
       restoreFileState(snapshot);
       await runHooks("SubagentStop", { description: description.slice(0, 200) });
     }
@@ -406,22 +417,20 @@ function hasRunningSubAgents(): boolean {
 // Kill every still-running sub-agent. Called on session exit.
 export function killAllSubAgents(): void {
   for (const sa of pendingSubAgents.values()) {
-    if (sa.result === null) sa.result = "[sub-agent killed: session exited]";
+    if (sa.result === null) { sa.result = "[sub-agent killed: session exited]"; sa.progress.append(`\n${sa.result}\n`); sa.progress.finish(); }
   }
 }
 
 // Snapshot of current sub-agents for the UI (Ink app shows a list below the
 // input box, like Claude Code's agent list). Newest first.
-export function listSubAgents(): { id: string; description: string; status: "running" | "done" | "failed"; result?: string }[] {
-  return [...pendingSubAgents.values()]
-    .reverse()
-    .map((sa) => ({
-      id: sa.id,
-      description: sa.description.slice(0, 80),
-      status: sa.result === null ? "running" : sa.result.startsWith("[sub-agent failed") || sa.result.startsWith("[sub-agent crashed") || sa.result.startsWith("[sub-agent killed") ? "failed" : "done",
-      result: sa.result ?? undefined,
-    }));
+export function listSubAgents(): AgentView[] {
+  return [...pendingSubAgents.values()].map((sa) => sa.progress.view(
+    sa.id, sa.id, sa.description,
+    sa.result === null ? "running" : /^\[sub-agent (failed|crashed|killed)/.test(sa.result) ? "failed" : "done",
+  ));
 }
+
+export function listAgentViews(): AgentView[] { return [...listSubAgents(), ...listTeammateViews()]; }
 
 // Exponential backoff with jitter: 500ms, 1s, 2s, ... ±25%, capped.
 // Without jitter, every client that failed at the same second retries at the
@@ -458,15 +467,18 @@ async function streamModelCall(
   const signal = AbortSignal.any([opts.signal, idleAbort.signal]); // either the user or the watchdog can abort
   const word = thinkingWord(modelCallSeq++); // a rotating "thinking" word for this call
   const startedAt = Date.now(); // for the spinner's live elapsed counter
+  let reportedTokens: number | undefined;
+  if (opts.progress) { opts.progress.activity = "Thinking"; opts.progress.liveTokens = 0; }
   let streamedChars = 0; // bytes of content+reasoning streamed this call → a live token estimate
   // Reasoning is COLLAPSED by default: while the model thinks, the spinner keeps
   // spinning (with a 💭 hint) instead of dumping the trace; we stash it for Ctrl+R.
   let reasoningBuf = ""; // the accumulated thinking, hidden behind the spinner
   let reasoningActive = false; // true while reasoning tokens are arriving → spinner shows 💭
-  let reasoningShown = false; // have we printed the "thought for Ns" indicator yet?
-  const spinner = opts.quiet
+  let reasoningShown = false; // has this trace been stored for Ctrl+R?
+  const spinner = opts.quiet || opts.subAgent
     ? null // the eval harness wants silence
     : sink(opts).spinner(spinnerText(word, 0, !!opts.subAgent, opts.model)); // a fresh spinner from the sink (stdout → ora; Ink → React state)
+  let ans: AnswerSink | null = null; // always close the live renderer, including interrupted streams
   let lastEvent = Date.now(); // when did we last hear ANYTHING from the stream?
   let stallWarned = false; // only warn once per quiet stretch
 
@@ -503,30 +515,25 @@ async function streamModelCall(
       { signal }, // abortable by user AND watchdog
     );
     let content = ""; // accumulated answer text
-    let ans: AnswerSink | null = null; // renders the streamed answer (stdout: markdown block by block; Ink: React state) — non-null once the answer starts
     const calls: AssembledCall[] = []; // tool calls under assembly, indexed by delta.index
 
-    // The model has finished thinking and is about to say/do something. Close out
-    // the spinner, stash the trace, and print a single one-line indicator with the
-    // shortcut to reveal it. Idempotent + collapses to nothing for sub-agents and
-    // the eval harness (they never show thinking).
+    // Stash thinking without appending one indicator per model round. The live
+    // status keeps animating while tool arguments or answer tokens arrive.
     const flushReasoning = () => {
       if (!reasoningBuf || reasoningShown) return;
       reasoningShown = true;
       reasoningActive = false;
-      if (spinner?.spinning) spinner.stop();
       if (opts.quiet || opts.subAgent) return; // no UI for silent / nested runs
       recordReasoning(reasoningBuf); // keep it for Ctrl+R (never goes into history)
-      const secs = Math.round((Date.now() - startedAt) / 1000);
-      const toks = Math.round(reasoningBuf.length / 4); // same ~chars/4 estimate as the spinner
-      const tokStr = toks >= 1000 ? `${(toks / 1000).toFixed(1)}k` : `${toks}`;
-      sink(opts).reasoning(chalk.dim(`💭 thought for ${secs}s (~${tokStr} tokens) · Ctrl+R to view`));
     };
 
     for await (const chunk of stream) {
       lastEvent = Date.now(); // feed the watchdog
       stallWarned = false; // the stream spoke — reset the stall warning
-      if (chunk.usage) recordUsage(chunk.usage as unknown as Record<string, unknown>); // the final usage chunk — meter it
+      if (chunk.usage) {
+        recordUsage(chunk.usage as unknown as Record<string, unknown>);
+        if (typeof chunk.usage.completion_tokens === "number") reportedTokens = chunk.usage.completion_tokens;
+      } // the final usage chunk — meter it
       const delta = chunk.choices[0]?.delta; // this chunk's increment
       if (!delta) continue; // keep-alive or usage chunk — nothing to do
 
@@ -538,14 +545,15 @@ async function streamModelCall(
       const reasoning = (delta as { reasoning_content?: string }).reasoning_content;
       if (reasoning) {
         streamedChars += reasoning.length; // count reasoning toward the live token estimate
+        if (opts.progress) opts.progress.liveTokens = Math.ceil(streamedChars / 4);
         reasoningBuf += reasoning; // stash it for Ctrl+R instead of streaming it
         reasoningActive = true; // the spinner now shows 💭 (set by the watchdog)
       }
 
       if (delta.content) {
-        flushReasoning(); // thinking is over — show the one-line indicator first
+        flushReasoning();
         streamedChars += delta.content.length; // count the answer toward the live token estimate
-        if (spinner?.spinning) spinner.stop(); // first token: replace the spinner with real output
+        if (spinner?.spinning && !sink(opts).streamingStatus) spinner.stop();
         if (!opts.quiet && !opts.subAgent) {
           // Only the top-level agent streams to the screen — a sub-agent's
           // inner monologue would be mistaken for the answer. The sink decides
@@ -555,21 +563,24 @@ async function streamModelCall(
           if (!ans) ans = sink(opts).answer(); // first token: start the answer renderer
           ans.push(delta.content); // hand the token to the renderer (it decides when to paint)
         }
+        if (opts.progress) { opts.progress.activity = "Writing"; opts.progress.append(delta.content); opts.progress.liveTokens = Math.ceil(streamedChars / 4); }
         content += delta.content; // always keep it for the history (the answer only, never the reasoning)
       }
-      if (delta.tool_calls?.length) flushReasoning(); // thinking is over — indicator before the tool logs (which print after we return)
+      if (delta.tool_calls?.length) flushReasoning();
       for (const tc of delta.tool_calls ?? []) {
-        if (spinner?.spinning) spinner.stop(); // tool call starting — spinner served its purpose
         const slot = (calls[tc.index] ??= { id: "", name: "", args: "" }); // create the slot on first fragment
         if (tc.id) slot.id = tc.id; // id arrives once
         if (tc.function?.name) slot.name += tc.function.name; // name usually arrives whole; += is safe either way
+        streamedChars += tc.function?.arguments?.length ?? 0;
+        if (opts.progress) opts.progress.liveTokens = Math.ceil(streamedChars / 4);
         if (tc.function?.arguments) slot.args += tc.function.arguments; // arguments stream in fragments — concatenate
       }
     }
-    flushReasoning(); // a reasoning-only turn (no content, no tools) still records + indicates
-    if (ans) ans.end(); // flush the final (un-terminated) block + end the line cleanly (the sink owns the trailing newline)
+    flushReasoning();
     return { content, toolCalls: calls.filter(Boolean) }; // sparse array → dense
   } finally {
+    ans?.end(); // cancel delayed repaints even when the API throws or is interrupted
+    if (opts.progress) { opts.progress.finishModelCall(reportedTokens); opts.progress.append("\n"); }
     clearInterval(watchdog); // always stop the timer
     if (spinner?.spinning) spinner.stop(); // and never leave a zombie spinner
   }
@@ -588,59 +599,89 @@ function agentIndent(opts: LoopOptions): string {
 // Promise.all batch; calls that can prompt must be awaited one at a time.
 async function runOneCall(call: AssembledCall, opts: LoopOptions): Promise<{ id: string; content: string }> {
   const indent = agentIndent(opts);
-  if (!opts.quiet) {
-    // The announcement is FOLDED (Day-after-40 UI fix): instead of printing a
-    // line per call (which floods the screen on a big exploration), we record it
-    // for the per-round tally + Ctrl+T. Diffs / prompts / results below still
-    // print live. A generous slice keeps Ctrl+T readable without dumping megabytes.
-    const line = indent + mark.tool(call.name, call.args.length > 300 ? call.args.slice(0, 297) + "..." : call.args);
-    recordToolCall(line, `tool: ${call.name}\nargs: ${call.args}`);
+  const trace = !opts.quiet && !opts.subAgent ? recordToolCall(
+    indent + mark.tool(call.name, call.args.length > 300 ? call.args.slice(0, 297) + "..." : call.args),
+    `tool: ${call.name}\nargs: ${call.args}`, call,
+  ) : undefined;
+  if (opts.progress) {
+    opts.progress.toolCalls++;
+    opts.progress.activity = call.name;
+    opts.progress.append(`\n[${call.name}]\nargs: ${call.args}\n`);
   }
-
-  // The permission gate sits between the model's intent and execution.
-  const v = checkPermission(call.name, call.args);
-  emit("agent_tool_call", { tool: call.name }); // every attempt, allowed or not
-
-  // For file-changing tools, show the diff BEFORE the gate decides. A filename
-  // ("edit_file: cart.js") is not enough to approve safely; the actual +/- lines
-  // are. Skipped for a hard deny (nothing will run) and in quiet sub-agent runs.
-  if (!opts.quiet && v.decision !== "deny" && (call.name === "write_file" || call.name === "edit_file")) {
-    const preview = previewChange(call.name, call.args);
-    if (preview) sink(opts).note(preview.replace(/^/gm, indent)); // nest under the sub-agent marker if any
+  const started = Date.now();
+  const status = () => `${call.name}… (${Math.floor((Date.now() - started) / 1000)}s)`;
+  const spinner = !opts.quiet && !opts.subAgent ? sink(opts).spinner(status()) : null;
+  const timer = spinner ? setInterval(() => spinner.set(status()), 1000) : undefined;
+  emit("agent_tool_call", { tool: call.name });
+  try {
+    const refusal = await authorizeCall(call, opts);
+    const content = refusal ?? await runWithHooks(call, opts);
+    if (trace) recordToolResult(trace, content);
+    opts.progress?.append(`result: ${content}\n`);
+    if (call.name === "todo_write" && !opts.quiet && !content.startsWith("[error]")) {
+      sink(opts).note(renderTodos(getTodos()));
+    }
+    return { id: call.id, content };
+  } catch (error) {
+    if (trace) recordToolResult(trace, `[error] ${error instanceof Error ? error.message : String(error)}`);
+    throw error;
+  } finally {
+    clearInterval(timer);
+    spinner?.stop();
   }
-  let content: string; // what goes back to the model as the tool result
+}
+
+// null grants this exact call; any returned text is a refusal for the model.
+// Hook rewrites use the same gate, so approval of one input cannot grant a
+// different action. There is no recursive hook invocation on re-authorization.
+async function authorizeCall(call: AssembledCall, opts: LoopOptions): Promise<string | null> {
+  if (opts.signal.aborted || opts.isInterrupted()) return "[permission] Interrupted before execution.";
+  const auto = opts.autoMode?.enabled ?? false;
+  const v = checkPermission(call.name, call.args, auto);
   if (v.decision === "deny") {
     emit("agent_tool_denied", { tool: call.name }); // hard blocks, per tool
     if (!opts.quiet) sink(opts).note(mark.denied(v.reason)); // tell the user we blocked it
-    content = `[permission] Denied: ${v.reason}. This is a hard rule — do not try to work around it; pick a different approach or ask the user.`; // teach the model the boundary
+    return `[permission] Denied: ${v.reason}. This is a hard rule — do not try to work around it; pick a different approach or ask the user.`;
   } else if (v.decision === "ask") {
     // Optional LLM judge: for a run_bash command the rules couldn't classify,
     // ask the judge first. It can only DOWNGRADE ask→allow for the clearly
     // safe; anything else still goes to the human. The judge never sees a deny.
     let autoAllowed = false;
-    if (opts.judge && call.name === "run_bash") {
+    let reviewReason = "";
+    // Exiting plan mode always belongs to the human, never to a classifier.
+    if (!v.requiresHuman && opts.autoMode && (auto ? call.name !== "exit_plan_mode" : !!opts.judge && call.name === "run_bash")) {
+      const definition = toolsFor(opts).find((t) => t.type === "function" && t.function.name === call.name);
+      const description = definition?.type === "function" ? definition.function.description : undefined;
+      const review = await opts.autoMode.classify(call.name, call.args, opts.autoRequests ?? [], opts.signal, {
+        description, history: opts.autoHistory, delegatedTask: opts.delegatedTask,
+        notify: (message) => { if (!opts.quiet) sink(opts).note(chalk.yellow(`  ⎿ ${message}`)); },
+      });
+      autoAllowed = review.decision === "allow";
+      reviewReason = review.reason;
+      if (!opts.quiet) recordToolDetail(call.id, review.reason);
+    } else if (!auto && opts.judge && call.name === "run_bash") {
       let cmd = "";
       try { cmd = (JSON.parse(call.args) as { command?: string }).command ?? ""; } catch { /* leave empty → judge will ask */ }
       if (cmd && (await opts.judge.classify(cmd)) === "allow") {
         autoAllowed = true;
-        if (!opts.quiet) sink(opts).note(mark.judge); // visible — the user can see the judge worked
+        if (!opts.quiet) recordToolDetail(call.id, "Model judge auto-approved");
       }
     }
-    const ok = autoAllowed || (await opts.confirm(`${call.name} (${v.reason}):\n   ${v.summary}`, call.name)); // judge-allowed, or pause and ask the human
+    if (opts.signal.aborted || opts.isInterrupted()) return "[permission] Interrupted before execution.";
+    // An unattended callback may contain the old blanket auto-approve policy.
+    // Auto mode never uses that policy as a fallback when Jev did not approve.
+    // A diff is needed when the human is deciding; automatic edits stay in
+    // the collapsed tool trace and remain available through /diff.
+    if (!autoAllowed && !opts.quiet && (call.name === "write_file" || call.name === "edit_file")) {
+      const preview = previewChange(call.name, call.args);
+      if (preview) sink(opts).note(preview.replace(/^/gm, agentIndent(opts)));
+    }
+    const ok = autoAllowed || (!(auto && opts.canPrompt === false) && await opts.confirm(`${call.name} (${v.reason}):\n   ${v.summary}${reviewReason ? `\n   ${reviewReason}` : ""}`, call.name));
     if (!ok) emit("agent_tool_declined", { tool: call.name }); // the human said no — that is signal
     if (!ok && !opts.quiet) sink(opts).note(mark.declined); // make the refusal visible
-    content = ok
-      ? await runWithHooks(call, opts) // approved — run it (PreToolUse can still block)
-      : `[permission] The user declined this action. Ask them how to proceed, or choose a safer alternative.`; // declined — tell the model
-  } else {
-    content = await runWithHooks(call, opts); // allow — run it (PreToolUse can still block)
+    if (!ok) return `[permission] Action not approved${reviewReason ? `: ${reviewReason}` : ". The user declined this action"}. Ask the user how to proceed, or choose a safer alternative.`;
   }
-  // todo_write's whole point is the VISIBLE plan: the model got a one-line tally,
-  // the human gets the rendered checklist (quiet runs — eval/sub-agents — stay silent).
-  if (call.name === "todo_write" && !opts.quiet && !content.startsWith("[error]")) {
-    sink(opts).note(renderTodos(getTodos()));
-  }
-  return { id: call.id, content }; // paired by id for the API
+  return opts.signal.aborted || opts.isInterrupted() ? "[permission] Interrupted before execution." : null;
 }
 
 // Run an approved tool call, surrounded by the user's lifecycle hooks.
@@ -660,18 +701,21 @@ async function runWithHooks(call: AssembledCall, opts: LoopOptions): Promise<str
     return `[hook] A PreToolUse hook blocked this call: ${pre.feedback}. Treat this as a hard boundary — adjust your approach.`;
   }
   // A PreToolUse hook may REWRITE the arguments (e.g. add a commit trailer). The
-  // permission gate already ran on the original args; the rewrite only narrows or
-  // annotates, never escalates past a deny. Validate it's parseable, then use it.
-  if (pre.rewrite) {
+  // permission gate ran on the original args. A rewrite is a NEW action and
+  // must pass the gate again; hooks cannot turn an approved read into a write.
+  if (pre.rewrite && pre.rewrite !== call.args) {
     try {
       JSON.parse(pre.rewrite); // must be valid JSON args
-      if (!opts.quiet) sink(opts).note(chalk.dim(`  ⎿ PreToolUse hook rewrote the arguments`));
+      if (!opts.quiet) recordToolDetail(call.id, `PreToolUse rewrote args: ${pre.rewrite}`);
       call = { ...call, args: pre.rewrite };
     } catch {
       /* malformed rewrite — ignore, run the original args */
     }
+    const refusal = await authorizeCall(call, opts);
+    if (refusal) return refusal;
   }
 
+  if (opts.signal.aborted || opts.isInterrupted()) return "[permission] Interrupted before execution.";
   const result = await execute(call, opts); // the actual work
 
   const post = await runHooks("PostToolUse", { tool: call.name, args: call.args, result }); // after
@@ -878,9 +922,9 @@ async function runSpawnTeammate(call: AssembledCall, opts: LoopOptions): Promise
   // concurrent. It progresses whenever the event loop is free (e.g. while the
   // lead awaits its own API stream). We keep the promise so the lead and
   // shutdown know when it has ended.
-  const done = runTeammate(name, role, task, opts);
-  registerTeammate(name, role, done);
-  if (!opts.quiet) sink(opts).note(mark.teammateStart(name, role));
+  const progress = new AgentProgress(opts.model);
+  const done = runTeammate(name, role, task, opts, progress);
+  registerTeammate(name, role, done, progress);
   return `Teammate "${name}" (${role}) spawned and is now working in parallel. It will message you (as "lead") with progress and its final result. Reply with send_message; keep coordinating the rest of the team. Do not wait idly — continue your own work.`;
 }
 
@@ -889,7 +933,7 @@ async function runSpawnTeammate(call: AssembledCall, opts: LoopOptions): Promise
 // a `result` message back to the lead — so the lead always learns the outcome,
 // success or failure. The teammate's file read-state is isolated by snapshot,
 // exactly like a sub-agent (it reads things the lead's conversation never saw).
-async function runTeammate(name: string, role: string, task: string, opts: LoopOptions): Promise<void> {
+async function runTeammate(name: string, role: string, task: string, opts: LoopOptions, progress: AgentProgress): Promise<void> {
   emit("agent_teammate_spawn");
   await runHooks("SubagentStart", { description: `teammate ${name}: ${role}`.slice(0, 200), model: opts.model });
   const snapshot = snapshotFileState();
@@ -910,8 +954,11 @@ async function runTeammate(name: string, role: string, task: string, opts: LoopO
       ...opts,
       subAgent: true,
       teammate: { name },
+      progress,
+      delegatedTask: task,
       maxRounds: TEAMMATE_MAX_ROUNDS,
       confirm: teammateConfirm(name, sink(opts)),
+      canPrompt: false,
       askUser: undefined, // teammates have no line to the human
     });
     // How it ended decides what the lead hears. A shutdown handshake gets a
@@ -922,7 +969,6 @@ async function runTeammate(name: string, role: string, task: string, opts: LoopO
     if (sd) sendProtocol(name, LEAD, "shutdown_response", sd, summary || "shut down", "approved");
     else sendMessage(name, LEAD, summary, "result");
     finishTeammate(name, result.reason === TerminateReason.Done);
-    if (!opts.quiet) sink(opts).note(mark.teammateDone(name, result.reason === TerminateReason.Done));
   } catch (err) {
     // A teammate must never take the whole process down. Report the failure to
     // the lead and mark it failed.
@@ -1025,9 +1071,8 @@ function injectBackgroundNotifications(messages: OpenAI.ChatCompletionMessagePar
   if (opts.subAgent) return false; // notifications belong to the top-level conversation
   const note = pendingNotifications(); // "" unless a task finished since we last checked
   if (!note) return false;
-  const count = (note.match(/<task_notification>/g) ?? []).length; // for the one-line on-screen mark
   messages.push({ role: "user", content: note }); // the model reacts to it on the next round
-  if (!opts.quiet) sink(opts).note(mark.bgNote(count));
+
   return true;
 }
 
@@ -1152,6 +1197,9 @@ export async function runLoop(
   messages: OpenAI.ChatCompletionMessageParam[], // conversation history (mutated in place)
   opts: LoopOptions, // injected dependencies, see above
 ): Promise<LoopResult> {
+  // Children inherit this snapshot. Later human turns cannot silently grant
+  // broader authorization to already-running background work.
+  opts = { ...opts, autoRequests: opts.autoRequests ?? opts.autoMode?.snapshot() };
   // The loop's mutable state: budgets and counters, rewritten every iteration.
   const attempts = { total: 0, rateLimited: 0, consecutive: 0 };
   const compaction = { count: 0, failures: 0 }; // compaction score card for this query
@@ -1198,6 +1246,9 @@ export async function runLoop(
           if (compaction.count < MAX_COMPACTIONS_PER_QUERY && (await tryCompact(messages, opts, compaction)))
             continue; // history is smaller now — retry the same round
           return { reason: TerminateReason.ContextTooLong, detail: e.message }; // compaction could not save us
+        }
+        if (e.kind === ApiErrorKind.BadRequest && messages.some((m) => Array.isArray(m.content) && m.content.some((part) => part.type === "image_url"))) {
+          return { reason: TerminateReason.ImageInputRejected };
         }
         if (!e.retryable) return { reason: TerminateReason.FatalApiError, detail: `${e.kind}: ${e.message}` }; // bad key etc. — stop now
 
@@ -1287,19 +1338,13 @@ export async function runLoop(
         while (i < out.toolCalls.length && isReadOnlyTool(out.toolCalls[i].name)) batch.push(out.toolCalls[i++]);
         if (batch.length) {
           // Run the whole read-only batch at once, preserving result order.
-          const results = await Promise.all(batch.map((c) => runOneCall(c, opts)));
+          const results = await Promise.all(batch.map((c) => runOneCall(c, { ...opts, autoHistory: reviewHistory(messages, opts.autoHistory) })));
           for (const r of results) messages.push({ role: "tool", tool_call_id: r.id, content: r.content });
           continue; // back to the top — the next call is non-read-only
         }
         // A single non-read-only call: gate, maybe ask, execute — all serial.
-        const r = await runOneCall(out.toolCalls[i++], opts);
+        const r = await runOneCall(out.toolCalls[i++], { ...opts, autoHistory: reviewHistory(messages, opts.autoHistory) });
         messages.push({ role: "tool", tool_call_id: r.id, content: r.content });
-      }
-
-      // Fold this round's tool calls into ONE tally line instead of one line per
-      // call (the per-call announcements were recorded for Ctrl+T in runOneCall).
-      if (!opts.quiet && out.toolCalls.length) {
-        sink(opts).note(agentIndent(opts) + mark.toolTally(out.toolCalls.map((c) => c.name)) + chalk.dim(" · Ctrl+T"));
       }
 
       // Cron (Day s14): deliver any triggered scheduled jobs right after this

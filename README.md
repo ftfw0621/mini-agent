@@ -43,6 +43,50 @@ MINI_AGENT_MODEL=gpt-4.1-mini
 
 各家 base URL 见 [.env.example](.env.example)。两个注意:模型必须支持 function calling;窗口比 DeepSeek 小的话设 `MINI_AGENT_CONTEXT_WINDOW`(单位 token)。换完跑一遍 `npm run eval`——同样 10 道题,正好当模型横评。
 
+## Auto mode
+
+启动时加 `--auto`，或在会话中输入 `/auto` 开关自动审核。默认关闭；开启后，审核通过的工具操作自动执行，有风险、判断不确定或审核失败时仍会询问。Ink、readline 和 `-p` 模式共用同一条权限路径，后台 shell 和子 agent 的操作也会经过检查。
+
+审核后端自动选择：
+
+- 配置了 `JEV_API_KEY` 或 `TYPESAFE_API_KEY`：优先使用 Jev。
+- 没有 Jev key：复用主 agent 的 API endpoint 和 key，默认使用当前模型；启动时显示一条 Jev 配置提示，不影响使用。
+- 在 `.mini-agent/settings.json` 或全局 settings 中设置 `judge.model`，可以选择同一 vendor 支持的其他审核模型。例如，你的 endpoint 支持 `deepseek-flash` 时可以这样配置：
+
+```json
+{
+  "autoMode": { "enabled": true },
+  "judge": { "model": "deepseek-flash" }
+}
+```
+
+以后在环境变量或 `.env` 中配置 `JEV_API_KEY`，下次启动便会自动切换到 Jev，无须改模型配置。Jev 模型由 `autoMode.model` 配置，默认固定为 `jev-1.13.0`。自动审核会把真实用户请求、启动时的 `AGENT.md`、近期已完成工具调用及待执行工具参数发送到选中的审核服务。工具历史和委派任务只提供上下文；文件附件、hook 输出和模型摘要不会作为用户授权发送。
+
+Jev 额度或计费受限时会提示并自动切回同一 vendor 的 `judge.model`，未指定则使用当前模型。限流、服务故障也会回退，提示会区分原因；本次会话只提示一次，避免每次调用都重试已用完的额度。有效的风险判断不会触发换模型，只有服务失败才回退。回退模型也失败时仍需人工确认。
+
+硬性拒绝规则始终优先。auto mode 会审核每条 shell 命令，并忽略整类工具的免确认授权；`MINI_AGENT_AUTO_APPROVE` 也不能覆盖审核结果。`-p` 或无人值守的 teammate 无法确认时直接拒绝。实现机制、源码对照和限制见 [Auto mode 说明](docs/auto-mode.md)。
+
+## 工具进度、子 agent 和图片
+
+默认交互界面把连续同类工具调用合并成实时摘要：高亮动作，下面灰字显示结果和耗时。工具执行、模型思考和回答期间都有动画，不再逐轮追加 `thought for…` 和工具计数。最终回答正常保留；审批、拒绝、错误和 Jev 回退提示仍然可见。
+
+| 操作 | 快捷键 |
+|---|---|
+| 展开或收起工具参数与结果 | `Ctrl+T` |
+| 展开或收起模型思考 | `Ctrl+R` |
+| 翻阅工具或思考详情 | `↑` / `↓` 或 `PgUp` / `PgDn` |
+| 进入 agent 列表 | `Tab`，或输入框开头的 `←` |
+| 选择 agent，查看实时过程 | `↑` / `↓`，`Enter` |
+| 翻阅 agent 过程 | `PgUp` / `PgDn` |
+| 返回主界面；无面板时中断任务 | `Esc` |
+| 粘贴剪贴板图片或文字 | `Ctrl+V` |
+
+agent 列表竖排显示 `main`、subagent 和 teammate，右侧显示当前活动、`idle` / `done` / `failed`、耗时及输出 token。带 `~` 的 token 是流式估算；API 返回用量后使用实报数据。切换视图不会停止其他 agent，也不会把它们的详细过程塞进主对话。
+
+粘贴图片后，输入框显示 `[Image #1]`；可以继续输入说明或粘贴多张图片。光标紧跟占位符时按 Backspace 可以删除附件。每条消息最多 4 张、每张最多 5 MB。发送时使用真实图像数据，当前模型须同时支持图片和工具调用；模型拒绝图片时会提示检查限制或用 `/model` 切换。图片随会话保存，恢复会话和后续追问可以继续引用。
+
+剪贴板通过 `ClipboardSource` 接口接入：macOS 使用 AppKit，Windows 使用 PowerShell/Windows Forms，Linux Wayland 使用 `wl-paste`，X11 使用 `xclip`（Linux 需安装相应工具）。界面和图像消息构造不依赖操作系统。以上交互适用于默认 Ink 界面；`MINI_AGENT_NO_INK=1` 保留文字版 readline 界面。实现对照和验证范围见 [交互界面说明](docs/interactive-ui.md)。
+
 ## 进度
 
 | Tag | What it adds |

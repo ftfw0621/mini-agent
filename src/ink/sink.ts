@@ -23,21 +23,29 @@ export interface InkSinkApi {
 // Build a LoopOutput backed by Ink state. Pure glue: every method maps a loop
 // event to a state change.
 export function makeInkSink(api: InkSinkApi): LoopOutput {
+  // Concurrent reads can finish out of order. Removing one handle must not
+  // clear another call's animation, and stopped handles cannot revive it.
+  const statuses = new Map<symbol, string>();
+  const refresh = () => api.setStatus([...statuses.values()].at(-1) ?? null);
   return {
+    streamingStatus: true,
     // A spinner becomes the single "status" line below the conversation. A fresh
     // handle per model call (the loop makes one per round); `active` mirrors
     // ora's isSpinning so the loop's `spinner?.spinning` checks behave the same.
     spinner(text) {
-      api.setStatus(text);
+      const id = Symbol();
+      statuses.set(id, text);
+      refresh();
       let active = true;
       return {
         set: (t) => {
-          if (active) api.setStatus(t);
+          if (active) { statuses.set(id, t); refresh(); }
         },
         stop: () => {
           if (active) {
             active = false;
-            api.setStatus(null);
+            statuses.delete(id);
+            refresh();
           }
         },
         get spinning() {
@@ -45,8 +53,8 @@ export function makeInkSink(api: InkSinkApi): LoopOutput {
         },
       };
     },
-    // The "💭 thought for Ns" indicator is just a committed line.
-    reasoning: (line) => api.pushItem({ kind: "note", text: line }),
+    // The trace is already stored for Ctrl+R; no per-round scrollback noise.
+    reasoning: () => {},
     // The streamed answer accumulates in the dynamic region as raw text (live,
     // "it's typing"), then commits as ONE markdown-rendered item when it ends —
     // partial markdown mid-stream renders badly, so we format only once it's whole.

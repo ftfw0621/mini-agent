@@ -2,18 +2,22 @@ import type OpenAI from "openai"; // types + the client passed in
 import { runLoop, type LoopResult } from "../loop.js"; // the REAL agent loop — tools, permissions, retries, the lot
 import { CONFIG } from "../config.js"; // model + sub-agent tier
 import type { Judge } from "../judge.js"; // optional LLM permission classifier
+import type { AutoMode } from "../auto.js";
+import { userContent, type ImageAttachment } from "../images.js";
 import type { LoopOutput } from "../output.js"; // the Ink sink implements this
 
 // What the App hands the loop for one turn: where output goes (the Ink sink) and
 // how to ask the human. The loop already takes these as injected callbacks, so
 // the Ink REPL just provides Ink-flavoured versions.
 export interface TurnHooks {
+  images?: readonly ImageAttachment[];
   output: LoopOutput; // the Ink sink (src/ink/sink.ts)
   confirm: (question: string, toolName?: string) => Promise<boolean>; // permission prompt
   askUser?: (questions: { question: string; options: string[] }[]) => Promise<{ question: string; answer: string }[] | null>; // the ask_user form
   signal: AbortSignal; // aborts the in-flight request (Esc / Ctrl+C)
   isInterrupted: () => boolean; // polled between steps for a clean stop
   judge?: Judge; // the session's optional LLM permission classifier
+  autoMode?: AutoMode;
 }
 
 // Drive one real turn through the loop. The loop mutates `messages` in place
@@ -22,7 +26,7 @@ export interface TurnHooks {
 // rest. All screen output flows through hooks.output (the Ink sink).
 export function makeRunTurn(client: OpenAI, messages: OpenAI.ChatCompletionMessageParam[]) {
   return async (input: string, hooks: TurnHooks): Promise<LoopResult> => {
-    messages.push({ role: "user", content: input });
+    messages.push({ role: "user", content: userContent(input, hooks.images ?? []) });
     return runLoop(messages, {
       client,
       model: CONFIG.model,
@@ -31,6 +35,8 @@ export function makeRunTurn(client: OpenAI, messages: OpenAI.ChatCompletionMessa
       confirm: hooks.confirm,
       askUser: hooks.askUser,
       judge: hooks.judge,
+      autoMode: hooks.autoMode,
+      canPrompt: !!process.stdin.isTTY,
       subAgentModel: CONFIG.subAgentModel,
       output: hooks.output,
     });

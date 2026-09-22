@@ -90,36 +90,68 @@ export function revealReasoning(): boolean {
 
 // ---- collapsed tool calls (the activity trace) -------------------------------
 // A long task fires dozens of read_file/search calls; printing one line each
-// floods the screen. Instead the loop prints a compact per-round tally and we
-// keep the full call lines here for Ctrl+T to reveal. Cleared per turn, so
-// Ctrl+T shows the calls behind the LAST answer. (Diffs, prompts, and results
-// still print live — only the one-line announcements are folded.)
-const toolCallLog: string[] = [];
-const MAX_TOOL_LOG = 500; // bound the memory
+// floods the screen. The UI shows a bounded live summary, and this store retains
+// recent arguments and results for Ctrl+T. Cleared per turn, so the shortcut
+// shows activity behind the latest answer. Approval prompts remain visible.
+export interface ToolCallRecord {
+  line: string;
+  full: string;
+  id?: string;
+  name?: string;
+  args?: string;
+  startedAt: number;
+  endedAt?: number;
+  result?: string;
+}
+const toolCallLog: ToolCallRecord[] = [];
+const MAX_TOOL_LOG = 100;
+const MAX_DETAIL_CHARS = 32_000;
+let toolCallCount = 0;
+function boundedDetail(text: string): string {
+  return text.length > MAX_DETAIL_CHARS ? text.slice(0, MAX_DETAIL_CHARS) + "\n… (display truncated)" : text;
+}
 
 // Record a tool call's full line for Ctrl+T, and stash its args for Tab.
-export function recordToolCall(line: string, full: string): void {
-  toolCallLog.push(line);
+export function recordToolCall(line: string, full: string, action?: { id: string; name: string; args: string }): ToolCallRecord {
+  const record = { line, full: boundedDetail(full), ...action, args: action ? boundedDetail(action.args) : undefined, startedAt: Date.now() };
+  toolCallCount++;
+  toolCallLog.push(record);
   if (toolCallLog.length > MAX_TOOL_LOG) toolCallLog.shift();
-  collapsed.push({ full, expanded: false }); // Tab still reveals the most recent call's full args
+  collapsed.push({ full: record.full, expanded: false });
   if (collapsed.length > MAX_COLLAPSED) collapsed.shift();
+  return record;
 }
+
+export function recordToolResult(record: ToolCallRecord, result: string): void {
+  record.endedAt = Date.now();
+  record.result = boundedDetail(result);
+}
+
+export function recordToolDetail(id: string, text: string): void {
+  const record = [...toolCallLog].reverse().find((r) => r.id === id);
+  if (record) record.full = boundedDetail(record.full + "\n" + text);
+}
+
+export function getToolActivity(): readonly ToolCallRecord[] { return toolCallLog; }
+export function getToolCallCount(): number { return toolCallCount; }
 
 export function clearToolCalls(): void {
   toolCallLog.length = 0;
+  collapsed.length = 0;
+  toolCallCount = 0;
 }
 
 // Ctrl+T handler: print every tool call behind the last answer. Returns false
 // (nothing to show) so the editor can ignore the key.
 export function revealToolCalls(): boolean {
-  if (!toolCallLog.length) return false;
-  process.stdout.write(chalk.dim(`tool calls this turn (${toolCallLog.length}):\n`));
-  process.stdout.write(toolCallLog.join("\n") + "\n");
+  const text = getToolCalls();
+  if (!text) return false;
+  process.stdout.write(text + "\n");
   return true;
 }
 
 // Ink variants of the two reveals: RETURN the formatted block (or null) instead
-// of writing to stdout, so the Ink REPL can commit it as a note in its tree.
+// of writing to stdout, so Ink can show it in a transient, scrollable panel.
 export function getReasoning(): string | null {
   if (!reasoningTrace.length) return null;
   return chalk.dim("💭 model's thinking:\n") + chalk.dim(reasoningTrace.join("\n\n— — —\n\n").replace(/^/gm, "  "));
@@ -127,7 +159,8 @@ export function getReasoning(): string | null {
 
 export function getToolCalls(): string | null {
   if (!toolCallLog.length) return null;
-  return chalk.dim(`tool calls this turn (${toolCallLog.length}):\n`) + toolCallLog.join("\n");
+  const omitted = toolCallCount > toolCallLog.length ? ` — showing latest ${toolCallLog.length}` : "";
+  return chalk.dim(`tool calls this turn (${toolCallCount})${omitted}:\n`) + toolCallLog.map((r) => `${r.line}\n${r.full}\nresult: ${r.result ?? "(in progress)"}`).join("\n\n");
 }
 
 // ---- cleanup -----------------------------------------------------------------

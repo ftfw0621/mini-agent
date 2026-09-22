@@ -77,6 +77,10 @@ interface SettingsFile {
     enabled?: boolean; // run an LLM classifier on "ask" verdicts to auto-allow the clearly safe
     model?: string; // judge model (defaults to the main model); a cheaper one is ideal
   };
+  autoMode?: {
+    enabled?: boolean; // opt-in tool review: Jev with a key, current vendor otherwise
+    model?: string; // Jev model only; the vendor fallback uses judge.model or model
+  };
   pricing?: {
     inputPerM?: number; // $ per 1M uncached input tokens
     cachedInputPerM?: number; // $ per 1M cached input tokens
@@ -155,6 +159,10 @@ export const CONFIG = {
   judge: {
     enabled: projectSettings.judge?.enabled ?? globalSettings.judge?.enabled ?? false,
     model: projectSettings.judge?.model || globalSettings.judge?.model || undefined, // undefined → use the main model
+  },
+  autoMode: {
+    enabled: process.env.MINI_AGENT_AUTO_MODE !== undefined ? process.env.MINI_AGENT_AUTO_MODE === "1" : (projectSettings.autoMode?.enabled ?? globalSettings.autoMode?.enabled ?? false),
+    model: projectSettings.autoMode?.model || globalSettings.autoMode?.model || "jev-1.13.0",
   },
   // Token prices for the /cost estimate (defaults applied in cost.ts). Project
   // overrides global; either may set just the fields it cares about.

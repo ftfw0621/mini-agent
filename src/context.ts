@@ -28,9 +28,12 @@ export function estimateTokens(text: string, dense = false): number {
 export function estimateHistoryTokens(messages: OpenAI.ChatCompletionMessageParam[]): number {
   let total = 0; // running sum
   for (const m of messages) {
-    const content = typeof m.content === "string" ? m.content : JSON.stringify(m.content ?? ""); // content can be structured — serialize it
     const isDense = m.role === "tool"; // tool results are JSON-ish → denser tokens
-    total += estimateTokens(content, isDense) + 8; // +8 per message for role/formatting overhead
+    // Base64 bytes are transport, not text tokens. Image tokenization differs
+    // by model/resolution; reserve a budget per image, then use API usage for
+    // actual accounting and reactive compaction for provider context limits.
+    total += Array.isArray(m.content) ? m.content.reduce((sum, part) => sum + (part.type === "image_url" ? 4096 : estimateTokens(JSON.stringify(part), isDense)), 0) + 8
+      : estimateTokens(m.content ?? "", isDense) + 8;
     if ("tool_calls" in m && m.tool_calls) total += estimateTokens(JSON.stringify(m.tool_calls), true); // count the call arguments too
   }
   return total;

@@ -2,7 +2,7 @@ import OpenAI from "openai";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { CONFIG, requireApiKey } from "../config.js";
-import { buildSystemMessage } from "../prompt.js";
+import { buildSystemMessage, readProjectInstructions } from "../prompt.js";
 import { estimateHistoryTokens } from "../context.js";
 import { initCostMeter, DEFAULT_PRICING, type CostMeter } from "../cost.js";
 import { gitBranch } from "../tui.js";
@@ -11,6 +11,7 @@ import { initTelemetry, emit } from "../telemetry.js";
 import { runHooks } from "../hooks.js";
 import { connectMcpServers } from "../mcp.js";
 import { Judge } from "../judge.js";
+import { AutoMode } from "../auto.js";
 import { registerExternalTool } from "../tools.js";
 import { rememberTool, readMemory } from "../memory.js";
 import { loadSkills, buildSkillTool, type Skill } from "../skills.js";
@@ -39,6 +40,7 @@ export interface InkSession {
   costMeter: CostMeter;
   skills: Skill[];
   judge?: Judge;
+  autoMode: AutoMode;
   model: string;
   dir: string;
   branch: string | null;
@@ -54,7 +56,8 @@ export async function buildInkSession(opts: { resume?: boolean } = {}): Promise<
   requireApiKey();
   const client = new OpenAI({ baseURL: CONFIG.baseURL, apiKey: CONFIG.apiKey, maxRetries: 0 });
 
-  const systemMessage = buildSystemMessage(); // stable prefix = cache hits every request
+  const projectInstructions = readProjectInstructions();
+  const systemMessage = buildSystemMessage(projectInstructions); // stable prefix = cache hits every request
   const messages: OpenAI.ChatCompletionMessageParam[] = [{ role: "system", content: systemMessage }];
 
   const notices: string[] = [];
@@ -92,7 +95,9 @@ export async function buildInkSession(opts: { resume?: boolean } = {}): Promise<
   startCronScheduler();
 
   const judge = CONFIG.judge.enabled ? new Judge(client, CONFIG.judge.model || CONFIG.model) : undefined;
-  if (judge) notices.push(`(permission judge on — model ${CONFIG.judge.model || CONFIG.model})`);
+  const autoMode = new AutoMode(client, { projectInstructions });
+  notices.push(...autoMode.startupNotices());
+  if (judge) notices.push(`(permission judge on — ${autoMode.backend})`);
 
   // The remember tool flows through the same permission gate as any tool.
   registerExternalTool(rememberTool);
@@ -134,6 +139,7 @@ export async function buildInkSession(opts: { resume?: boolean } = {}): Promise<
     costMeter,
     skills,
     judge,
+    autoMode,
     model: CONFIG.model,
     dir,
     branch,

@@ -5,7 +5,7 @@ import readline from "node:readline/promises"; // promise-based terminal input
 import { createRequire } from "node:module"; // to read package.json for --version
 import { CONFIG, requireApiKey, saveGlobalSetting, PROJECT_SETTINGS_PATH, GLOBAL_SETTINGS_PATH } from "./config.js"; // provider-agnostic settings (.env loaded there)
 import { runLoop, TerminateReason, MAX_RETRIES, type LoopResult, killAllSubAgents } from "./loop.js"; // the state machine
-import { buildSystemMessage } from "./prompt.js"; // the constitution + optional AGENT.md project memory
+import { buildSystemMessage, readProjectInstructions } from "./prompt.js"; // the constitution + optional AGENT.md project memory
 import { forgetFilesExcept, registerExternalTool } from "./tools.js"; // file-state reset + tool registration
 import { compactHistory, estimateHistoryTokens, COMPACT_AT } from "./context.js"; // for the manual /compact command
 import { newSessionId, saveSession, latestSession, listSessions, loadSession, setSessionTitle } from "./session.js"; // conversation persistence (project-local) + the /resume picker
@@ -14,6 +14,7 @@ import { initTelemetry, emit, statsReport } from "./telemetry.js"; // local-only
 import { runHooks } from "./hooks.js"; // SessionStart lifecycle hook
 import { connectMcpServers, listMcpServers, mcpActionsFor, runMcpAction } from "./mcp.js"; // external tool servers (MCP) + /mcp
 import { Judge } from "./judge.js"; // optional LLM permission classifier
+import { AutoMode } from "./auto.js";
 import { isPlanMode, setPlanMode } from "./permissions.js"; // plan mode: research-only until the user approves a plan
 import { undoLast, clearUndo, sessionChanges } from "./undo.js"; // /undo + /diff: take back, or review, this session's writes
 import { clearTodos, getTodos, renderTodos } from "./todos.js"; // the agent's plan: /todos to view, cleared with the conversation
@@ -46,6 +47,7 @@ Usage:
   mini-agent                 interactive session (REPL)
   mini-agent -r | --resume   continue the most recent session in this directory
   mini-agent -p "<task>"     one-shot: run a single task, print the result, exit
+  mini-agent --auto          review tool actions automatically (Jev or your current vendor)
   mini-agent -v | --version  print the version
   mini-agent -h | --help     this text
 
@@ -63,6 +65,7 @@ const EXIT_NOTES: Record<Exclude<TerminateReason, TerminateReason.Done>, string>
   [TerminateReason.RateLimitBudgetExhausted]: "The provider keeps rate-limiting us. Wait a minute, then try again.",
   [TerminateReason.ContextTooLong]: "The conversation no longer fits the model's context window, and compaction could not shrink it enough. Use /clear to start fresh.",
   [TerminateReason.CompactionFailed]: "Automatic compaction kept failing — stopping instead of looping. Use /clear to start fresh.",
+  [TerminateReason.ImageInputRejected]: "The provider rejected this image request. Check image limits and use /model to select a vision-capable model at your current vendor, then retry (images remain in the conversation).",
   [TerminateReason.FatalApiError]: "Unrecoverable API error — retrying would not help. Check your API key and request.",
   [TerminateReason.UserInterrupt]: "Interrupted — back at the prompt.",
 };
@@ -78,6 +81,7 @@ const SESSION_HELP = `commands:
   /cost      tokens, cache hit rate and estimated spend this session (local)
   /mcp       list configured MCP servers + status; select one to authenticate / reconnect / disable
   /plan      toggle plan mode — research-only; the agent presents a plan you approve before any change
+  /auto      toggle auto mode — risky or uncertain actions still require approval
   /todos     show the agent's current task plan (it maintains one with todo_write on multi-step work)
   /bg        list background tasks this session (run_bash_background) and their status
   /team      list the agent team (spawn_teammate): each teammate's role, status, and pending inbox
@@ -92,7 +96,7 @@ const SESSION_HELP = `commands:
 
 keys (at the prompt):
   Ctrl+R     reveal the model's thinking for the last answer (collapsed behind a spinner by default)
-  Ctrl+T     reveal the folded tool-call trace for the last answer (read_file/search/… shown as a tally)
+  Ctrl+T     reveal the folded tool-call trace for the last answer (recent arguments and results)
   Tab        expand/collapse the most recent tool output`;
 
 // Injected when the user turns plan mode on, so the model knows the rules of the
@@ -110,6 +114,9 @@ async function main() {
     console.log(USAGE); // the full help text
     return;
   }
+  // Options precede -p; everything after -p remains literal task text.
+  const optionEnd = argv.findIndex((a) => a === "-p" || a === "--print");
+  if (argv.slice(0, optionEnd < 0 ? argv.length : optionEnd).includes("--auto")) CONFIG.autoMode.enabled = true;
   // Print mode: -p / --print takes the task from the remaining arguments.
   const pIdx = argv.findIndex((a) => a === "-p" || a === "--print"); // where the flag sits
   const printTask = pIdx >= 0 ? argv.slice(pIdx + 1).join(" ").trim() : null; // everything after it is the task
@@ -142,7 +149,8 @@ async function main() {
 
   // The system message is built ONCE per session: stable prefix = cache hits
   // on every request. Nothing session-specific may sneak into it later.
-  const systemMessage = buildSystemMessage();
+  const projectInstructions = readProjectInstructions();
+  const systemMessage = buildSystemMessage(projectInstructions);
   let messages: OpenAI.ChatCompletionMessageParam[] = [{ role: "system", content: systemMessage }]; // the whole conversation lives here, across turns
 
   // ---- Session persistence ---------------------------------------------------------
@@ -184,7 +192,9 @@ async function main() {
 
   // The optional LLM permission judge, built once if a settings file enabled it.
   const judge = CONFIG.judge.enabled ? new Judge(client, CONFIG.judge.model || CONFIG.model) : undefined;
-  if (judge) console.log(chalk.dim(`(permission judge on — model ${CONFIG.judge.model || CONFIG.model})`));
+  const autoMode = new AutoMode(client, { projectInstructions });
+  for (const notice of autoMode.startupNotices()) console.log(chalk.dim(notice));
+  if (judge) console.log(chalk.dim(`(permission judge on — ${autoMode.backend})`));
 
   // The remember tool: let the model save durable facts to long-term memory.
   // Registered like any tool, so it flows through the same permission gate.
@@ -231,6 +241,7 @@ async function main() {
       controller.abort(); // cancel the in-flight request
     });
     messages.push({ role: "user", content: printTask }); // the single task
+    autoMode.recordRequest(printTask);
     const result = await runLoop(messages, {
       client,
       model: CONFIG.model,
@@ -238,6 +249,8 @@ async function main() {
       isInterrupted: () => interrupted,
       subAgentModel: CONFIG.subAgentModel, // delegated work may run on a different tier
       judge, // auto-allow clearly-safe commands even unattended (safer than blanket AUTO_APPROVE)
+      autoMode,
+      canPrompt: false,
       // Print mode never prompts: unattended means nobody can say yes.
       // MINI_AGENT_AUTO_APPROVE=1 still works for scripted use; hard denies
       // were enforced in permissions.ts long before this runs.
@@ -339,7 +352,7 @@ async function main() {
   // denies were already enforced in permissions.ts before we get here.
   const confirm = async (question: string, toolName?: string): Promise<boolean> => {
     console.log(chalk.yellow(`\n⚠ approval needed — ${question}`)); // always show what is being asked
-    if (process.env.MINI_AGENT_AUTO_APPROVE === "1") {
+    if (!autoMode.enabled && process.env.MINI_AGENT_AUTO_APPROVE === "1") {
       console.log(chalk.dim("  auto-approved (MINI_AGENT_AUTO_APPROVE=1)")); // bypass mode — say so out loud
       return true; // approve without asking
     }
@@ -350,9 +363,10 @@ async function main() {
     // Selecting beats typing: ↑/↓ + Enter instead of "type y/N". The middle
     // option lets the user stop being asked about this tool for the session.
     const allowLabel = toolName ? `Yes, and don't ask again for ${toolName} this session` : "Yes, and don't ask again this session";
-    const choice = await promptSelect(rl, ["Yes", allowLabel, "No — let me tell the agent what to do instead"]);
-    const approved = choice === 0 || choice === 1;
-    if (choice === 1 && toolName) {
+    const options = autoMode.enabled ? ["Yes, once", "No — let me tell the agent what to do instead"] : ["Yes", allowLabel, "No — let me tell the agent what to do instead"];
+    const choice = await promptSelect(rl, options);
+    const approved = choice === 0 || (!autoMode.enabled && choice === 1);
+    if (!autoMode.enabled && choice === 1 && toolName) {
       CONFIG.permissions.allow.push(`tool:${toolName}`); // remember the grant for the rest of the session
       console.log(chalk.dim(`  won't ask again for ${toolName} this session`));
     }
@@ -475,6 +489,10 @@ async function main() {
 
   // Handle a /slash command. Returns true if the line was a command.
   const handleCommand = async (line: string): Promise<boolean> => {
+    if (line === "/auto") {
+      console.log(chalk.dim(autoMode.toggle()));
+      return true;
+    }
     // /model takes an optional argument (/model <name>), so it can't be a plain
     // switch case — handle it before the exact-match switch.
     if (line === "/model" || line.startsWith("/model ")) {
@@ -495,11 +513,12 @@ async function main() {
         return true;
       }
       messages.push({ role: "user", content: `Run the "${s.name}" skill.\n\n${skillInstructions(s)}` });
+      autoMode.recordRequest(`Run the "${s.name}" skill.`);
       console.log(chalk.dim(`(running skill: ${s.name})`));
       running = true;
       interrupted = false;
       controller = new AbortController();
-      const r = await runLoop(messages, { client, model: CONFIG.model, signal: controller.signal, isInterrupted: () => interrupted, confirm, askUser, subAgentModel: CONFIG.subAgentModel, judge });
+      const r = await runLoop(messages, { client, model: CONFIG.model, signal: controller.signal, isInterrupted: () => interrupted, confirm, askUser, subAgentModel: CONFIG.subAgentModel, judge, autoMode, canPrompt: !!process.stdin.isTTY });
       running = false;
       saveSession(sessionId, CONFIG.model, messages);
       if (r.reason !== TerminateReason.Done) console.log(chalk.yellow(`\n⚠️ ${EXIT_NOTES[r.reason]}`));
@@ -527,6 +546,7 @@ async function main() {
         console.log(chalk.dim(SESSION_HELP)); // the command reference
         return true;
       case "/clear":
+        autoMode.clearRequests();
         messages = [{ role: "system", content: systemMessage }]; // drop everything but the constitution
         forgetFilesExcept([]); // the file read-state belongs to the conversation — clear it too
         clearUndo(); // a fresh conversation should not undo the previous one's writes
@@ -662,6 +682,7 @@ async function main() {
           return true;
         }
         messages = [{ role: "system", content: systemMessage }, ...chosen.messages]; // fresh constitution + saved turns
+        autoMode.clearRequests(); // old transcripts do not preserve trustworthy input provenance
         sessionId = chosen.id; // keep appending to the resumed session's file
         titleAttempted = false; // a resumed session without a title gets one on its next message
         pendingTitle = chosen.title;
@@ -761,7 +782,8 @@ async function main() {
       console.log(""); // one blank line separates the previous answer from the prompt
       footer = statusLine(CONFIG.model, path.basename(process.cwd()), gitBranch(), ctxPct, costMeter.cost(), Date.now() - sessionStartedAt); // status pinned below the prompt
     }
-    const line = (await readUserLine(framedPrompt(isPlanMode()), footer, sentMessage)).trim(); // next input (echoed as a sent message above), or "exit" on EOF
+    const prompt = autoMode.enabled && !isPlanMode() ? chalk.yellow("auto ❯ ") : framedPrompt(isPlanMode());
+    const line = (await readUserLine(prompt, footer, sentMessage)).trim(); // next input, or "exit" on EOF
     if (!line) continue; // empty line — just re-prompt
     if (line === "exit" || line === "quit") {
       if (hasRunningBackground()) console.log(chalk.yellow("(stopping background tasks still running — see /bg)")); // Day 37: they're about to be SIGKILLed on exit
@@ -807,6 +829,7 @@ async function main() {
     }
 
     messages.push({ role: "user", content: augmented + injected }); // the new turn (with any attached files + hook context) joins the shared history
+    autoMode.recordRequest(line); // original human text, before file/hook attachments
     clearReasoning(); // Ctrl+R should reveal THIS turn's thinking, not the previous answer's
     clearToolCalls(); // ...and Ctrl+T should reveal THIS turn's tool calls
     running = true; // Ctrl+C now means "interrupt the task"
@@ -822,6 +845,8 @@ async function main() {
       askUser, // the multi-question form the model can pop
       subAgentModel: CONFIG.subAgentModel, // delegated work may run on a different tier
       judge, // optional LLM classifier for the "ask" middle ground
+      autoMode,
+      canPrompt: !!process.stdin.isTTY,
     });
     running = false; // back at the prompt — Ctrl+C means "exit" again
     saveSession(sessionId, CONFIG.model, messages, pendingTitle); // snapshot after every turn — crash-safe by construction

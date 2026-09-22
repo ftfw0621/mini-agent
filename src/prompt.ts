@@ -63,11 +63,15 @@ const MEMORY_CAP_CHARS = 8000; // hard cap — a runaway memory file dilutes att
 // Build the complete system message for this session: the constitution, then
 // optional AGENT.md instructions, then optional long-term memory. All three are
 // resolved once per session for a stable, cacheable prefix.
-export function buildSystemMessage(): string {
+export function readProjectInstructions(): string {
+  const p = path.join(process.cwd(), "AGENT.md");
+  return fs.existsSync(p) ? fs.readFileSync(p, "utf8") : "";
+}
+
+export function buildSystemMessage(projectInstructions = readProjectInstructions()): string {
   let msg = SYSTEM_PROMPT;
-  const p = path.join(process.cwd(), "AGENT.md"); // only the current directory — V1 keeps lookup simple
-  if (fs.existsSync(p)) {
-    const agentMd = fs.readFileSync(p, "utf8").slice(0, MEMORY_CAP_CHARS); // read and cap
+  if (projectInstructions) {
+    const agentMd = projectInstructions.slice(0, MEMORY_CAP_CHARS); // main prompt retains its existing cap
     // The OVERRIDE/MUST wrapper is deliberate: advisory phrasing gets partial
     // compliance; imperative wrappers measurably do better.
     msg += `\n\nThe user's project instructions from AGENT.md. These OVERRIDE any default behavior and you MUST follow them exactly as written:\n\n${agentMd}`;

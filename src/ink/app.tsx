@@ -5,14 +5,14 @@ import { formatElapsed, renderMenu, MENU_HINT, formatModelChoices } from "../ui.
 import { renderMarkdown } from "../markdown.js"; // model speaks markdown → ANSI, same as the non-Ink REPL
 import { initFormState, reduceForm, renderForm, collectAnswers, type FormQuestion, type FormState, type FormAnswer } from "../form.js"; // the ask_user form: pure state machine + renderer
 import { CONFIG, saveGlobalSetting } from "../config.js"; // session allowlist + /model save
-import { TerminateReason, type LoopResult, listSubAgents } from "../loop.js"; // how a turn can end
+import { TerminateReason, type LoopResult, listAgentViews } from "../loop.js"; // how a turn can end
 import { compactHistory, COMPACT_AT } from "../context.js"; // /compact
 import { forgetFilesExcept } from "../tools.js"; // /clear resets the file read-state
 import { clearUndo } from "../undo.js";
 import { clearTodos } from "../todos.js";
 import { resetTeam } from "../team.js";
 import { resetBoard } from "../board.js";
-import { clearReasoning, clearToolCalls, getReasoning, getToolCalls, cleanup as tuiCleanup } from "../tui.js";
+import { clearReasoning, clearToolCalls, getReasoning, getToolCalls, getToolActivity, getToolCallCount, cleanup as tuiCleanup } from "../tui.js";
 import { expandMentions } from "../mentions.js"; // @file mentions → attach file contents
 import { normalizeDroppedPaths } from "../drop.js"; // drag-and-drop a file → its absolute path in the input
 import { cronItemsPending, consumeCronQueue, cronTriggerContent } from "../cron.js"; // cron scheduler (Day s14): fire scheduled jobs autonomously while idle
@@ -24,6 +24,10 @@ import { extractMemories } from "../memory.js";
 import { displayWidth } from "../editor.js"; // display-width measurement (CJK-aware)
 import { runHooks } from "../hooks.js";
 import { emit } from "../telemetry.js";
+import type { ClipboardSource } from "../clipboard.js";
+import { readClipboard, imageLabel, imagesInInput, MAX_IMAGES, type ImageAttachment } from "../images.js";
+import { AgentList, moveAgentFocus } from "./agents.js";
+import { detailPage, summarizeActivity } from "./activity.js";
 import { makeInkSink, type Item } from "./sink.js"; // turns the loop's output into React state
 import { runInfoCommand, SESSION_HELP, mcpStatusText } from "./commands.js"; // the non-interactive slash commands + /mcp status
 import { listMcpServers, mcpActionsFor, runMcpAction } from "../mcp.js"; // /mcp: list + per-server actions
@@ -49,7 +53,7 @@ type Pending =
 // Injected when plan mode turns on, so the model knows the rules it now lives in.
 const PLAN_MODE_NOTICE = `[plan mode ON] Investigate this request using only read-only tools — read_file, search, and safe read-only shell (ls, cat, git status). Do NOT write files, edit, or run mutating commands; the permission gate will block them. When you have a concrete, ordered plan, call the exit_plan_mode tool with that plan. The user reviews and approves it before you make any change.`;
 
-const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]; // the braille spinner ora uses, hand-rolled for Ink
+const SPINNER_FRAMES = ["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"];
 
 // Cap the live streaming preview to a terminal-aware tail. THIS IS LOAD-BEARING:
 // Ink redraws the whole dynamic region (everything below <Static>) on every
@@ -63,23 +67,19 @@ function liveTail(s: string): string {
   // Keep the preview SMALL (≤10 lines) even on a tall terminal: Ink repaints this
   // whole region on every (throttled) update, and a smaller block repaints with
   // far less flicker. The full reply still lands in <Static> on commit.
-  const maxLines = Math.max(3, Math.min(10, rows - 14)); // reserve rows for the input box + status bar + agent bar + margins
+  const maxLines = Math.max(3, Math.min(10, rows - 20)); // reserve rows for the input box + status bar + agent bar + margins
   const cols = process.stdout.columns || 80;
-  const maxChars = maxLines * cols; // rough bound so one very long line can't blow past either
-  let t = s.length > maxChars ? s.slice(-maxChars) : s;
-  const lines = t.split("\n");
-  const clipped = s.length > maxChars || lines.length > maxLines;
-  if (lines.length > maxLines) t = lines.slice(-maxLines).join("\n");
-  return clipped ? "… " + t : t; // a leading ellipsis signals there's more above (it's all in the scrollback on commit)
+  const page = detailPage(s, 0, maxLines, Math.max(1, cols - 2));
+  return (page.pages > 1 ? "… " : "") + page.text;
 }
 
 function Spinner() {
   const [f, setF] = useState(0);
   useEffect(() => {
-    const id = setInterval(() => setF((x) => (x + 1) % SPINNER_FRAMES.length), 80);
+    const id = setInterval(() => setF((x) => (x + 1) % SPINNER_FRAMES.length), 120);
     return () => clearInterval(id);
   }, []);
-  return <Text color="cyan">{SPINNER_FRAMES[f]}</Text>;
+  return <Text color="#D77757">{SPINNER_FRAMES[f]}</Text>;
 }
 
 // One committed line of conversation. `user` is a highlight bar; `answer` is a
@@ -139,18 +139,24 @@ const EXIT_NOTES: Partial<Record<TerminateReason, string>> = {
   [TerminateReason.RateLimitBudgetExhausted]: "The provider keeps rate-limiting us. Wait a minute, then retry.",
   [TerminateReason.ContextTooLong]: "The conversation no longer fits the context window. Use /clear.",
   [TerminateReason.CompactionFailed]: "Automatic compaction kept failing. Use /clear to start fresh.",
+  [TerminateReason.ImageInputRejected]: "The provider rejected this image request. Check image limits and use /model to select a vision-capable model at your current vendor, then retry (images remain in the conversation).",
   [TerminateReason.FatalApiError]: "Unrecoverable API error — check your API key and request.",
   [TerminateReason.UserInterrupt]: "Interrupted — back at the prompt.",
 };
 
-export function App({ session, runTurn }: { session: InkSession; runTurn: (input: string, hooks: TurnHooks) => Promise<LoopResult> }) {
-  const { client, messages, systemMessage, costMeter, skills, judge, model, dir, branch, getStatus } = session;
+export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSource; session: InkSession; runTurn: (input: string, hooks: TurnHooks) => Promise<LoopResult> }) {
+  const { client, messages, systemMessage, costMeter, skills, judge, autoMode, model, dir, branch, getStatus } = session;
 
   // Seed the scrollback with the welcome banner + the dim startup notices.
   const [items, setItems] = useState<Item[]>(() => [{ kind: "note", text: session.bannerText }, ...session.notices.map((n) => ({ kind: "note" as const, text: chalk.dim(n) }))]);
   const [status, setStatus] = useState<string | null>(null); // the live spinner line
+  const [details, setDetails] = useState<"tools" | "reasoning" | null>(null);
+  const [detailOffset, setDetailOffset] = useState(0);
   const [live, setLive] = useState<string | null>(null); // the streaming answer
   const [input, setInput] = useState(""); // the current input buffer
+  const [images, setImages] = useState<ImageAttachment[]>([]);
+  const pasting = useRef(false);
+  const imageSeq = useRef(0);
   const [cursor, setCursor] = useState(0); // caret position WITHIN `input` (0..input.length), for ←/→ editing
   const [busy, setBusy] = useState(false); // a turn is in flight
   const [pending, setPending] = useState<Pending | null>(null); // a prompt/menu blocking input
@@ -158,8 +164,10 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
   const [formState, setFormState] = useState<FormState | null>(null); // the ask_user form's state
   const [sessionId, setSessionId] = useState(session.initialSessionId); // changes on /clear, /resume
   const [planMode, setPlan] = useState(isPlanMode()); // mirrored into the prompt frame
+  const [autoEnabled, setAutoEnabled] = useState(autoMode.enabled);
   const [histIdx, setHistIdx] = useState<number | null>(null); // ↑/↓ recall position (null = editing a fresh line)
-  const [subAgentFocus, setSubAgentFocus] = useState<number | null>(null); // which sub-agent is highlighted (null = none)
+  const [subAgentFocus, setSubAgentFocus] = useState<string | null>(null); // which sub-agent is highlighted (null = none)
+  const [agentPage, setAgentPage] = useState(0);
   const [subAgentDetail, setSubAgentDetail] = useState<string | null>(null); // the id of the sub-agent whose output is shown in detail
   const [, setTick] = useState(0); // forces a re-render once a second so the clock / cost tick
   const { exit } = useApp();
@@ -185,6 +193,7 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
 
   // Open a one-of-N menu and run `onChoose` with the picked index (-1 = cancel).
   const openSelect = (header: string, options: string[], onChoose: (i: number) => void) => {
+    setDetails(null);
     setMenuSel(0);
     setPending({ kind: "select", header, options, onChoose });
   };
@@ -193,7 +202,9 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
   // as the prompt (a user highlight bar, or a note for /skill); the loop appends
   // `content` to `messages` itself. The permission menu + ask_user form raise a
   // `pending` prompt that returns a promise the loop awaits.
-  const runConversationTurn = (content: string, display: Item) => {
+  const runConversationTurn = (content: string, display: Item, attachments: readonly ImageAttachment[] = []) => {
+    setDetails(null);
+    setDetailOffset(0);
     pushItem(display);
     clearReasoning(); // Ctrl+R should reveal THIS turn's thinking
     clearToolCalls(); // ...and Ctrl+T THIS turn's tool calls
@@ -202,13 +213,15 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
     const tstate = { controller, interrupted: false };
     turn.current = tstate; // expose it so Esc can interrupt this turn
     const hooks: TurnHooks = {
+      images: attachments,
       output: sink,
       confirm: (question, toolName) =>
         new Promise<boolean>((resolve) => {
           const allowLabel = toolName ? `Yes, and don't ask again for ${toolName} this session` : "Yes, and don't ask again this session";
-          openSelect(`⚠ approval needed — ${question}`, ["Yes", allowLabel, "No — let me tell the agent what to do instead"], (i) => {
-            const approved = i === 0 || i === 1;
-            if (approved && i === 1 && toolName) CONFIG.permissions.allow.push(`tool:${toolName}`); // "don't ask again" → session allowlist
+          const options = autoMode.enabled ? ["Yes, once", "No — let me tell the agent what to do instead"] : ["Yes", allowLabel, "No — let me tell the agent what to do instead"];
+          openSelect(`⚠ approval needed — ${question}`, options, (i) => {
+            const approved = i === 0 || (!autoMode.enabled && i === 1);
+            if (!autoMode.enabled && approved && i === 1 && toolName) CONFIG.permissions.allow.push(`tool:${toolName}`); // "don't ask again" → session allowlist
             note(`${chalk.yellow("⚠ approval")} — ${question.split("\n")[0]} → ${approved ? chalk.green("✓ approved") : chalk.yellow("✗ declined")}`);
             resolve(approved);
           });
@@ -216,12 +229,14 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
       askUser: (questions) =>
         new Promise<FormAnswer[] | null>((resolve) => {
           if (!questions.length) return resolve(null);
+          setDetails(null);
           setFormState(initFormState(questions));
           setPending({ kind: "form", questions, resolve });
         }),
       signal: controller.signal,
       isInterrupted: () => tstate.interrupted, // polled between steps for a clean stop
       judge,
+      autoMode,
     };
     runTurn(content, hooks)
       .then(async (result: LoopResult) => {
@@ -268,7 +283,7 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
 
   // A normal (non-command) prompt: run UserPromptSubmit hooks, expand @file
   // mentions, then start the turn. Mirrors agent.ts's submit path.
-  const submitLine = async (text: string) => {
+  const submitLine = async (text: string, attachments: readonly ImageAttachment[] = []) => {
     if (text === "exit" || text === "quit") return doExit();
     if (await handleCommand(text)) return; // slash commands never reach the model
     const hook = await runHooks("UserPromptSubmit", { prompt: text });
@@ -300,7 +315,8 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
       }
     }
 
-    runConversationTurn(augmented + injected, { kind: "user", text }); // show the original line; send the augmented content
+    autoMode.recordRequest(text); // before attached files or hook output can masquerade as user intent
+    runConversationTurn(augmented + injected, { kind: "user", text }, attachments); // show the original line; send the augmented content
   };
 
   // Handle a /slash command. Returns true if the line was a command (handled).
@@ -346,6 +362,11 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
   };
 
   const handleCommand = async (line: string): Promise<boolean> => {
+    if (line === "/auto") {
+      note(chalk.dim(autoMode.toggle()));
+      setAutoEnabled(autoMode.enabled);
+      return true;
+    }
     const info = runInfoCommand(line, { skills, costMeter }); // /help /cost /memory /stats /todos /bg /team /tasks /skills /undo /diff
     if (info !== null) {
       note(info);
@@ -408,12 +429,14 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
         note(chalk.yellow(`(no skill named "${name}")`));
         return true;
       }
+      autoMode.recordRequest(`Run the "${s.name}" skill.`);
       runConversationTurn(`Run the "${s.name}" skill.\n\n${skillInstructions(s)}`, { kind: "note", text: chalk.dim(`(running skill: ${s.name})`) });
       return true;
     }
 
     switch (line) {
       case "/clear":
+        autoMode.clearRequests();
         messages.length = 0; // mutate in place — same array ref the loop holds
         messages.push({ role: "system", content: systemMessage });
         forgetFilesExcept([]);
@@ -468,6 +491,7 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
           const chosen = loadSession(sessions[i].id);
           if (!chosen) return note(chalk.yellow("(could not load that session — it may be corrupt)"));
           messages.length = 0;
+          autoMode.clearRequests();
           messages.push({ role: "system", content: systemMessage }, ...chosen.messages);
           setSessionId(chosen.id);
           titleAttempted.current = false; // a resumed session without a title gets one on its next message
@@ -509,12 +533,47 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
       return exit(); // Ctrl+C quits immediately (process.on exit cleans up MCP/background)
     }
 
-    // Ctrl+R / Ctrl+T: reveal the LAST answer's collapsed thinking / tool calls.
-    if (key.ctrl && char === "r") return note(getReasoning() ?? chalk.dim("(no thinking recorded for the last answer)"));
-    if (key.ctrl && char === "t") return note(getToolCalls() ?? chalk.dim("(no tool calls recorded for the last answer)"));
+    if (key.ctrl && char === "v" && !busy && !pending && subAgentFocus === null) {
+      if (pasting.current) return;
+      pasting.current = true;
+      const id = ++imageSeq.current;
+      void readClipboard(id, clipboard).then((clipboard) => {
+        if (clipboard.image) {
+          if (imagesInInput(input, images).length >= MAX_IMAGES) {
+            note(chalk.yellow(`Attach at most ${MAX_IMAGES} images per message.`));
+            return;
+          }
+          const label = imageLabel(id);
+          setImages((current) => [...imagesInInput(input, current), clipboard.image!]);
+          setInput((current) => current.slice(0, cursor) + label + current.slice(cursor));
+          setCursor(cursor + label.length);
+        } else if (clipboard.text) {
+          setInput((current) => current.slice(0, cursor) + clipboard.text + current.slice(cursor));
+          setCursor(cursor + clipboard.text.length);
+        } else note(chalk.dim("Clipboard has no image or text."));
+      }).catch(() => note(chalk.yellow("Could not read the clipboard. Check clipboard access and image size (5 MB max). Linux requires wl-paste or xclip.")))
+        .finally(() => { pasting.current = false; });
+      return;
+    }
+    if (pasting.current) return; // keep the insertion position stable during native clipboard access
+
+    // Details stay in the transient viewport: toggling never appends history.
+    if (!pending && key.ctrl && (char === "r" || char === "t")) {
+      const next = char === "t" ? "tools" : "reasoning";
+      setDetails((current) => current === next ? null : next);
+      setDetailOffset(0);
+      setSubAgentDetail(null);
+      setSubAgentFocus(null);
+      return;
+    }
+    if (details && !pending) {
+      if (key.escape) { setDetails(null); return; }
+      if (key.pageUp || key.upArrow) { setDetailOffset((n) => Math.min(n + 1, detailView.pages - 1)); return; }
+      if (key.pageDown || key.downArrow) { setDetailOffset((n) => Math.max(0, n - 1)); return; }
+    }
 
     // Esc while a sub-agent detail is open: close it, don't interrupt.
-    if (key.escape && subAgentDetail && !pending) {
+    if (key.escape && (subAgentDetail || subAgentFocus !== null) && !pending) {
       setSubAgentDetail(null);
       setSubAgentFocus(null);
       return;
@@ -566,57 +625,54 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
       return;
     }
 
-    // Tab / Shift+Tab: cycle through the sub-agent list below the input box.
-    // Enter on a highlighted sub-agent toggles its detail view.
-    const agents = listSubAgents();
-    if (agents.length > 0 && !key.return && key.tab) {
-      const back = key.shift; // Shift+Tab = go backwards
-      if (subAgentDetail) {
-        // Detail open: Tab moves to next + closes detail.
-        setSubAgentDetail(null);
-        setSubAgentFocus((prev) => {
-          const n = agents.length;
-          if (back) {
-            const next = prev === null ? n - 1 : (prev - 1 + n) % n;
-            return next;
-          }
-          const next = prev === null ? 0 : (prev + 1) % n;
-          return next;
-        });
-      } else {
-        setSubAgentDetail(null);
-        setSubAgentFocus((prev) => {
-          const n = agents.length;
-          if (back) {
-            if (prev === null) return n - 1;
-            const next = (prev - 1 + n) % n;
-            return next === n - 1 ? null : next;
-          }
-          if (prev === null) return 0;
-          const next = (prev + 1) % n;
-          return next === 0 ? null : next;
-        });
+    // Agent navigation has its own focus. Typing/history keeps arrow keys
+    // until Tab, left at the input boundary, or down from an empty input.
+    const ids = ["main", ...listAgentViews().map((a) => a.id)];
+    if (ids.length > 1) {
+      if (subAgentFocus !== null) {
+        if (key.escape || key.rightArrow) { setSubAgentFocus(null); setSubAgentDetail(null); return; }
+        if (key.upArrow || key.downArrow || key.tab) {
+          const next = moveAgentFocus(ids, subAgentFocus, key.upArrow || (key.tab && key.shift) ? -1 : 1);
+          setSubAgentFocus(next);
+          if (subAgentDetail) setSubAgentDetail(next === "main" ? null : next);
+          setAgentPage(0);
+          return;
+        }
+        if (key.pageUp || key.pageDown) {
+          setAgentPage((n) => Math.max(0, Math.min(agentDetailView.pages - 1, n + (key.pageUp ? 1 : -1))));
+          return;
+        }
+        if (key.return) {
+          setSubAgentDetail(subAgentFocus === "main" ? null : subAgentFocus);
+          if (subAgentFocus === "main") setSubAgentFocus(null);
+          setDetails(null);
+          setAgentPage(0);
+          return;
+        }
+        return; // the input buffer stays untouched while selecting an agent
       }
-      return;
-    }
-    // Enter with a sub-agent highlighted: show its detail.
-    if (agents.length > 0 && subAgentFocus !== null && key.return) {
-      setSubAgentDetail(agents[subAgentFocus].id === subAgentDetail ? null : agents[subAgentFocus].id);
-      return;
+      if (key.tab || (key.leftArrow && (busy || cursor === 0)) || (key.downArrow && (busy || (!input && histIdx === null)))) {
+        setSubAgentFocus("main");
+        setDetails(null);
+        return;
+      }
     }
 
     if (busy) return; // a turn in flight with no prompt — ignore typing for now (type-ahead is later)
     if (key.return) {
       // Dismiss the sub-agent detail/focus on a normal submit.
+      setDetails(null);
       setSubAgentDetail(null);
       setSubAgentFocus(null);
       const text = input.trim();
       setInput("");
       setCursor(0);
       setHistIdx(null);
+      const attachments = imagesInInput(text, images);
+      setImages([]);
       if (!text) return;
       if (text.trim()) history.push(text); // remember non-empty entries for ↑/↓
-      void submitLine(text);
+      void submitLine(text, attachments);
     } else if (key.leftArrow) {
       setCursor((c) => Math.max(0, c - 1)); // move the caret left within the line
     } else if (key.rightArrow) {
@@ -648,7 +704,13 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
     } else if (key.backspace || key.delete) {
       // Delete the char BEFORE the caret. Both Backspace and macOS DEL land here,
       // so this is always a backward delete (forward-delete is rare; we skip it).
-      if (cursor > 0) {
+      const attachment = images.find((image) => input.slice(0, cursor).endsWith(imageLabel(image.id)));
+      if (attachment) {
+        const length = imageLabel(attachment.id).length;
+        setInput(input.slice(0, cursor - length) + input.slice(cursor));
+        setCursor(cursor - length);
+        setImages(images.filter((image) => image.id !== attachment.id));
+      } else if (cursor > 0) {
         setInput(input.slice(0, cursor - 1) + input.slice(cursor));
         setCursor(cursor - 1);
       }
@@ -662,13 +724,20 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
     }
   });
 
+  const rows = process.stdout.rows || 24;
+  const agents = listAgentViews();
+  const selectedAgent = agents.find((a) => a.id === subAgentDetail);
+  const agentDetailView = detailPage(selectedAgent?.transcript || "(Waiting for activity…)", agentPage, Math.max(2, Math.min(10, rows - 19)), Math.max(10, (process.stdout.columns || 80) - 4));
+  const detailView = detailPage(details === "tools" ? getToolCalls() ?? "No tool calls this turn." : details === "reasoning" ? getReasoning() ?? "No thinking recorded this turn." : "", detailOffset, Math.max(3, Math.min(12, rows - (agents.length ? 21 : 16))), Math.max(10, (process.stdout.columns || 80) - 4));
+  const activity = busy && !details && !pending && !subAgentDetail ? summarizeActivity(getToolActivity(), Date.now(), rows >= 30 && !agents.length ? 2 : 1) : [];
+
   return (
     <Box flexDirection="column">
       {/* committed conversation — rendered once each, then left in the scrollback */}
       <Static items={items}>{(item, i) => <ItemView key={i} item={item} />}</Static>
 
       {/* the live, streaming reply (moves into <Static> when it finishes) */}
-      {live !== null && (
+      {live !== null && !details && !pending && !selectedAgent && (
         <Box marginTop={1} flexDirection="row">
           <Text color="green">⏺ </Text>
           <Box flexGrow={1}>
@@ -677,17 +746,37 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
         </Box>
       )}
 
-      {/* The "thinking" spinner: the loop's own status text when it has one, or a
-          generic "working…" whenever a turn is in flight but nothing else is
-          animating — i.e. a tool is running between model calls (the loop stops
-          its spinner the instant a tool call starts). Without this fallback the
-          UI looks frozen during exactly the busiest part of a turn (a long
-          run_bash, a sub-agent), which reads as "it died". Streaming answers are
-          their own indicator, so we suppress it while `live` is showing. */}
-      {(status !== null || (busy && live === null)) && (
-        <Box marginTop={live === null ? 1 : 0}>
+      {/* Recent tool groups replace themselves in place, never in <Static>. */}
+      {activity.map((group, i) => (
+        <Box key={i} flexDirection="column" marginTop={i === 0 ? 1 : 0}>
+          <Text wrap="truncate-end"><Text color={group.failed ? "yellow" : group.running ? "cyan" : "green"}>● </Text><Text bold>{group.title}</Text></Text>
+          <Text dimColor wrap="truncate-end">  ⎿ {group.detail}</Text>
+        </Box>
+      ))}
+
+      {/* The animation remains active while calling a model or executing tools. */}
+      {!pending && !selectedAgent && (status !== null || busy) && (
+        <Box marginTop={1}>
           <Spinner />
-          <Text> {status ?? chalk.dim("working…")}</Text>
+          <Text color="#D77757" wrap="truncate-end"> {status?.replace("Ctrl+C to interrupt", "Esc to interrupt") ?? (live !== null ? "Writing…" : "Working…")}</Text>
+        </Box>
+      )}
+      {!pending && (busy || getToolCallCount() > 0 || details) && (
+        <Text dimColor wrap="truncate-end">  {getToolCallCount()} tool calls · Ctrl+T details · Ctrl+R thinking{busy ? " · Esc interrupt" : ""}</Text>
+      )}
+
+      {details && !pending && (
+        <Box flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1}>
+          <Text dimColor wrap="truncate-end">{details === "tools" ? "Tool details" : "Thinking"} · {detailView.pages - detailView.page}/{detailView.pages} · ↑↓ page · Esc close</Text>
+          <Text>{detailView.text}</Text>
+        </Box>
+      )}
+
+      {selectedAgent && !pending && (
+        <Box flexDirection="column" borderStyle="single" borderColor="blue" paddingX={1}>
+          <Text bold color="cyan" wrap="truncate-end">{selectedAgent.name} · {selectedAgent.model} · {selectedAgent.status} · Esc main</Text>
+          <Box>{selectedAgent.status === "running" && <Spinner />}<Text dimColor wrap="truncate-end"> {selectedAgent.activity} · {selectedAgent.toolCalls} tools · PgUp/PgDn details</Text></Box>
+          <Text>{agentDetailView.text}</Text>
         </Box>
       )}
 
@@ -713,10 +802,10 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
           inverted cell is a space. This is what makes ←/→ visibly move the cursor.
           Input is manually wrapped into visual lines so the cursor tracks correctly
           when text exceeds the terminal width. */}
-      <Box borderStyle="round" borderColor={planMode ? "magenta" : "cyan"} paddingX={1} marginTop={1} flexDirection="column">
+      <Box borderStyle="round" borderColor={planMode ? "magenta" : autoEnabled ? "yellow" : "cyan"} paddingX={1} marginTop={1} flexDirection="column">
         {(() => {
-          const prompt = planMode ? "plan ❯ " : "❯ ";
-          const promptColor = planMode ? "magenta" : "cyan";
+          const prompt = planMode ? "plan ❯ " : autoEnabled ? "auto ❯ " : "❯ ";
+          const promptColor = planMode ? "magenta" : autoEnabled ? "yellow" : "cyan";
           const cols = process.stdout.columns || 80;
           const innerWidth = Math.max(10, cols - 4); // border(2) + paddingX(2)
           const promptW = displayWidth(prompt);
@@ -780,48 +869,8 @@ export function App({ session, runTurn }: { session: InkSession; runTurn: (input
         })()}
       </Box>
 
-      {/* sub-agent list — like Claude Code's agent bar below the input box.
-          Tab/Shift+Tab to cycle, Enter to expand detail, Esc to close detail. */}
-      {(() => {
-        const agents = listSubAgents();
-        if (!agents.length) return null;
-        return (
-          <Box flexDirection="column" marginTop={0}>
-            <Box>
-              <Text dimColor>agents · </Text>
-              {agents.map((sa, i) => (
-                <React.Fragment key={sa.id}>
-                  <Text color={i === subAgentFocus ? "cyan" : "blue"} bold={i === subAgentFocus}>
-                    {sa.id}
-                  </Text>
-                  <Text dimColor>
-                    {sa.status === "running" ? " ●" : sa.status === "done" ? " ✓" : " ✗"}
-                  </Text>
-                  {i < agents.length - 1 && <Text dimColor> │ </Text>}
-                </React.Fragment>
-              ))}
-              <Text dimColor> · Tab</Text>
-            </Box>
-            {/* expanded detail for the focused sub-agent */}
-            {subAgentDetail && (() => {
-              const detail = agents.find((sa) => sa.id === subAgentDetail);
-              if (!detail) return null;
-              const head = `${detail.id} · ${detail.status === "running" ? "running" : detail.status === "done" ? "done" : "failed"}`;
-              const body = detail.result ?? "(still working…)";
-              return (
-                <Box flexDirection="column" marginTop={0} borderStyle="single" borderColor="blue" paddingX={1}>
-                  <Text color="cyan" bold>{head}</Text>
-                  <Text dimColor>{detail.description}</Text>
-                  <Box marginTop={0}>
-                    <Text>{body.length > 500 ? body.slice(0, 500) + "\n…" : body}</Text>
-                  </Box>
-                </Box>
-              );
-            })()}
-          </Box>
-        );
-      })()}
-      <StatusBar model={model} dir={dir} branch={branch} status={getStatus()} />
+      {!details && !pending && <AgentList agents={agents} focus={subAgentFocus} viewing={subAgentDetail} mainBusy={busy} maxRows={Math.max(2, Math.min(5, rows - 20))} />}
+      <StatusBar model={CONFIG.model} dir={dir} branch={branch} status={getStatus()} />
     </Box>
   );
 }

@@ -38,8 +38,9 @@ export interface AnswerSink {
 
 // Where the loop's user-visible output goes. Default → stdout (below); Ink → React state.
 export interface LoopOutput {
+  streamingStatus?: boolean; // the UI can animate alongside a streaming answer
   spinner(text: string): OutputSpinner; // a fresh spinner, already started, showing `text`
-  reasoning(line: string): void; // the one-line "💭 thought for Ns …" indicator (after the trace is stashed for Ctrl+R)
+  reasoning(line: string): void; // legacy indicator; sinks keep it collapsed (Ctrl+R)
   answer(): AnswerSink; // a fresh streamed-answer renderer for this turn
   note(line: string): void; // a single line of narration / progress / error (the old console.log sites)
 }
@@ -67,7 +68,7 @@ class StdoutSpinner implements OutputSpinner {
 // `output`. Each method is the exact line the loop used to run inline.
 export const STDOUT_OUTPUT: LoopOutput = {
   spinner: (text) => new StdoutSpinner(text),
-  reasoning: (line) => process.stdout.write(line + "\n"),
+  reasoning: () => {},
   answer: () => {
     // Lazily build the MarkdownStream on the first token (so a tool-only or
     // empty turn prints nothing), then end with a single trailing newline —
