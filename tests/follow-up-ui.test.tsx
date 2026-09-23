@@ -71,7 +71,24 @@ const app = render(<App session={session} clipboard={{ read: async () => clipboa
 }} />, { stdin: stdin as never, stdout: stdout as never, stderr: stdout as never, patchConsole: false, exitOnCtrlC: false });
 const key = async (text: string) => { stdin.write(text); await sleep(); };
 try {
-  await sleep(); await key("Initial task"); await key("\r");
+  await sleep();
+  await key("/status local"); await key("\r");
+  check("status command displays local usage without starting an agent turn", turns === 0 && allOutput.includes("tokens this session") && allOutput.includes("permission review/Jev"));
+  const previousFetch = globalThis.fetch;
+  const previousKey = CONFIG.apiKey;
+  let accountSignal: AbortSignal | null | undefined;
+  try {
+    CONFIG.apiKey = "status-ui-fixture";
+    globalThis.fetch = async (_url, init) => {
+      accountSignal = init?.signal;
+      return new Promise<Response>((_resolve, reject) => accountSignal?.addEventListener("abort", () => reject(new Error("cancelled")), { once: true }));
+    };
+    await key("/status"); await key("\r");
+    check("account status shows progress without starting the model", turns === 0 && frame.includes("Checking account usage") && !!accountSignal);
+    await key("\x1b");
+    check("Escape cancels account lookup and preserves local usage", accountSignal?.aborted === true && allOutput.includes("unavailable") && turns === 0);
+  } finally { globalThis.fetch = previousFetch; CONFIG.apiKey = previousKey; }
+  await key("Initial task"); await key("\r");
   await key("Additional instruction");
   check("busy input remains editable", frame.includes("Additional instruction"));
   await key("\x16"); await key("\r");

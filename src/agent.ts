@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { statusCommand } from "./status.js";
 import OpenAI from "openai"; // the API client
 import chalk from "chalk"; // terminal colors
 import readline from "node:readline/promises"; // promise-based terminal input
@@ -82,6 +83,7 @@ const SESSION_HELP = `commands:
   /model     switch model for THIS session: "/model" to pick from a list, "/model <name>" to set; "/model save <name>" to make it your default
   /stats     event counts for this session (local telemetry — nothing leaves this machine)
   /memory    show the durable facts the agent remembers about this project
+  /status    session usage and vendor account balance/cost
   /cost      tokens, cache hit rate and estimated spend this session (local)
   /mcp       list configured MCP servers + status; select one to authenticate / reconnect / disable
   /plan      toggle plan mode — research-only; the agent presents a plan you approve before any change
@@ -512,6 +514,10 @@ async function main() {
 
   // Handle a /slash command. Returns true if the line was a command.
   const handleCommand = async (line: string): Promise<boolean> => {
+    if (line === "/status" || line.startsWith("/status ")) {
+      console.log(chalk.dim(await statusCommand(line, costMeter)));
+      return true;
+    }
     if (line.startsWith("/skills ")) line = `/skill ${line.slice(8).trim()}`;
     if (line === "/effort" || line.startsWith("/effort ")) {
       const target = CONFIG.model;

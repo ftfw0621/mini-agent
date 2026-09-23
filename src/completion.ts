@@ -18,6 +18,7 @@ export const COMMANDS: Completion[] = [
   { value: "/compact", description: "Summarize conversation history" },
   { value: "/stats", description: "Show session event counts" },
   { value: "/memory", description: "Show remembered project facts" },
+  { value: "/status", description: "Show session usage and account balance/cost", children: true },
   { value: "/cost", description: "Show tokens and estimated cost" },
   { value: "/mcp", description: "Manage MCP servers", children: true },
   { value: "/plan", description: "Toggle plan mode" },
@@ -56,6 +57,13 @@ export function slashCompletions(input: string, ctx: CompletionContext): { items
     const items: Completion[] = [...new Set([ctx.model, ...ctx.models])].sort().map((name) => ({ value: prefix + name, description: name === ctx.model ? "Current model" : "Switch model" }));
     if (!save) items.push({ value: "/model save", description: "Save a model as your default", children: true });
     return { items: filter(items, save && arg === "save" ? prefix : input), hint: "Models from your endpoint; you can also type a model name" };
+  }
+  if (command === "/status") {
+    return { items: filter([
+      { value: "/status", description: "Current endpoint account and session usage" },
+      { value: "/status local", description: "Session only; no account API request" },
+      ...["deepseek", "openai", "anthropic"].map((provider) => ({ value: `/status ${provider}`, description: `Query the official ${provider} account with its dedicated credential` })),
+    ], input.trimEnd()) };
   }
   if (command === "/auto") {
     return { items: filter([

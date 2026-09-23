@@ -21,6 +21,7 @@ try {
   check("save model subcommand exposes endpoint models", values("/model save").includes("/model save deepseek-v4-pro"));
   check("auto debug arguments are selectable", values("/auto debug o").length === 2);
   check("MCP subcommands use actual server names", values("/mcp auth")[0] === "/mcp auth docs");
+  check("status lists local and official account choices", values("/status").includes("/status local") && values("/status").includes("/status anthropic"));
   check("unknown commands have no fabricated choices", values("/unknown").length === 0);
 } finally { CONFIG.baseURL = previous; }
 finish();

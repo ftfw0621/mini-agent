@@ -43,6 +43,17 @@ MINI_AGENT_MODEL=gpt-4.1-mini
 
 各家 base URL 见 [.env.example](.env.example)。两个注意:模型必须支持 function calling;窗口比 DeepSeek 小的话设 `MINI_AGENT_CONTEXT_WINDOW`(单位 token)。换完跑一遍 `npm run eval`——同样 10 道题,正好当模型横评。
 
+## Usage and account status
+
+输入 `/status` 查看当前模型、本会话 token／缓存命中／估算费用，以及 vendor 支持的账户信息。
+DeepSeek 可直接查余额；OpenAI、Anthropic 的组织 usage／cost 需要另外配置
+`OPENAI_ADMIN_KEY` / `ANTHROPIC_ADMIN_KEY`，不支持查询的余额会明确显示不可用。
+
+`/status local` 只看本地统计，不联网。使用代理时可显式输入 `/status deepseek`、
+`/status openai`、`/status anthropic` 查询对应的官方账户；不会把代理 key 当成官方账户 key。
+组织报表按 UTC 本月至今统计，涵盖管理凭证所属组织，区别于当前会话。
+接口、凭证和统计范围见 [Status 说明](docs/status.md)。
+
 ## Auto mode
 
 ### Rule-based policy preview

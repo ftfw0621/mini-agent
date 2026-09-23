@@ -1,3 +1,4 @@
+import { statusCommand } from "../status.js";
 import React, { useState, useEffect, useRef } from "react";
 import { Box, Text, Static, useInput, useApp } from "ink";
 import chalk from "chalk";
@@ -181,6 +182,8 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
   const [, setTick] = useState(0); // forces a re-render once a second so the clock / cost tick
   const followUps = useRef(new FollowUpQueue(() => setTick((t) => t + 1))).current;
   const submitting = useRef(false);
+  const statusRequest = useRef<AbortController | null>(null);
+  useEffect(() => () => statusRequest.current?.abort(), []);
   const { exit } = useApp();
 
   const pushItem = useRef((it: Item) => setItems((xs) => [...xs, it])).current;
@@ -418,6 +421,15 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
   };
 
   const handleCommand = async (line: string): Promise<boolean> => {
+    if (line === "/status" || line.startsWith("/status ")) {
+      const controller = new AbortController();
+      statusRequest.current = controller;
+      setBusy(true);
+      setStatus("Checking account usage… (Esc to cancel)");
+      try { note(chalk.dim(await statusCommand(line, costMeter, { signal: controller.signal }))); }
+      finally { statusRequest.current = null; setBusy(false); setStatus(null); }
+      return true;
+    }
     if (line.startsWith("/skills ")) line = `/skill ${line.slice(8).trim()}`;
     if (line === "/effort" || line.startsWith("/effort ")) {
       const target = CONFIG.model;
@@ -656,6 +668,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
 
     // Esc while a turn runs (and no menu is up): interrupt it — like the first
     // Ctrl+C of the readline REPL, without the force-quit escalation.
+    if (key.escape && statusRequest.current) { statusRequest.current.abort(); return; }
     if (key.escape && busy && !pending) {
       if (followUps.size) { interruptForFollowUp(); return; }
       const t = turn.current;
