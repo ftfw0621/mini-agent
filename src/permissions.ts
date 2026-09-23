@@ -376,13 +376,18 @@ function planSafe(toolName: string, verdict: Verdict): boolean {
 // mutating allow/ask to deny), never loosen one — a base "deny" keeps its more
 // specific reason, because deny always wins.
 export function checkPermission(toolName: string, argsJson: string, auto = false): Verdict {
-  const base = basePermission(toolName, argsJson, auto);
+  // Bypass skips ordinary approvals, not rule evaluation. Use the stricter
+  // path/argument checks too, including resolved symlink targets.
+  const base = basePermission(toolName, argsJson, auto || CONFIG.bypassPermissions);
   if (planMode && base.decision !== "deny" && !planSafe(toolName, base)) {
     return {
       decision: "deny",
       reason: "plan mode is on — investigate with read-only tools, then call exit_plan_mode to present a plan for the user to approve before you change anything",
       summary: base.summary,
     };
+  }
+  if (CONFIG.bypassPermissions && base.decision === "ask" && toolName !== "exit_plan_mode" && toolName !== "ask_user") {
+    return { decision: "allow", reason: "permission approvals bypassed for this run", summary: base.summary };
   }
   return base;
 }

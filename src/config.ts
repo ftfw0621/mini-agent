@@ -142,6 +142,8 @@ export const CONFIG = {
     projectSettings.contextWindow || // then files
     globalSettings.contextWindow ||
     1_048_565, // DeepSeek's real window, learned from an actual API error
+  // Explicit CLI opt-in only: never enable unattended bypass from saved settings.
+  bypassPermissions: false,
   permissions: {
     // Both layers apply: global rules + project rules. Mutable on purpose —
     // the test suite injects rules here instead of writing temp files.

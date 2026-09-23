@@ -74,7 +74,26 @@ effort 使用 `/effort` 的同一套能力判断，不支持的值会列出可�
 
 退出码：`0` 正常完成，`1` 执行失败，`2` 参数错误，`130` 被中断。
 `-r` / `--resume` 仍可续接最近会话；`--auto` 仍经过原有审核，无人确认的操作直接拒绝。
-权限规则不会因为 print 模式而放宽。
+单独使用 `-p` 不会放宽权限；它不能弹出交互审批，未获批准的操作会被拒绝。
+
+需要显式跳过审批时，使用与 Claude Code 相同的参数：
+
+```bash
+mini-agent -p "执行这项任务" --permission-mode bypassPermissions
+mini-agent exec "执行这项任务" --dangerously-skip-permissions
+npm start -- -p "执行这项任务" --model deepseek-flash --effort high --permission-mode bypassPermissions
+```
+
+`bypassPermissions` 跳过普通人工确认和 Jev/模型审核，也适用于子 agent、后台 shell 和 MCP 调用。
+它只对本次进程生效，不写入 settings；显式 bypass 优先于 `--auto` 和配置里的 auto mode。
+`--permission-mode auto` 启用自动审核，`--permission-mode default` 关闭 auto 和 bypass。
+`--dangerously-skip-permissions` 等价于 bypass 模式，并优先于同一命令中的 mode 参数。
+交互界面会在底部显示 `bypass permissions on`；`/auto` 不会改变这个启动选项，需重新启动才能取消。
+
+显式 deny、受保护路径、plan 模式限制以及 PreToolUse hook 拦截仍然有效；
+业务澄清问题不会自动代答。源码对照为 `utils/permissions/permissionSetup.ts` 的
+`initialPermissionModeFromCLI` 与 `utils/permissions/permissions.ts` 的 bypass 分支：
+先检查规则，再放行普通审批。mini-agent 保留自己的硬性规则，不宣称完全复制 Claude 的全部例外。
 
 交互参考 [Claude Code CLI](https://code.claude.com/docs/en/cli-reference) 和本地
 `claude-code-sourcemap/restored-src/src/main.tsx` 的参数及 stdin 处理；不是其全部参数的兼容实现。

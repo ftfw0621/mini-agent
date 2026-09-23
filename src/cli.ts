@@ -10,6 +10,7 @@ export interface CliOptions {
   model?: string;
   effort?: string;
   auto: boolean;
+  permissionMode?: "default" | "auto" | "bypassPermissions";
   resume: boolean;
   help: boolean;
   version: boolean;
@@ -28,6 +29,8 @@ export function parseCli(args: string[]): CliOptions {
       model: { type: "string" },
       effort: { type: "string" },
       auto: { type: "boolean" },
+      "permission-mode": { type: "string" },
+      "dangerously-skip-permissions": { type: "boolean" },
       resume: { type: "boolean", short: "r" },
       help: { type: "boolean", short: "h" },
       version: { type: "boolean", short: "v" },
@@ -36,6 +39,12 @@ export function parseCli(args: string[]): CliOptions {
   } catch (error) { throw new CliUsageError((error as Error).message); }
   const { values, positionals } = parsed;
   const print = exec || values.print === true;
+  const requestedMode = values["permission-mode"];
+  if (requestedMode !== undefined && requestedMode !== "default" && requestedMode !== "auto" && requestedMode !== "bypassPermissions") {
+    throw new CliUsageError("--permission-mode must be default, auto, or bypassPermissions");
+  }
+  // Match Claude's precedence: the explicit skip flag wins over a mode flag.
+  const permissionMode = values["dangerously-skip-permissions"] ? "bypassPermissions" : requestedMode;
   const outputFormat = values["output-format"] ?? "text";
   if (outputFormat !== "text" && outputFormat !== "json") throw new CliUsageError("--output-format must be text or json");
   for (const flag of ["model", "effort", "prompt"]) {
@@ -44,7 +53,7 @@ export function parseCli(args: string[]): CliOptions {
   if (values.prompt !== undefined && positionals.length) throw new CliUsageError("Use either a positional prompt or --prompt, not both");
   const prompt = typeof values.prompt === "string" ? values.prompt : positionals.join(" ");
   if (!print && (prompt || values["output-format"] !== undefined)) throw new CliUsageError("Use -p / --print or exec with a prompt or --output-format");
-  return { print, prompt, outputFormat, model: typeof values.model === "string" ? values.model : undefined,
+  return { print, prompt, outputFormat, permissionMode, model: typeof values.model === "string" ? values.model : undefined,
     effort: typeof values.effort === "string" ? values.effort : undefined, auto: values.auto === true,
     resume: values.resume === true, help: values.help === true, version: values.version === true };
 }
@@ -60,7 +69,9 @@ export function applyCliOptions(options: CliOptions): void {
   }
   CONFIG.model = model;
   if (options.effort !== undefined) setEffort(model, options.effort);
-  if (options.auto) CONFIG.autoMode.enabled = true;
+  CONFIG.bypassPermissions = options.permissionMode === "bypassPermissions";
+  if (options.permissionMode !== undefined) CONFIG.autoMode.enabled = options.permissionMode === "auto";
+  else if (options.auto) CONFIG.autoMode.enabled = true;
 }
 
 // Match print-mode pipe composition: the instruction first, followed by stdin.

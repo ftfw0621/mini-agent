@@ -84,7 +84,7 @@ export class AutoMode {
     client?: OpenAI,
     options: AutoModeOptions = {},
   ) {
-    this.enabled = CONFIG.autoMode.enabled;
+    this.enabled = CONFIG.autoMode.enabled && !CONFIG.bypassPermissions;
     this.policy = options.policy ?? CONFIG.autoMode.policy;
     this.ruleModel = client ? modelRuleReviewer(client, () => CONFIG.judge.model || CONFIG.model) : undefined;
     this.apiKey = options.apiKey ?? (process.env.JEV_API_KEY?.trim() || process.env.TYPESAFE_API_KEY?.trim() || "");
@@ -101,6 +101,7 @@ export class AutoMode {
   get backend(): string { return this.policy === "rules" ? `${this.useJev ? "Jev screen → " : ""}rule reviewer (${CONFIG.judge.model || CONFIG.model})` : this.useJev ? `Jev (${CONFIG.autoMode.model})` : `model judge (${CONFIG.judge.model || CONFIG.model})`; }
 
   startupNotices(): string[] {
+    if (CONFIG.bypassPermissions) return [this.status()];
     if (this.policy === "rules") return [this.status(), this.useJev ? "Rules preview: Jev screens first; flagged or uncertain actions receive one model review." : "Tip: set JEV_API_KEY (or TYPESAFE_API_KEY) for Jev screening; currently using the model reviewer.", ...(reviewDebugPath() ? [`Review debug log: ${reviewDebugPath()}`] : [])];
     return [
       this.status(),
@@ -121,6 +122,7 @@ export class AutoMode {
   clearRequests(): void { this.requests = []; }
 
   toggle(): string {
+    if (CONFIG.bypassPermissions) return this.status(); // CLI bypass lasts until exit
     this.enabled = !this.enabled;
     this.errors = 0;
     this.jevFailed = false;
@@ -128,6 +130,7 @@ export class AutoMode {
   }
 
   status(): string {
+    if (CONFIG.bypassPermissions) return "(bypassPermissions — approvals and AI review skipped for this run; hard denies, plan restrictions and hooks still apply)";
     return `(auto mode ${this.enabled ? "ON" : "OFF"} — ${this.backend}; ${this.enabled ? "uncertain or risky actions require approval" : "use /auto to enable"})`;
   }
 

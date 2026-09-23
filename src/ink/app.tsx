@@ -916,10 +916,10 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
           {followUps.size > 2 && <Text dimColor>  … {followUps.size - 2} earlier messages queued</Text>}
         </Box>
       )}
-      <Box borderStyle="round" borderColor={planMode ? "magenta" : autoEnabled ? "yellow" : "cyan"} paddingX={1} marginTop={rows >= 20 ? 1 : 0} flexDirection="column" flexShrink={0}>
+      <Box borderStyle="round" borderColor={planMode ? "magenta" : CONFIG.bypassPermissions ? "red" : autoEnabled ? "yellow" : "cyan"} paddingX={1} marginTop={rows >= 20 ? 1 : 0} flexDirection="column" flexShrink={0}>
         {(() => {
           const prompt = "❯ ";
-          const promptColor = planMode ? "magenta" : autoEnabled ? "yellow" : "cyan";
+          const promptColor = planMode ? "magenta" : CONFIG.bypassPermissions ? "red" : autoEnabled ? "yellow" : "cyan";
           const cols = columns;
           const innerWidth = Math.max(10, cols - 4); // border(2) + paddingX(2)
           const promptW = displayWidth(prompt);
@@ -992,10 +992,10 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
 
       {rows >= 20 && !details && !selectedAgent && !pending && !completion.visible && <AgentList agents={agents} focus={subAgentFocus} viewing={subAgentDetail} mainBusy={busy} maxRows={Math.max(2, Math.min(3, rows - 24))} />}
       <StatusBar model={CONFIG.model} dir={dir} branch={branch} status={getStatus()} />
-      {(planMode || autoEnabled) && (
+      {(planMode || autoEnabled || CONFIG.bypassPermissions) && (
         <Text wrap="truncate-end">
-          <Text color={planMode ? "magenta" : "yellow"}>{planMode ? "⏸ plan mode on" : "▶▶ auto mode on"}</Text>
-          <Text dimColor>{planMode ? " (/plan to toggle)" : " (/auto to toggle)"}</Text>
+          <Text color={planMode ? "magenta" : CONFIG.bypassPermissions ? "red" : "yellow"}>{planMode ? "⏸ plan mode on" : CONFIG.bypassPermissions ? "▶▶ bypass permissions on" : "▶▶ auto mode on"}</Text>
+          <Text dimColor>{planMode ? " (/plan to toggle)" : CONFIG.bypassPermissions ? " (this run)" : " (/auto to toggle)"}</Text>
         </Text>
       )}
       </Box>

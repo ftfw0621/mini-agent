@@ -34,10 +34,10 @@ globalThis.fetch = async (input, init) => {
 `);
 
 let sequence = 0;
-async function run(args: string[], input = "", fixture = "normal") {
+async function run(args: string[], input = "", fixture = "normal", overrides: Record<string, unknown> = {}) {
   const dir = path.join(root, String(sequence++)); fs.mkdirSync(dir);
   fs.mkdirSync(path.join(dir, ".mini-agent"));
-  const settings = JSON.stringify({ model: "saved-model", autoMode: { enabled: false }, judge: { enabled: false } });
+  const settings = JSON.stringify({ model: "saved-model", autoMode: { enabled: false }, judge: { enabled: false }, ...overrides });
   fs.writeFileSync(path.join(dir, ".mini-agent/settings.json"), settings);
   fs.writeFileSync(path.join(dir, "blocked.txt"), "keep me");
   const child = spawn(process.execPath, ["--import", import.meta.resolve("tsx"), "--import", pathToFileURL(preload).href, agent, ...args], {
@@ -76,6 +76,15 @@ try {
   const tool = await run(["-p", "Inspect the project"], "", "tool");
   check("print never prompts or bypasses approval", tool.code === 0 && fs.existsSync(path.join(tool.dir, "blocked.txt")) && tool.stderr.includes("declined (no prompt available)"));
   check("intermediate assistant text stays out of stdout", tool.stdout === "**Final answer**\nSecond line\n" && tool.requests.length === 2);
+  for (const flags of [["--permission-mode=bypassPermissions", "--auto"], ["--dangerously-skip-permissions"]]) {
+    const bypass = await run(["exec", "Perform fixture action", ...flags], "", "tool", { autoMode: { enabled: true }, judge: { enabled: true } });
+    check(`explicit bypass executes without approval or reviewer: ${flags[0]}`, bypass.code === 0 && !fs.existsSync(path.join(bypass.dir, "blocked.txt")) && bypass.requests.length === 2 && !bypass.stderr.includes("declined"));
+    check("bypass status stays on stderr and saved configuration stays intact", bypass.stdout === "**Final answer**\nSecond line\n" && bypass.stderr.includes("bypassPermissions") && fs.readFileSync(path.join(bypass.dir, ".mini-agent/settings.json"), "utf8") === bypass.settings);
+  }
+  const denied = await run(["-p", "Perform fixture action", "--dangerously-skip-permissions"], "", "tool", { permissions: { deny: ["tool:run_bash"] } });
+  check("bypass cannot defeat configured deny rules", denied.code === 0 && fs.existsSync(path.join(denied.dir, "blocked.txt")) && denied.requests[1]?.messages.some((m: { role: string; content: string }) => m.role === "tool" && m.content.includes("Denied")));
+  const hooked = await run(["-p", "Perform fixture action", "--dangerously-skip-permissions"], "", "tool", { hooks: { PreToolUse: [{ command: "exit 2" }] } });
+  check("bypass still runs blocking PreToolUse hooks", hooked.code === 0 && fs.existsSync(path.join(hooked.dir, "blocked.txt")) && hooked.requests[1]?.messages.some((m: { role: string; content: string }) => m.role === "tool" && m.content.includes("[hook]")));
   for (const args of [["-p"], ["-p", "hello", "--model"], ["-p", "hello", "--effort=bogus"], ["exec", "--unknown"]]) {
     const invalid = await run(args);
     check(`usage errors exit 2 before any request: ${args.join(" ")}`, invalid.code === 2 && invalid.requests.length === 0 && invalid.stdout === "");

@@ -131,4 +131,19 @@ setPlanMode(true);
 check("plan mode still blocks recoverable writes in auto mode", auto("git commit -m x").decision === "deny" && auto("git status").decision === "allow");
 setPlanMode(false);
 
+CONFIG.bypassPermissions = true;
+try {
+  expectVerdict("bypass allows an ordinary shell approval", "run_bash", { command: "rm -f fixture.txt" }, "allow");
+  expectVerdict("bypass also covers background shell", "run_bash_background", { command: "rm -f fixture.txt" }, "allow");
+  expectVerdict("bypass allows external tools", "mcp__fixture__write", {}, "allow");
+  expectVerdict("bypass preserves secret read deny", "read_file", { path: ".env" }, "deny");
+  expectVerdict("bypass preserves protected file deny", "write_file", { path: ".git/config", content: "x" }, "deny");
+  expectVerdict("bypass preserves hard shell deny", "run_bash", { command: "rm -rf /" }, "deny");
+  CONFIG.permissions.deny.push("tool:mcp__fixture__write");
+  expectVerdict("bypass preserves explicit tool deny", "mcp__fixture__write", {}, "deny");
+  CONFIG.permissions.deny.pop();
+  setPlanMode(true);
+  expectVerdict("bypass does not override plan restrictions", "run_bash", { command: "rm -f fixture.txt" }, "deny");
+  expectVerdict("exiting plan still needs user interaction", "exit_plan_mode", { plan: "change files" }, "ask");
+} finally { CONFIG.bypassPermissions = false; setPlanMode(false); }
 finish();

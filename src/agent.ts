@@ -57,6 +57,8 @@ Usage:
   --prompt "<task>"          explicit prompt (instead of a positional prompt)
   --model <id>               override the model for this run
   --effort <level>           supported effort for this model, or default
+  --permission-mode <mode>  default | auto | bypassPermissions (this run only)
+  --dangerously-skip-permissions  alias for --permission-mode bypassPermissions
   --output-format text|json  final answer or a JSON result (print mode only)
   mini-agent --auto          review tool actions automatically (Jev or your current vendor)
   mini-agent -v | --version  print the version
@@ -70,6 +72,7 @@ Configuration (optional):
 
 Print mode: options may precede or follow the prompt; use -- for literal flags.
 stdout contains only the final result; diagnostics go to stderr.
+Bypass skips approvals and AI review; hard denies, plan restrictions and hooks remain.
 Exit codes: 0 success, 1 execution failure, 2 invalid arguments, 130 interrupted.
 
 In a session, type /help for the in-session commands.`;
@@ -215,7 +218,7 @@ async function main() {
   startCronScheduler();
 
   // The optional LLM permission judge, built once if a settings file enabled it.
-  const judge = CONFIG.judge.enabled ? new Judge(client, CONFIG.judge.model || CONFIG.model) : undefined;
+  const judge = CONFIG.judge.enabled && !CONFIG.bypassPermissions ? new Judge(client, CONFIG.judge.model || CONFIG.model) : undefined;
   const autoMode = new AutoMode(client, { projectInstructions });
   for (const notice of autoMode.startupNotices()) console.log(chalk.dim(notice));
   if (judge) console.log(chalk.dim(`(permission judge on — ${autoMode.backend})`));

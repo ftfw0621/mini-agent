@@ -94,7 +94,7 @@ export async function buildInkSession(opts: { resume?: boolean } = {}): Promise<
   if (cronCount) notices.push(`(cron: ${cronCount} durable job${cronCount !== 1 ? "s" : ""} loaded)`);
   startCronScheduler();
 
-  const judge = CONFIG.judge.enabled ? new Judge(client, CONFIG.judge.model || CONFIG.model) : undefined;
+  const judge = CONFIG.judge.enabled && !CONFIG.bypassPermissions ? new Judge(client, CONFIG.judge.model || CONFIG.model) : undefined;
   const autoMode = new AutoMode(client, { projectInstructions });
   notices.push(...autoMode.startupNotices());
   if (judge) notices.push(`(permission judge on — ${autoMode.backend})`);
