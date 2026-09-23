@@ -39,6 +39,7 @@ const SPILL_NOTE_SLACK = 400; // room for the "[...saved to FILE]" note so dispa
 export interface Tool {
   definition: OpenAI.ChatCompletionFunctionTool; // the machine-readable manual
   run: (args: Record<string, string>, signal?: AbortSignal) => string | Promise<string>; // returns text (or a promise of it)
+  annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean }; // MCP: the server's own effect claims
 }
 
 // Errors are not exceptions — they are text that tells the model what to do next.
@@ -507,6 +508,17 @@ export function toolDefinitions(): OpenAI.ChatCompletionTool[] {
 // order. (See loop.ts for the batching.)
 const READ_ONLY_TOOLS = new Set(["read_file", "search"]);
 export const isReadOnlyTool = (name: string): boolean => READ_ONLY_TOOLS.has(name);
+// A server's own claim that a tool loses nothing: it only reads (readOnlyHint),
+// or only adds — a message, an issue — without changing or deleting what exists
+// (destructiveHint: false), so a mistake can be deleted afterwards. Any server,
+// no per-service list. Trusted for auto-mode review only, NOT for the concurrent
+// batching above: that needs our own guarantee. The MCP default is destructive,
+// so an unannotated tool still goes to review.
+export function declaresRecoverable(name: string): string | null {
+  const hints = tools[name]?.annotations;
+  return hints?.readOnlyHint === true ? "read-only tool (server annotation)"
+    : hints?.destructiveHint === false ? "additive tool (server annotation: not destructive)" : null;
+}
 
 // Single entry point: every failure becomes text fed back to the model.
 // It never throws — the main loop must never die because of a tool. Async since

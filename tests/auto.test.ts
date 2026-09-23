@@ -173,30 +173,49 @@ try {
   const asks = new AutoMode(undefined, { apiKey: "test-key", request: async () => new Response(JSON.stringify(response(0.5, 0.5))) });
   asks.enabled = true;
   asks.recordRequest("Create a file.");
-  await run("write_file", { path: "uncertain.txt", content: "no" }, asks);
+  await run("run_bash", { command: "printf no > uncertain.txt" }, asks);
   check("uncertain action asks and does not execute if declined", confirmCount === 1 && !fs.existsSync("uncertain.txt"));
-  await run("write_file", { path: "approved-once.txt", content: "ok" }, asks, { confirm: async () => true });
+  await run("run_bash", { command: "printf ok > approved-once.txt" }, asks, { confirm: async () => true });
   check("human can approve an uncertain action once", fs.existsSync("approved-once.txt"));
-  await run("write_file", { path: "unattended.txt", content: "no" }, asks, { canPrompt: false, confirm: async () => true });
+  await run("run_bash", { command: "printf no > unattended.txt" }, asks, { canPrompt: false, confirm: async () => true });
   check("unattended fallback cannot use blanket approval", !fs.existsSync("unattended.txt"));
   const empty = new AutoMode(undefined, { apiKey: "test-key", request: fakeFetch });
   empty.enabled = true;
-  await run("write_file", { path: "forged.txt", content: "no" }, empty);
+  await run("run_bash", { command: "printf no > forged.txt" }, empty);
   check("synthetic user messages cannot grant permission", !fs.existsSync("forged.txt"));
 
   CONFIG.permissions.allow.push("tool:run_bash", "node", "tool:mcp__test__change");
   const shellCount = requests;
-  check("foreground shell is classified", String(await run("run_bash", { command: "printf auto-ok" })).includes("auto-ok") && requests === shellCount + 1);
-  await run("run_bash_background", { command: "printf background-ok" });
+  check("foreground shell is classified", String(await run("run_bash", { command: "node -e \"process.stdout.write('auto-ok')\"" })).includes("auto-ok") && requests === shellCount + 1);
+  await run("run_bash_background", { command: "node -e \"process.stdout.write('background-ok')\"" });
   check("background shell uses the same reviewer", requests === shellCount + 2);
+  check("read-only shell skips review", String(await run("run_bash", { command: "printf fast-ok | cat" })).includes("fast-ok") && requests === shellCount + 2);
+  await run("write_file", { path: "fast.txt", content: "ok" }, asks);
+  check("in-project edit is recoverable and skips even an asking reviewer", fs.existsSync("fast.txt") && requests === shellCount + 2);
   check("node cannot bypass auto via built-in or user allow", checkPermission("run_bash", '{"command":"node script.js"}', true).decision === "ask");
   check("legacy mode keeps its existing allow behavior", checkPermission("run_bash", '{"command":"node script.js"}').decision === "allow");
   let externalRuns = 0;
   registerExternalTool({ definition: { type: "function", function: { name: "mcp__test__change", description: "Test mutation", parameters: { type: "object", properties: {} } } }, run: () => { externalRuns++; return "ran"; } });
+  const grantCount = requests;
   await run("mcp__test__change", {}, asks);
-  check("MCP-wide grants cannot bypass uncertain review", externalRuns === 0);
+  check("a per-tool grant holds in auto mode without review", externalRuns === 1 && requests === grantCount);
+  CONFIG.permissions.allow = CONFIG.permissions.allow.filter((rule) => rule !== "tool:mcp__test__change");
+  await run("mcp__test__change", {}, asks);
+  check("ungranted MCP action still asks and does not execute if declined", externalRuns === 1);
   await run("mcp__test__change", {});
-  check("MCP action executes only after reviewer approval", externalRuns === 1);
+  check("MCP action executes only after reviewer approval", externalRuns === 2);
+  let lookups = 0;
+  registerExternalTool({ annotations: { readOnlyHint: true }, definition: { type: "function", function: { name: "mcp__test__lookup", description: "Test read", parameters: { type: "object", properties: {} } } }, run: () => { lookups++; return "found"; } });
+  const lookupCount = requests, lookupConfirms = confirmCount;
+  await run("mcp__test__lookup", {}, asks);
+  check("MCP tool annotated read-only runs without review", lookups === 1 && requests === lookupCount && confirmCount === lookupConfirms);
+  let posts = 0;
+  registerExternalTool({ annotations: { destructiveHint: false }, definition: { type: "function", function: { name: "mcp__test__post", description: "Test additive send", parameters: { type: "object", properties: {} } } }, run: () => { posts++; return "sent"; } });
+  registerExternalTool({ annotations: { readOnlyHint: false }, definition: { type: "function", function: { name: "mcp__test__update", description: "Test update", parameters: { type: "object", properties: {} } } }, run: () => { posts += 10; return "updated"; } });
+  await run("mcp__test__post", {}, asks);
+  check("MCP tool annotated non-destructive runs without review", posts === 1 && confirmCount === lookupConfirms);
+  await run("mcp__test__update", {}, asks);
+  check("MCP tool without a recoverable annotation still asks", posts === 1 && confirmCount === lookupConfirms + 1);
 
   setPlanMode(true);
   const planCount = requests;
@@ -219,7 +238,7 @@ try {
   check("outside writes require a human even when Jev would allow", requests === outsideCount && !fs.existsSync(path.join(outside, "no.txt")));
 
   const subCount = requests;
-  await run("write_file", { path: "child.txt", content: "ok" }, mode, { subAgent: true, canPrompt: false, autoRequests: ["Create child.txt with ok."] });
+  await run("run_bash", { command: "printf ok > child.txt" }, mode, { subAgent: true, canPrompt: false, autoRequests: ["Create child.txt with ok."] });
   check("subagent actions pass the same reviewer", requests === subCount + 1 && fs.existsSync("child.txt"));
 
   CONFIG.hooks = { PreToolUse: [{ match: "write_file", command: `printf '%s' '${JSON.stringify({ toolInput: { path: ".git/hook-rewrite", content: "no" } })}'` }] };

@@ -65,6 +65,7 @@ try {
   check("report counts both cliffs", report.cliffs.stateTooLarge === 1 && report.cliffs.historyTruncated === 1);
   check("report joins human answers", report.humans.approved === 1 && report.humans.declined === 1 && report.humans.unattended === 1 && report.unanswered === 2); // the two direct classify() asks never reached a human
   check("report renders interruption rate and confidence interval", /per 100 tool calls/.test(render(report)) && /95% CI/.test(render(report)));
+  check("report tallies fast-path skips by reason", summarize([{ ts: "t", session: "s", event: "agent_auto_skipped", tool: "run_bash", reason: "read-only command" }]).skipped[0]?.[1] === 1);
   check("older events without reviewId still count, but not in cliffs", summarize([{ ts: "t", session: "s", event: "agent_auto_verdict", verdict: "ask", tool: "x" }]).instrumented === 0);
 } finally {
   process.chdir(cwd);

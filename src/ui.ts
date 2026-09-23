@@ -109,16 +109,14 @@ export function formatElapsed(ms: number): string {
   return `${h}h${String(m % 60).padStart(2, "0")}m`;
 }
 
-// The live spinner text: the model (so you can SEE which one is answering — proof
-// a /model switch took effect) + a thinking word + elapsed + tokens streamed so
-// far + how to bail. Mirrors Claude Code's "Mulling… (1m32s · ↓ 4.0k tokens)".
-export function spinnerText(word: string, elapsedSec: number, subAgent: boolean, model?: string, tokens?: number): string {
+// Live activity, elapsed time and streamed tokens. The persistent status line
+// owns the model name, so each animation need not repeat it.
+export function spinnerText(word: string, elapsedSec: number, subAgent: boolean, tokens?: number): string {
   const head = subAgent ? "sub-agent" : word;
-  const tag = model && !subAgent ? chalk.dim(`${model} · `) : ""; // show the model on top-level calls
   const bits = [`${elapsedSec}s`];
   if (tokens && tokens > 0) bits.push(`↓ ${formatTokens(tokens)} tokens`);
   bits.push("Ctrl+C to interrupt");
-  return `${tag}${head}… ${chalk.dim(`(${bits.join(" · ")})`)}`;
+  return `${head}… ${chalk.dim(`(${bits.join(" · ")})`)}`;
 }
 
 // The persistent status line — model, project, branch, context use, spend, time.

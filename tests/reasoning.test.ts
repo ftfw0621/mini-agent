@@ -1,11 +1,11 @@
 import { runLoop } from "../src/loop.js"; // exercise the streaming path end to end
-import { spinnerText } from "../src/ui.js"; // the model tag in the spinner
+import { spinnerText } from "../src/ui.js"; // compact activity in the spinner
 import { recordReasoning, revealReasoning, clearReasoning, recordToolCall, revealToolCalls, clearToolCalls } from "../src/tui.js"; // collapsed-thinking (Ctrl+R) + folded tool-call (Ctrl+T) stores
 import { check, checkContains, finish } from "./helpers.js"; // assertions
 
-// ---- spinner shows the active model (so a /model switch is visible) --------------------
-checkContains("spinner tags the top-level call with the model", spinnerText("Thinking", 2, false, "deepseek-reasoner"), "deepseek-reasoner");
-check("spinner omits the model tag for sub-agents", !spinnerText("Thinking", 2, true, "deepseek-reasoner").includes("deepseek-reasoner"));
+// ---- spinner leaves model identification to the persistent status bar ----------------
+check("spinner starts with activity instead of repeating the model", spinnerText("Thinking", 2, false).startsWith("Thinking…"));
+check("sub-agent spinner starts with its activity label", spinnerText("Thinking", 2, true).startsWith("sub-agent…"));
 check("spinner without a model still works", spinnerText("Thinking", 0, false).includes("Thinking"));
 
 // ---- reasoning_content is rendered but NOT kept in history -----------------------------

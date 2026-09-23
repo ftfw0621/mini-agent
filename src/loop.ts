@@ -2,7 +2,7 @@ import { AutoReviewBudget } from "./auto-budget.js";
 import OpenAI from "openai"; // types + client for the chat completions API
 import chalk from "chalk"; // terminal colors for status lines
 import { effortMessages, effortParameters, retainsReasoning } from "./effort.js";
-import { toolDefinitions, dispatch, snapshotFileState, restoreFileState, isReadOnlyTool } from "./tools.js"; // the tool manuals + the executor + file-state isolation
+import { toolDefinitions, dispatch, snapshotFileState, restoreFileState, isReadOnlyTool, declaresRecoverable } from "./tools.js"; // the tool manuals + the executor + file-state isolation
 import { classifyError, ApiErrorKind } from "./errors.js"; // failure taxonomy
 import { checkPermission } from "./permissions.js"; // the allow/ask/deny gate
 import { previewChange } from "./diff.js"; // show the diff before a write so approval is informed
@@ -484,7 +484,7 @@ async function streamModelCall(
   let reasoningShown = false; // has this trace been stored for Ctrl+R?
   const spinner = opts.quiet || opts.subAgent
     ? null // the eval harness wants silence
-    : sink(opts).spinner(spinnerText(word, 0, !!opts.subAgent, opts.model)); // a fresh spinner from the sink (stdout → ora; Ink → React state)
+    : sink(opts).spinner(spinnerText(word, 0, !!opts.subAgent)); // a fresh spinner from the sink (stdout → ora; Ink → React state)
   let ans: AnswerSink | null = null; // always close the live renderer, including interrupted streams
   let lastEvent = Date.now(); // when did we last hear ANYTHING from the stream?
   let stallWarned = false; // only warn once per quiet stretch
@@ -496,7 +496,7 @@ async function streamModelCall(
   const watchdog = setInterval(() => {
     // While the model is reasoning, prefix the spinner with 💭 so "it's thinking"
     // reads differently from "it's waiting on the first token".
-    if (spinner?.spinning) spinner.set((reasoningActive ? chalk.dim("💭 ") : "") + spinnerText(word, Math.floor((Date.now() - startedAt) / 1000), !!opts.subAgent, opts.model, Math.round(streamedChars / 4)));
+    if (spinner?.spinning) spinner.set((reasoningActive ? chalk.dim("💭 ") : "") + spinnerText(word, Math.floor((Date.now() - startedAt) / 1000), !!opts.subAgent, Math.round(streamedChars / 4)));
     const quietMs = Date.now() - lastEvent; // ms since the last event
     if (quietMs > IDLE_TIMEOUT_MS) {
       emit("agent_watchdog_idle"); // record the cut — these should be rare
@@ -646,6 +646,11 @@ async function authorizeCall(call: AssembledCall, opts: LoopOptions): Promise<st
   if (opts.reviewBudget?.exhausted) return "[permission] Review limit reached. Stop and wait for human direction; this action was not executed.";
   const auto = opts.autoMode?.enabled ?? false;
   const v = checkPermission(call.name, call.args, auto);
+  // Auto-mode fast path: calls a reviewer would otherwise see, allowed because
+  // they are recoverable or pre-granted. Counted so the report shows the saving.
+  if (auto && v.decision === "allow" && (["run_bash", "run_bash_background", "write_file", "edit_file"].includes(call.name) || call.name.startsWith("mcp__"))) {
+    emit("agent_auto_skipped", { tool: call.name, reason: v.reason });
+  }
   if (v.decision === "deny") {
     if (auto && opts.autoMode?.policy === "rules") opts.reviewBudget?.deny();
     emit("agent_tool_denied", { tool: call.name }); // hard blocks, per tool
@@ -658,8 +663,16 @@ async function authorizeCall(call: AssembledCall, opts: LoopOptions): Promise<st
     let autoAllowed = false;
     let reviewReason = "";
     let reviewId = ""; // set when auto review ran; joins the human's answer to that review
+    // Auto mode's line is recoverability: a tool its server declares read-only
+    // or merely additive loses nothing, so it runs without review (plan mode
+    // already denied above).
+    const recoverable = auto && !v.requiresHuman ? declaresRecoverable(call.name) : null;
+    if (recoverable) {
+      autoAllowed = true;
+      emit("agent_auto_skipped", { tool: call.name, reason: recoverable });
+      if (!opts.quiet) recordToolDetail(call.id, `${recoverable[0].toUpperCase()}${recoverable.slice(1)}; no review needed`);
     // Exiting plan mode always belongs to the human, never to a classifier.
-    if (!v.requiresHuman && opts.autoMode && (auto ? call.name !== "exit_plan_mode" : !!opts.judge && call.name === "run_bash")) {
+    } else if (!v.requiresHuman && opts.autoMode && (auto ? call.name !== "exit_plan_mode" : !!opts.judge && call.name === "run_bash")) {
       const definition = toolsFor(opts).find((t) => t.type === "function" && t.function.name === call.name);
       const description = definition?.type === "function" ? definition.function.description : undefined;
       const review = await opts.autoMode.classify(call.name, call.args, opts.autoRequests ?? [], opts.signal, {

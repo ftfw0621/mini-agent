@@ -1,5 +1,7 @@
 import path from "node:path"; // used to resolve and split file paths
 import fs from "node:fs"; // resolve symlinks before auto mode grants file access
+import os from "node:os"; // `cd ~` in the recoverable-shell analyzer
+import { execFileSync } from "node:child_process"; // ask git whether a deletion target is disposable
 import { CONFIG } from "./config.js"; // user-configured allow/deny rules from settings files
 
 // Three verdicts, checked in strict order. The invariant that holds the whole
@@ -14,6 +16,7 @@ export interface Verdict {
   reason: string; // why — shown to the user and fed back to the model
   summary: string; // what we show the user in the confirmation prompt
   requiresHuman?: boolean; // an ask that no automatic reviewer may approve
+  readOnly?: boolean; // false marks an allowed shell command that changes state (plan mode must still block it)
 }
 
 // ---- The no-fly zone --------------------------------------------------------
@@ -74,6 +77,211 @@ function userBashRules(): { allow: string[]; deny: string[] } {
   };
 }
 
+// ---- Recoverable shell (auto mode) -------------------------------------------
+// Auto mode draws its line at RECOVERABILITY, not at a risk score: if git, /undo
+// or a rebuild can take an action back, it runs without review. This analyzer
+// judges from the command text alone, so it is deliberately narrow. Anything
+// whose effect depends on code (tests, builds, scripts), on expansion ($VAR,
+// $(...), globs in deletions) or on syntax it does not model goes to the
+// semantic reviewer. It never denies: "not provably recoverable" means
+// "review", not "forbidden".
+
+interface Word { text: string; dynamic: boolean; glob: boolean } // dynamic: contains $expansion
+
+// Split into simple commands on && || ; | and newlines. null = syntax we do not
+// model: subshells, background &, command/process substitution, file redirection.
+function shellSegments(command: string): Word[][] | null {
+  // Heredoc bodies are data (commit messages), not commands. A quoted delimiter
+  // disables expansion; an unquoted one would run $(...) inside, so forbid it.
+  const lines = command.split("\n");
+  const kept: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    kept.push(lines[i]);
+    const doc = /<<-?\s*(['"]?)([A-Za-z_][\w-]*)\1/.exec(lines[i]);
+    if (!doc) continue;
+    let end = i + 1;
+    while (end < lines.length && lines[end].replace(/^\t+/, "") !== doc[2]) end++;
+    if (end === lines.length) return null; // unterminated heredoc
+    if (!doc[1] && /[$`]/.test(lines.slice(i + 1, end).join("\n"))) return null;
+    i = end;
+  }
+  const text = kept.join("\n");
+  const segments: Word[][] = [[]];
+  let word = null as Word | null; // "as": closures below assign it, which narrowing cannot see
+  const cur = (): Word => (word ??= { text: "", dynamic: false, glob: false });
+  const flush = () => { if (word) segments[segments.length - 1].push(word); word = null; };
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === "'") { // single quotes: literal
+      const end = text.indexOf("'", i + 1);
+      if (end < 0) return null;
+      cur().text += text.slice(i + 1, end);
+      i = end;
+    } else if (c === '"') { // double quotes: literal except $ expansion
+      const w = cur();
+      let j = i + 1;
+      for (; j < text.length && text[j] !== '"'; j++) {
+        if (text[j] === "`" || (text[j] === "$" && text[j + 1] === "(")) return null;
+        if (text[j] === "$") w.dynamic = true;
+        if (text[j] === "\\") j++;
+        w.text += text[j] ?? "";
+      }
+      if (j >= text.length) return null;
+      i = j;
+    } else if (c === "\\") {
+      if (text[i + 1] !== "\n" && i + 1 < text.length) cur().text += text[i + 1];
+      i++;
+    } else if (c === ">" || c === "<" || (c === "&" && text[i + 1] === ">")) {
+      if (word && /^\d+$/.test(word.text)) word = null; // "2>": the fd, not an argument
+      else flush();
+      let op = c === "&" ? "&" : "";
+      if (c === "&") i++;
+      op += text[i];
+      while (/[<>&-]/.test(text[i + 1] ?? "")) op += text[++i];
+      while (text[i + 1] === " " || text[i + 1] === "\t") i++;
+      let target = "";
+      while (i + 1 < text.length && !/[\s;&|<>]/.test(text[i + 1])) target += text[++i];
+      if (target.includes("(")) return null; // <(...) process substitution runs a command
+      if (op.startsWith("<")) continue; // input redirection and heredocs only read
+      if (op.endsWith("&") ? /^[12]$/.test(target) : target.replace(/^['"]|['"]$/g, "") === "/dev/null") continue;
+      return null; // redirection into a file writes it
+    } else if (c === "`" || c === "(" || c === ")" || c === "{" || c === "}") {
+      return null;
+    } else if (c === "$") {
+      if (text[i + 1] === "(") return null;
+      cur().dynamic = true;
+      cur().text += c;
+    } else if (c === "*" || c === "?" || c === "[") {
+      cur().glob = true;
+      cur().text += c;
+    } else if (c === " " || c === "\t") {
+      flush();
+    } else if (c === "\n" || c === ";" || c === "|" || c === "&") {
+      flush();
+      if (c === "&" && text[i + 1] !== "&") return null; // backgrounding outlives the review
+      if ((c === "&" || c === "|") && text[i + 1] === c) i++;
+      segments.push([]);
+    } else {
+      cur().text += c;
+    }
+  }
+  flush();
+  return segments.filter((words) => words.length > 0);
+}
+
+// Pure readers. Flags that turn one into a writer or a code runner are listed.
+const READ_ONLY_COMMANDS = new Set(["ls", "pwd", "cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "rg", "du", "df", "file", "stat",
+  "which", "whereis", "type", "echo", "printf", "date", "sort", "cut", "tr", "diff", "cmp", "tree", "jq", "basename", "dirname",
+  "realpath", "readlink", "true", "nl", "column", "whoami", "uname", "hostname"]);
+const WRITING_FLAG = /^(-o|--output(=.*)?|-s|--set(=.*)?|--pre(=.*)?)$/; // sort/tree -o, date -s, rg --pre
+
+const inside = (root: string, target: string) => {
+  const rel = path.relative(root, target);
+  return rel !== "" && rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel);
+};
+
+// A deletion is recoverable only when git calls the target disposable: ignored
+// (build output, caches) with nothing tracked beneath it. Symlinks must not
+// lead the deletion outside the project.
+function disposable(target: string, root: string): boolean {
+  if (!inside(root, target) || noFlyHit(target)) return false;
+  try {
+    if (fs.existsSync(target) && !inside(root, fs.realpathSync(target)) && !fs.lstatSync(target).isSymbolicLink()) return false;
+    const git = (args: string[]) => execFileSync("git", args, { cwd: root, encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] });
+    const rel = path.relative(root, target);
+    git(["check-ignore", "-q", "--", rel]); // exit 1 (throws) unless ignored
+    return git(["ls-files", "--", rel]).trim() === "";
+  } catch { return false; }
+}
+
+// git subcommands by effect: reads, or writes that git itself can undo
+// (reflog, index, a normal push that a revert can follow). Discarding
+// uncommitted work and rewriting remote history are never here.
+function gitEffect(words: string[], inProject: boolean): "read" | "write" | null {
+  const [sub, ...rest] = words[0] === "--no-pager" ? words.slice(1) : words;
+  const flags = rest.filter((w) => w.startsWith("-"));
+  const plain = rest.filter((w) => !w.startsWith("-"));
+  const write = inProject ? "write" : null; // another repo's writes are not this project's to take back
+  switch (sub) {
+    case "status": case "log": case "diff": case "show": case "blame": case "ls-files": case "ls-remote":
+    case "rev-parse": case "shortlog": case "describe": case "grep": case "cat-file":
+      return flags.some((f) => /^(--output(=.*)?|-O.*|--open-files-in-pager.*)$/.test(f)) ? null : "read";
+    case "remote": return rest.every((w) => /^(-v|--verbose)$/.test(w)) || (plain[0] === "get-url" && plain.length === 2) ? "read" : null;
+    case "config":
+      return rest.some((w) => /^(--get|--get-all|--get-regexp|--list|-l)$/.test(w))
+        && flags.every((f) => /^(--get|--get-all|--get-regexp|--list|-l|--global|--local|--show-origin|--name-only)$/.test(f)) ? "read" : null;
+    case "reflog": return rest.length === 0 || plain[0] === "show" ? "read" : null;
+    case "branch": case "tag":
+      if (flags.every((f) => /^(-a|-r|-v|-vv|--all|--remotes|--list|-l|--show-current|--contains|--merged|--no-merged|--sort=.*|--format=.*)$/.test(f))
+        && (plain.length === 0 || flags.some((f) => /^(--list|-l|--contains|--merged|--no-merged)$/.test(f)))) return "read";
+      return flags.length === 0 && plain.length <= 2 ? write : null; // create a branch/tag
+    case "stash":
+      if (plain[0] === "list" || plain[0] === "show") return "read";
+      return rest.length === 0 || plain[0] === "push" || plain[0] === "save" ? write : null;
+    case "add": case "commit": case "fetch": case "pull": return write;
+    case "mv": case "rm": return flags.some((f) => /^(-f|--force)$/.test(f) || /^-[a-z]*f/.test(f)) ? null : write; // git refuses to lose changes without -f
+    case "switch": return plain.length === 1 && flags.every((f) => /^(-c|--create)$/.test(f)) ? write : null;
+    case "checkout": return /^(-b|-B)$/.test(rest[0] ?? "") && rest.length <= 3 ? write : null; // `checkout <path>` discards edits
+    case "reset": return flags.some((f) => /^--(hard|merge|keep)$/.test(f)) ? null : write;
+    case "push": {
+      // A named remote only (a URL could send the code anywhere); no force,
+      // no deletion, no +refspec that rewrites the remote's history.
+      const [remote, ...refs] = plain;
+      return flags.every((f) => /^(-u|--set-upstream|--tags|--follow-tags|-q|--quiet|-v|--verbose)$/.test(f))
+        && (!remote || /^[\w.-]+$/.test(remote)) && refs.every((r) => /^[\w./-]+(:[\w./-]+)?$/.test(r)) ? write : null;
+    }
+    default: return null;
+  }
+}
+
+// null → review. Otherwise the command is recoverable, with readOnly telling
+// plan mode whether it changes anything at all.
+export function recoverableShell(command: string): { readOnly: boolean; reason: string } | null {
+  const segments = shellSegments(command);
+  if (!segments?.length) return null;
+  let root: string;
+  try { root = fs.realpathSync(process.cwd()); } catch { return null; }
+  let cwd = root; // `cd` changes where later segments act
+  let readOnly = true;
+  for (const [cmd, ...args] of segments) {
+    if (cmd.dynamic || cmd.glob || cmd.text.includes("=")) return null; // VAR=value prefixes change behavior
+    const words = args.map((w) => w.text);
+    // Reading is recoverable, leaking is not: once a secret is printed it is in
+    // every later request. Credential-looking paths go to review.
+    if (words.some((w) => SECRET_FILE_RE.test(w) || /(^|\/)(\.aws|\.gnupg|\.kube|\.docker|\.netrc|\.npmrc|\.pypirc)(\/|$)|credentials/.test(w))) return null;
+    let effect: "read" | "write" | null;
+    switch (cmd.text) {
+      case "cd": {
+        if (args.length > 1 || args.some((w) => w.dynamic || w.glob) || words[0] === "-") return null;
+        const target = words[0] ?? "~";
+        cwd = target === "~" || target.startsWith("~/") ? path.join(os.homedir(), target.slice(1)) : path.resolve(cwd, target);
+        continue;
+      }
+      case "find": effect = words.some((w) => /^-(delete|exec|execdir|ok|okdir|fprint0?|fprintf|fls)$/.test(w)) ? null : "read"; break;
+      case "sed": effect = words[0] === "-n" && /^\d+(,(\d+|\$))?p$/.test(words[1] ?? "") && words.slice(2).every((w) => !w.startsWith("-")) ? "read" : null; break;
+      case "mkdir": case "touch": effect = "write"; break;
+      case "rm": {
+        const targets: string[] = [];
+        let options = true;
+        effect = "write";
+        for (const w of args) {
+          if (options && w.text === "--") { options = false; continue; }
+          if (options && w.text.startsWith("-")) { if (!/^-[rRfv]+$/.test(w.text)) effect = null; continue; }
+          if (w.dynamic || w.glob || !w.text) effect = null;
+          targets.push(path.resolve(cwd, w.text));
+        }
+        if (!targets.length || !targets.every((t) => disposable(t, root))) effect = null;
+        break;
+      }
+      case "git": effect = gitEffect(words, cwd === root || inside(root, cwd)); break;
+      default: effect = READ_ONLY_COMMANDS.has(cmd.text) && !words.some((w) => WRITING_FLAG.test(w)) ? "read" : null;
+    }
+    if (!effect) return null;
+    if (effect === "write") readOnly = false;
+  }
+  return readOnly ? { readOnly, reason: "read-only command" } : { readOnly, reason: "recoverable: git can undo it, or it only removes gitignored output" };
+}
+
 // Decide what a bash command deserves: deny, ask, or allow.
 function checkBash(command: string, auto = false): Verdict {
   const summary = command.trim(); // what the user will see in the prompt
@@ -85,10 +293,14 @@ function checkBash(command: string, auto = false): Verdict {
     if (command.toLowerCase().includes(d.toLowerCase())) return { decision: "deny", reason: `denied by your settings ("${d}")`, summary };
   // node/npm/npx, git aliases and tool-wide grants can run arbitrary code.
   // Auto mode must inspect the actual command, including background commands.
-  if (auto) return { decision: "ask", reason: "auto mode reviews every shell command", summary };
+  if (auto) {
+    const recoverable = recoverableShell(command);
+    return recoverable ? { decision: "allow", reason: recoverable.reason, summary, readOnly: recoverable.readOnly }
+      : { decision: "ask", reason: "auto mode reviews commands whose effects it cannot establish", summary };
+  }
   for (const [re, why] of BASH_ASK) if (re.test(command)) return { decision: "ask", reason: why, summary };
   // Compound commands (&&, ;, |, $(), ``) are too hard to reason about — ask.
-  if (/[;&|]|\$\(|`/.test(command)) return { decision: "ask", reason: "compound command", summary };
+  if (/[;&|>]|\$\(|`/.test(command)) return { decision: "ask", reason: "compound command or redirection", summary }; // `cat a > b` writes b
   const words = summary.split(/\s+/); // tokenize to inspect the first word
   if (words[0] === "git" && GIT_READONLY.has(words[1] ?? "")) return { decision: "allow", reason: "read-only git", summary }; // safe git subcommands
   if (BASH_ALLOW.has(words[0])) return { decision: "allow", reason: "safe command", summary }; // known-harmless single command
@@ -134,7 +346,7 @@ function planSafe(toolName: string, verdict: Verdict): boolean {
       return true;
     case "run_bash":
     case "run_bash_background":
-      return verdict.decision === "allow"; // only the read-only commands the classifier cleared
+      return verdict.decision === "allow" && verdict.readOnly !== false; // auto mode also allows recoverable writes; plan mode must not
     default:
       return false; // write_file, edit_file, MCP and unknown tools: all mutate-or-unknown
   }
@@ -252,6 +464,9 @@ function basePermission(toolName: string, argsJson: string, auto: boolean): Verd
       if (!auto && CONFIG.permissions.allow.includes(`tool:${toolName}`)) {
         return { decision: "allow", reason: "pre-approved by your settings", summary: p };
       }
+      // Auto mode: the target already resolved inside the project (checked
+      // above), where git and /undo can take any edit back.
+      if (auto) return { decision: "allow", reason: "recoverable: in-project edit (git, /undo)", summary: p };
       return { decision: "ask", reason: "writes to your filesystem", summary: p }; // normal writes need a human yes
     }
     case "run_bash":
@@ -296,7 +511,10 @@ function basePermission(toolName: string, argsJson: string, auto: boolean): Verd
       // gets the most suspicious treatment, not the least: ask. The user can
       // pre-approve a trusted MCP tool with "tool:mcp__server__tool" in
       // settings, or block one with "tool:..." in deny (checked at the top).
-      if (!auto && CONFIG.permissions.allow.includes(`tool:${toolName}`)) {
+      // The grant holds in auto mode too: the user vouched for the tool itself,
+      // e.g. a message send they can delete. Shell grants are never honored in
+      // auto mode (see run_bash) — there the command, not the tool, decides.
+      if (CONFIG.permissions.allow.includes(`tool:${toolName}`)) {
         return { decision: "allow", reason: "pre-approved by your settings", summary: toolName };
       }
       return { decision: "ask", reason: toolName.startsWith("mcp__") ? "external MCP tool" : "unknown tool", summary: toolName };

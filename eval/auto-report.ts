@@ -40,6 +40,7 @@ export interface AutoReport {
   cliffs: { stateTooLarge: number; historyTruncated: number };
   routes: [string, number][];
   askTools: [string, number][];
+  skipped: [string, number][]; // fast-path allows by reason: recoverable or pre-granted, never reviewed
   latency: { backend: string; n: number; p50?: number; p95?: number }[];
 }
 
@@ -69,6 +70,7 @@ export function summarize(events: Event[]): AutoReport {
     },
     routes: tally(verdicts.filter((e) => e.route !== undefined).map((e) => String(e.route))),
     askTools: tally(asks.map((e) => String(e.tool))),
+    skipped: tally(events.filter((e) => e.event === "agent_auto_skipped").map((e) => String(e.reason))),
     latency: tally(reviewed.map((e) => String(e.backend ?? "none"))).map(([backend]) => {
       const values = reviewed.filter((e) => String(e.backend ?? "none") === backend).map((e) => Number(e.durationMs));
       return { backend, n: values.length, p50: quantile(values, 0.5), p95: quantile(values, 0.95) };
@@ -83,6 +85,7 @@ export function render(r: AutoReport): string {
     `Auto-mode report — ${r.sessions} session(s), ${r.toolCalls} tool calls, ${r.reviews} reviews (${r.instrumented} with full instrumentation)`,
     "",
     `Reviewed calls:      ${pct(r.reviews, r.toolCalls)} of tool calls went to a reviewer`,
+    ...(r.skipped.length ? [`Skipped review:      ${r.skipped.reduce((n, [, v]) => n + v, 0)} (${r.skipped.map(([k, v]) => `${k} ${v}`).join("; ")})`] : []),
     `Verdicts:            ${Object.entries(r.verdicts).map(([k, v]) => `${k} ${v}`).join(", ") || "none"}`,
     `Ask rate:            ${pct(asks, r.reviews)} of reviews${wilson(asks, r.reviews)}`,
     `Human interruptions: ${interruptions} → ${r.toolCalls ? (100 * interruptions / r.toolCalls).toFixed(1) : "n/a"} per 100 tool calls`,

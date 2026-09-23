@@ -388,6 +388,41 @@ replies (HTTP 503, `{}` bodies, ~0 ms) that look like real provider failures.
 Earlier logs may contain such entries; real sessions show non-trivial
 `durationMs` and are distinguishable by `pid`.
 
+## Recoverability tier: what skips review
+
+Auto mode's line is **can this be taken back?**, not a risk score. Before any
+reviewer runs, `checkPermission(..., auto=true)` and `loop.ts:authorizeCall`
+allow, without a provider request:
+
+| Allowed without review | Why it is recoverable |
+| --- | --- |
+| In-project `write_file` / `edit_file` (no-fly paths still denied) | git history and `/undo` |
+| Read-only shell anywhere, including outside the repo (`ls`, `cat`, `grep`, `find` without `-delete`/`-exec`, `sed -n 'N,Mp'`, `git status/log/diff/show`…) | reads lose nothing |
+| `git add/commit/stash/fetch/pull/reset` (not `--hard`), `branch`/`tag` creation, `checkout -b`, `switch`, `git mv/rm` without `-f`, `mkdir`, `touch` | git reflog/index can undo them |
+| `git push` to a named remote, no force, no `+refspec`, no deletion | a revert can follow a normal push |
+| `rm` of paths that git ignores and that contain nothing tracked | disposable build output |
+| MCP tools whose server annotates `readOnlyHint: true` or `destructiveHint: false` | reads, or additions (a message, an issue) that can be deleted |
+| Any tool pre-granted as `tool:<name>` in settings, except the shell tools | the user vouched for the tool itself |
+
+`recoverableShell` (in `permissions.ts`) decides from the command text alone,
+so it is deliberately narrow. Everything else goes to the semantic reviewer,
+never to a denial: scripts, tests and builds (their effect depends on code),
+`$VAR`/`$(...)`/globs in deletions, redirection into files, subshells,
+background `&`, `cd` elsewhere followed by git writes, and commands naming
+credential paths (`~/.aws`, `id_rsa`, `credentials`…), because a printed
+secret cannot be taken back. Heredoc bodies with quoted delimiters (commit
+messages) are treated as data. Hard denies (`.git`, `.env`, `.ssh`, `rm -rf /`)
+still run first and still scan the whole command text, heredocs included.
+Plan mode still blocks every recoverable *write*; only read-only commands pass.
+
+Server annotations are trusted for review only, not for concurrent batching.
+The MCP default is `destructiveHint: true`, so unannotated tools are reviewed.
+Known gap: a named remote is not checked against the startup URL, so a remote
+redirected by an earlier (reviewed) `git remote set-url` would push unreviewed.
+
+Each fast-path allow emits `agent_auto_skipped` with its reason; the report
+prints them as "Skipped review".
+
 ## Measure interruptions (`npm run auto:report`)
 
 Every review, in both policies, gets a `reviewId`. One `agent_auto_verdict`

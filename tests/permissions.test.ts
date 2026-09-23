@@ -1,4 +1,4 @@
-import { checkPermission } from "../src/permissions.js"; // the unit under test
+import { checkPermission, setPlanMode } from "../src/permissions.js"; // the unit under test
 import { CONFIG } from "../src/config.js"; // mutated directly to simulate user settings
 import { check, finish } from "./helpers.js"; // assertions
 
@@ -102,5 +102,30 @@ expectVerdict("user tool allow skips ask", "edit_file", { path: "src/agent.ts", 
 expectVerdict("user tool allow cannot beat no-fly", "edit_file", { path: "/Users/x/.zshrc", old_string: "a", new_string: "b" }, "deny"); // ...but never the no-fly zone
 CONFIG.permissions.allow.length = 0; // clean up for any suite that follows
 CONFIG.permissions.deny.length = 0;
+
+// ---- auto mode: recoverable shell skips review ---------------------------------------
+// Run from the repo root: node_modules/ is gitignored and untracked here.
+const auto = (command: string) => checkPermission("run_bash", JSON.stringify({ command }), true);
+for (const command of [
+  "pwd && ls -la", "ls -la ../elsewhere 2>/dev/null | head -50", "cd ../elsewhere && ls src && du -sh src",
+  "git status && git diff --stat", "sed -n '1,80p' src/agent.ts", "find . -name '*.ts'",
+]) check(`auto: read-only runs unreviewed — ${command}`, auto(command).decision === "allow" && auto(command).readOnly === true);
+for (const command of [
+  "git add -A && git status --short", "git commit -F - <<'MSG'\nfix: x\n\nruns $(evil) only as data\nMSG",
+  "git push", "git push origin HEAD", "git push -u origin feat/x", "git checkout -b feat/x", "git stash", "mkdir -p leetcode", "rm -rf node_modules",
+]) check(`auto: recoverable write runs unreviewed — ${command.split("\n")[0]}`, auto(command).decision === "allow" && auto(command).readOnly === false);
+for (const command of [
+  "git commit -m \"x $(rm a)\"", "git push --force origin main", "git push origin +main", "git push https://example.test/x.git", "cd .. && git push",
+  "git reset --hard HEAD", "git checkout -- src/agent.ts", "git clean -fd", "git branch -D old", "git stash drop",
+  "rm src/agent.ts", "rm -rf .", "rm -f build*.class", "rm $TARGET", "cat a > b", "echo x >> notes", "sed -i 's/a/b/' x", "find . -delete",
+  "npm test 2>&1 | tail -30", "javac A.java && java A", "node -e 1", "sleep 5 &", "diff <(rm x) y", "FOO=1 ls", "sort -o out in",
+  "cat ~/.aws/credentials", "cat id_rsa",
+]) check(`auto: not provably recoverable goes to review — ${command}`, auto(command).decision === "ask");
+check("auto: hard deny still precedes the recoverable check", auto("cat .env").decision === "deny" && auto("ls .git").decision === "deny");
+check("legacy mode asks for file redirection", checkPermission("run_bash", JSON.stringify({ command: "cat a > b" })).decision === "ask");
+check("auto: in-project edit runs unreviewed", checkPermission("edit_file", JSON.stringify({ path: "src/agent.ts", old_string: "a", new_string: "b" }), true).decision === "allow");
+setPlanMode(true);
+check("plan mode still blocks recoverable writes in auto mode", auto("git commit -m x").decision === "deny" && auto("git status").decision === "allow");
+setPlanMode(false);
 
 finish();

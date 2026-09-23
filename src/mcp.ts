@@ -57,6 +57,7 @@ interface McpToolSpec {
   name: string; // the server's tool name
   description?: string; // its manual
   inputSchema?: { type: string; properties?: Record<string, unknown>; required?: string[] }; // its parameters
+  annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean }; // the server's own effect claims (MCP tool annotations)
 }
 interface McpContent {
   type: string; // "text" | "image" | ...
@@ -643,6 +644,7 @@ function registerTools(name: string, specs: McpToolSpec[], client: McpClient): n
   for (const spec of specs) {
     const toolName = `mcp__${name}__${spec.name}`; // namespaced, collision-proof
     const tool: Tool = {
+      annotations: spec.annotations,
       definition: {
         type: "function",
         function: {

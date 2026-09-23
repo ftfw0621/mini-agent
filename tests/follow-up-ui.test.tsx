@@ -1,4 +1,5 @@
 import React from "react";
+import { spinnerText } from "../src/ui.js";
 import { render } from "ink";
 import { PassThrough } from "node:stream";
 import { stripVTControlCharacters } from "node:util";
@@ -42,6 +43,7 @@ const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR
 let modelLists = 0;
 const client = { models: { list: async () => { modelLists++; return { data: [{ id: "deepseek-flash" }, { id: "deepseek-v4-pro" }] }; } }, chat: { completions: { create: async () => ({ choices: [{ message: { content: "UI title" } }] }) } } };
 const autoMode = new AutoMode(undefined, { apiKey: "" });
+autoMode.enabled = true;
 const session = { client, messages: [], systemMessage: "test", initialSessionId: "ui-test", startedAt: Date.now(), costMeter: new CostMeter(DEFAULT_PRICING), skills: [parseSkill("---\ndescription: Review this project\n---\nInspect files", "review")], autoMode, model: "test", dir: "demo", branch: null, bannerText: "Follow-up fixture", notices: [], getStatus: () => ({ ctxPct: 1, cost: 0, elapsedMs: 1000 }), disconnectMcp: () => {} } as unknown as InkSession;
 let hooks!: TurnHooks;
 let turns = 0;
@@ -64,7 +66,7 @@ const app = render(<App session={session} clipboard={{ read: async () => clipboa
   }
   const call = recordToolCall("external lookup", "args: {}", { id: "lookup", name: "external_lookup", args: "{}" });
   recordToolResult(call, "长结果 🔍 " .repeat(200));
-  const spinner = h.output.spinner("Working…");
+  const spinner = h.output.spinner(spinnerText("Working", 1, false, 1200));
   await new Promise<void>((resolve) => h.signal.addEventListener("abort", () => resolve(), { once: true }));
   spinner.stop();
   return { reason: TerminateReason.UserInterrupt };
@@ -72,6 +74,10 @@ const app = render(<App session={session} clipboard={{ read: async () => clipboa
 const key = async (text: string) => { stdin.write(text); await sleep(); };
 try {
   await sleep();
+  check("auto mode lives below the status bar, outside the input", !frame.includes("auto ❯") && frame.includes("▶▶ auto mode on") && frame.indexOf("▶▶ auto mode on") > frame.indexOf("ctx"));
+  await key("/auto"); await key("\r");
+  check("mode footer follows the actual auto setting", !autoMode.enabled && !frame.includes("▶▶ auto mode on"));
+  await key("/auto"); await key("\r");
   await key("/status local"); await key("\r");
   check("status command displays a framed usage card without starting an agent turn", turns === 0 && allOutput.includes("mini-agent · Status") && allOutput.includes("Current session") && allOutput.includes("permission review/Jev") && allOutput.includes(`╭${"─".repeat(78)}╮`));
   const previousFetch = globalThis.fetch;
@@ -89,6 +95,7 @@ try {
     check("Escape cancels account lookup and preserves local usage", accountSignal?.aborted === true && allOutput.includes("unavailable") && turns === 0);
   } finally { globalThis.fetch = previousFetch; CONFIG.apiKey = previousKey; }
   await key("Initial task"); await key("\r");
+  check("busy animation keeps activity and tokens while model appears only in the footer", frame.includes("Working…") && frame.includes("↓ 1.2k tokens") && (frame.match(/deepseek-flash/g) ?? []).length === 1);
   await key("Additional instruction");
   check("busy input remains editable", frame.includes("Additional instruction"));
   await key("\x16"); await key("\r");
