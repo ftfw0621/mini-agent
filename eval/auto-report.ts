@@ -36,6 +36,7 @@ export interface AutoReport {
   sessions: number; toolCalls: number; reviews: number; instrumented: number;
   verdicts: Record<string, number>;
   humans: Record<string, number>;
+  humanSources: [string, number][]; // review vs. requires_human (a rule, no reviewer involved)
   unanswered: number;
   cliffs: { stateTooLarge: number; historyTruncated: number };
   routes: [string, number][];
@@ -62,6 +63,7 @@ export function summarize(events: Event[]): AutoReport {
     sessions: sessions.size, toolCalls, reviews: verdicts.length, instrumented: instrumented.length,
     verdicts: Object.fromEntries(tally(verdicts.map((e) => String(e.verdict)))),
     humans: Object.fromEntries(tally(humans.map((e) => String(e.decision)))),
+    humanSources: tally(humans.filter((e) => e.decision !== "unattended").map((e) => String(e.source ?? "review"))),
     // An ask with no recorded answer: interrupted, or logged before linking existed.
     unanswered: asks.filter((e) => e.reviewId !== undefined && !answered.has(String(e.reviewId))).length,
     cliffs: {
@@ -90,6 +92,7 @@ export function render(r: AutoReport): string {
     `Ask rate:            ${pct(asks, r.reviews)} of reviews${wilson(asks, r.reviews)}`,
     `Human interruptions: ${interruptions} → ${r.toolCalls ? (100 * interruptions / r.toolCalls).toFixed(1) : "n/a"} per 100 tool calls`,
     ...(r.instrumented < r.reviews ? [`(${r.reviews - r.instrumented} older reviews predate reviewId/size fields: they count in rates, not in joins or cliffs)`] : []),
+    ...(r.humanSources.length ? [`Prompt sources:      ${r.humanSources.map(([k, v]) => `${k} ${v}`).join(", ")}`] : []),
     `Human answers:       approved ${r.humans.approved ?? 0} (likely false block), declined ${r.humans.declined ?? 0}, unattended ${r.humans.unattended ?? 0}, unanswered ${r.unanswered}`,
     `Likely false blocks: ${pct(r.humans.approved ?? 0, interruptions)} of answered asks${wilson(r.humans.approved ?? 0, interruptions)}`,
     "",

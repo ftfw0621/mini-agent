@@ -708,9 +708,12 @@ async function authorizeCall(call: AssembledCall, opts: LoopOptions): Promise<st
       if (preview) sink(opts).note(preview.replace(/^/gm, agentIndent(opts)));
     }
     const ok = autoAllowed || (!(auto && opts.canPrompt === false) && await opts.confirm(`${call.name} (${v.reason}):\n   ${v.summary}${reviewReason ? `\n   ${reviewReason}` : ""}`, call.name));
-    // The human's answer to an auto-review "ask" is a free label: approved is a
-    // likely false block, declined a correct one. "unattended" never reached a human.
-    if (reviewId && !autoAllowed) emit("agent_auto_human", { reviewId, tool: call.name, decision: ok ? "approved" : auto && opts.canPrompt === false ? "unattended" : "declined" });
+    // Every human prompt in auto mode is an interruption worth counting, with
+    // where it came from: the reviewer asked ("review", joinable by reviewId),
+    // or a rule required a human without review ("requires_human"). Approved is
+    // a likely false block, declined a correct one; "unattended" reached no one.
+    if (auto && !autoAllowed) emit("agent_auto_human", { tool: call.name, source: reviewId ? "review" : v.requiresHuman ? "requires_human" : "no_review",
+      decision: ok ? "approved" : opts.canPrompt === false ? "unattended" : "declined", ...(reviewId ? { reviewId } : {}) });
     if (!ok) emit("agent_tool_declined", { tool: call.name, ...(reviewId ? { reviewId } : {}) }); // the human said no — that is signal
     if (!ok && !opts.quiet) sink(opts).note(mark.declined); // make the refusal visible
     if (!ok) return `[permission] Action not approved${reviewReason ? `: ${reviewReason}` : ". The user declined this action"}. Ask the user how to proceed, or choose a safer alternative.`;

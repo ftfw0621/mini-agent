@@ -44,10 +44,12 @@ function noFlyHit(p: string): string | null {
 // Input-aware safety: run_bash is not one tool, it is a thousand tools wearing
 // a coat. "ls" and "rm -rf" deserve different treatment, so we look at the input.
 
+const GIT_DIR_RULE = "touches the .git directory";
+
 // Hard stops. Not a question — these never run.
 const BASH_DENY: Array<[RegExp, string]> = [
   [/\brm\s+(-[a-zA-Z]+\s+)*['"]?(\/|~)['"]?(\s|$)/, "rm targeting / or ~ — catastrophic"], // rm -rf / and rm -rf ~
-  [/(^|[\s;&|/])\.git(\/|\s|$)/, "touches the .git directory"], // any command naming .git — the / in the prefix class catches absolute paths like /repo/.git
+  [/(^|[\s;&|/])\.git(\/|\s|$)/, GIT_DIR_RULE], // any command naming .git — the / in the prefix class catches absolute paths like /repo/.git
   [/(^|[\s;&|/])\.env(\s|$|[;&|])/, ".env holds secrets"], // any command that names .env
   [/(^|[\s;&|/])\.ssh(\/|\s|$)/, ".ssh holds credentials"], // any command that names .ssh — same / fix
 ];
@@ -185,34 +187,74 @@ const inside = (root: string, target: string) => {
   return rel !== "" && rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel);
 };
 
-// A deletion is recoverable only when git calls the target disposable: ignored
-// (build output, caches) with nothing tracked beneath it. Symlinks must not
-// lead the deletion outside the project.
-function disposable(target: string, root: string): boolean {
-  if (!inside(root, target) || noFlyHit(target)) return false;
+// Recoverable ground is not just the directory the agent started in: one
+// session works across repos (a monorepo, its worktrees) and scratch files.
+// Any git work tree is recoverable ground, and temp directories are disposable
+// by definition. A repo rooted at home or / (a dotfiles repo) does not count,
+// or it would turn the whole home directory into "project".
+const TEMP_DIRS = [...new Set([os.tmpdir(), "/tmp"].flatMap((dir) => { try { return [fs.realpathSync(dir)]; } catch { return []; } }))];
+export const inTempDir = (target: string): boolean => TEMP_DIRS.some((dir) => inside(dir, target));
+const topLevels = new Map<string, string | null>(); // directory → its git work tree, per session
+export function gitWorkTree(target: string): string | null {
+  let dir: string;
+  try { dir = resolveFileTarget(target); } catch { return null; }
+  while (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) dir = path.dirname(dir);
+  if (!topLevels.has(dir)) {
+    let top: string | null = null;
+    try { top = fs.realpathSync(execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: dir, encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] }).trim()); }
+    catch { /* not in a work tree (or inside .git itself) */ }
+    topLevels.set(dir, top === os.homedir() || top === path.parse(dir).root ? null : top);
+  }
+  return topLevels.get(dir)!;
+}
+
+// A deletion is recoverable when the target is scratch (inside a temp dir) or
+// git calls it disposable in its own repo: ignored (build output, caches) with
+// nothing tracked beneath it. Symlinks are left to review: `rm -r link/`
+// deletes what the link points at.
+function disposable(target: string): boolean {
   try {
-    if (fs.existsSync(target) && !inside(root, fs.realpathSync(target)) && !fs.lstatSync(target).isSymbolicLink()) return false;
-    const git = (args: string[]) => execFileSync("git", args, { cwd: root, encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] });
-    const rel = path.relative(root, target);
+    const real = path.join(resolveFileTarget(path.dirname(target)), path.basename(target));
+    if (noFlyHit(target) || noFlyHit(real)) return false;
+    if (fs.existsSync(real) && fs.lstatSync(real).isSymbolicLink()) return false;
+    if (inTempDir(real)) return true;
+    const top = gitWorkTree(real);
+    if (!top || !inside(top, real)) return false;
+    const git = (args: string[]) => execFileSync("git", args, { cwd: top, encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] });
+    const rel = path.relative(top, real);
     git(["check-ignore", "-q", "--", rel]); // exit 1 (throws) unless ignored
     return git(["ls-files", "--", rel]).trim() === "";
   } catch { return false; }
 }
 
+// gh subcommands that only read GitHub. `gh api` reads unless a method or a
+// field flag (which switches it to POST) is present; tokens are never printed.
+function ghEffect(words: string[]): "read" | "write" | null {
+  const [noun, verb] = words;
+  // Additive, and closable or deletable afterwards, like sending a message.
+  if ((noun === "pr" || noun === "issue") && (verb === "create" || verb === "comment")) return "write";
+  if (noun === "api") return words.slice(1).some((w) => /^(-X|--method|-f|-F|--field|--raw-field|--input)(=|$)/.test(w)) ? null : "read";
+  if (noun === "search" || (noun === "--version" && words.length === 1)) return "read";
+  if (noun === "auth") return verb === "status" && !words.some((w) => /^(-t|--show-token)$/.test(w)) ? "read" : null;
+  return ["pr", "issue", "run", "repo", "release", "workflow", "label"].includes(noun) && ["view", "list", "diff", "checks", "status"].includes(verb) ? "read" : null;
+}
+
 // git subcommands by effect: reads, or writes that git itself can undo
 // (reflog, index, a normal push that a revert can follow). Discarding
 // uncommitted work and rewriting remote history are never here.
-function gitEffect(words: string[], inProject: boolean): "read" | "write" | null {
+function gitEffect(words: string[], inWorkTree: boolean): "read" | "write" | null {
   const [sub, ...rest] = words[0] === "--no-pager" ? words.slice(1) : words;
   const flags = rest.filter((w) => w.startsWith("-"));
   const plain = rest.filter((w) => !w.startsWith("-"));
-  const write = inProject ? "write" : null; // another repo's writes are not this project's to take back
+  const write = inWorkTree ? "write" : null; // reflog and index exist only inside a work tree
   switch (sub) {
     case "status": case "log": case "diff": case "show": case "blame": case "ls-files": case "ls-remote":
-    case "rev-parse": case "shortlog": case "describe": case "grep": case "cat-file":
+    case "rev-parse": case "shortlog": case "describe": case "grep": case "cat-file": case "merge-base": case "rev-list":
+    case "for-each-ref": case "show-ref": case "name-rev": case "ls-tree": case "check-ignore": case "cherry": case "range-diff":
       return flags.some((f) => /^(--output(=.*)?|-O.*|--open-files-in-pager.*)$/.test(f)) ? null : "read";
     case "remote": return rest.every((w) => /^(-v|--verbose)$/.test(w)) || (plain[0] === "get-url" && plain.length === 2) ? "read" : null;
     case "config":
+      if (rest.length === 1 && /^[\w.-]+$/.test(rest[0]) && !/token|password|secret/i.test(rest[0])) return "read"; // `git config user.name`
       return rest.some((w) => /^(--get|--get-all|--get-regexp|--list|-l)$/.test(w))
         && flags.every((f) => /^(--get|--get-all|--get-regexp|--list|-l|--global|--local|--show-origin|--name-only)$/.test(f)) ? "read" : null;
     case "reflog": return rest.length === 0 || plain[0] === "show" ? "read" : null;
@@ -228,6 +270,9 @@ function gitEffect(words: string[], inProject: boolean): "read" | "write" | null
     case "switch": return plain.length === 1 && flags.every((f) => /^(-c|--create)$/.test(f)) ? write : null;
     case "checkout": return /^(-b|-B)$/.test(rest[0] ?? "") && rest.length <= 3 ? write : null; // `checkout <path>` discards edits
     case "reset": return flags.some((f) => /^--(hard|merge|keep)$/.test(f)) ? null : write;
+    case "worktree": // remove refuses a dirty worktree without --force, and its branch survives
+      if (plain[0] === "list") return "read";
+      return plain[0] === "add" || plain[0] === "prune" || (plain[0] === "remove" && !flags.some((f) => /^(-f|--force)$/.test(f))) ? write : null;
     case "push": {
       // A named remote only (a URL could send the code anywhere); no force,
       // no deletion, no +refspec that rewrites the remote's history.
@@ -238,6 +283,13 @@ function gitEffect(words: string[], inProject: boolean): "read" | "write" | null
     default: return null;
   }
 }
+
+// npm verbs that only query the registry or the local tree. `config` is left
+// out: `npm config get` can print an auth token.
+const NPM_READ = new Set(["view", "info", "show", "v", "whoami", "ls", "list", "outdated", "search", "ping", "help", "explain", "why"]);
+
+// awk as a filter only: no system(), getline, pipes or output redirection.
+const awkFilter = (words: string[]) => !words.some((w) => /system|getline|fflush|close\s*\(|[|>]/.test(w));
 
 // null → review. Otherwise the command is recoverable, with readOnly telling
 // plan mode whether it changes anything at all.
@@ -266,7 +318,7 @@ export function recoverableShell(command: string): { readOnly: boolean; reason: 
     const words = args.map((w) => w.text);
     // Reading is recoverable, leaking is not: once a secret is printed it is in
     // every later request. Credential-looking paths go to review.
-    if (words.some((w) => SECRET_FILE_RE.test(w) || /(^|\/)(\.aws|\.gnupg|\.kube|\.docker|\.netrc|\.npmrc|\.pypirc)(\/|$)|credentials/.test(w))) return null;
+    if (words.some((w) => SECRET_FILE_RE.test(w) || /(^|\/)(\.aws|\.gnupg|\.kube|\.docker|\.netrc|\.npmrc|\.pypirc)(\/|$)|credentials|\.git\/config/.test(w))) return null;
     let effect: "read" | "write" | null;
     switch (cmd.text) {
       case "cd": {
@@ -288,16 +340,22 @@ export function recoverableShell(command: string): { readOnly: boolean; reason: 
           if (w.dynamic || w.glob || !w.text) effect = null;
           targets.push(path.resolve(cwd, w.text));
         }
-        if (!targets.length || !targets.every((t) => disposable(t, root))) effect = null;
+        if (!targets.length || !targets.every((t) => disposable(t))) effect = null;
         break;
       }
-      case "git": effect = gitEffect(words, cwd === root || inside(root, cwd)); break;
-      default: effect = READ_ONLY_COMMANDS.has(cmd.text) && !words.some((w) => WRITING_FLAG.test(w)) ? "read" : null;
+      case "git": effect = gitEffect(words, gitWorkTree(cwd) !== null); break;
+      case "gh": effect = ghEffect(words); break;
+      case "npm": effect = NPM_READ.has(words[0] ?? "") || (words.length === 1 && words[0] === "--version") ? "read" : null; break;
+      case "awk": effect = awkFilter(words) ? "read" : null; break;
+      case "command": effect = words[0] === "-v" && words.length === 2 ? "read" : null; break; // `command -v gh`: is it installed?
+      default:
+        if (words.length === 1 && words[0] === "--version" && !cmd.text.includes("/")) { effect = "read"; break; } // an installed tool's version
+        effect = READ_ONLY_COMMANDS.has(cmd.text) && !words.some((w) => WRITING_FLAG.test(w)) ? "read" : null;
     }
     if (!effect) return null;
     if (effect === "write") readOnly = false;
   }
-  return readOnly ? { readOnly, reason: "read-only command" } : { readOnly, reason: "recoverable: git can undo it, or it only removes gitignored output" };
+  return readOnly ? { readOnly, reason: "read-only command" } : { readOnly, reason: "recoverable: git can undo it, or it only removes gitignored or temp files" };
 }
 
 // Decide what a bash command deserves: deny, ask, or allow.
@@ -306,7 +364,11 @@ function checkBash(command: string, auto = false): Verdict {
   const user = userBashRules(); // the user's configured additions
   // Order is the security model: built-in deny, then user deny, then ask,
   // then allow. A user allow can never jump this queue — allow is checked last.
-  for (const [re, why] of BASH_DENY) if (re.test(command)) return { decision: "deny", reason: why, summary };
+  // Reading inside .git (hook listings, `-not -path '*/.git/*'` filters) harms
+  // nothing, so the .git rule spares provably read-only commands; .git/config
+  // (it may embed tokens) is never read-only there. .env/.ssh stay absolute.
+  const readOnly = recoverableShell(command)?.readOnly === true;
+  for (const [re, why] of BASH_DENY) if (re.test(command) && !(readOnly && why === GIT_DIR_RULE)) return { decision: "deny", reason: why, summary };
   for (const d of user.deny)
     if (command.toLowerCase().includes(d.toLowerCase())) return { decision: "deny", reason: `denied by your settings ("${d}")`, summary };
   // node/npm/npx, git aliases and tool-wide grants can run arbitrary code.
@@ -420,7 +482,9 @@ function basePermission(toolName: string, argsJson: string, auto: boolean): Verd
         : noFlyHit(args.path) || noFlyHit(resolved);
       if (reason) return { decision: "deny", reason, summary: args.path };
       const relative = path.relative(fs.realpathSync(process.cwd()), resolved);
-      if (toolName !== "read_file" && (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))) {
+      // Outside the start directory is still recoverable in another git work
+      // tree or a temp dir (git, /undo); anywhere else a human decides.
+      if (toolName !== "read_file" && (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) && !inTempDir(resolved) && !gitWorkTree(resolved)) {
         return { decision: "ask", requiresHuman: true, reason: "resolved write target is outside the project", summary: `${args.path} → ${resolved}` };
       }
     } catch {
@@ -489,7 +553,7 @@ function basePermission(toolName: string, argsJson: string, auto: boolean): Verd
       }
       // Auto mode: the target already resolved inside the project (checked
       // above), where git and /undo can take any edit back.
-      if (auto) return { decision: "allow", reason: "recoverable: in-project edit (git, /undo)", summary: p };
+      if (auto) return { decision: "allow", reason: "recoverable: edit in a git work tree or temp dir (git, /undo)", summary: p };
       return { decision: "ask", reason: "writes to your filesystem", summary: p }; // normal writes need a human yes
     }
     case "run_bash":

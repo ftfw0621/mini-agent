@@ -404,6 +404,28 @@ allow, without a provider request:
 | MCP tools whose server annotates `readOnlyHint: true` or `destructiveHint: false` | reads, or additions (a message, an issue) that can be deleted |
 | Any tool pre-granted as `tool:<name>` in settings, except the shell tools | the user vouched for the tool itself |
 
+**Recoverable ground is any git work tree plus the temp dirs**, not only the
+directory the agent started in: one session works across a monorepo, its
+worktrees and `/tmp` scratch files. Edits, git writes and disposable deletions
+are judged against the repo that contains the target (`gitWorkTree`); a repo
+rooted at home or `/` does not count. Files under the temp dir can be written
+and deleted (not the temp dir itself, not through symlinks). Writes outside
+both still need a human. Also unreviewed: `git worktree list/add/prune/remove`
+(no `--force`), read-only git plumbing (`merge-base`, `rev-list`…), `git config
+<key>`, `gh` reads (`pr/issue/run/repo … view/list/diff/checks/status`, `gh api`
+without a method or field flag, `gh auth status` without the token), `gh pr/issue
+create|comment` (additive, closable), `npm view/whoami/ls…`, `awk` used as a
+filter, `command -v`, `<tool> --version`. The `.git` hard deny spares provably
+read-only commands (`ls .git/hooks`, `-not -path '*/.git/*'`), never
+`.git/config`, which may embed tokens.
+
+Replaying the 2026-09-23 session that prompted 9 times: the four `/tmp`
+message files, the edit in a sibling worktree, `gh pr view`/`checks`, `git
+worktree remove`, the `/tmp` cleanup and both `.git` false denies now pass;
+`npm publish` still asks. Every auto-mode prompt now emits `agent_auto_human`
+with `source` (`review` or `requires_human`), so the report's interruption
+count includes prompts no reviewer saw.
+
 `recoverableShell` (in `permissions.ts`) decides from the command text alone,
 so it is deliberately narrow. Everything else goes to the semantic reviewer,
 never to a denial: scripts, tests and builds (their effect depends on code),

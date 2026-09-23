@@ -1,4 +1,8 @@
-import { checkPermission, setPlanMode } from "../src/permissions.js"; // the unit under test
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { execFileSync } from "node:child_process";
+import { checkPermission, setPlanMode, gitWorkTree } from "../src/permissions.js"; // the unit under test
 import { CONFIG } from "../src/config.js"; // mutated directly to simulate user settings
 import { check, finish } from "./helpers.js"; // assertions
 
@@ -124,7 +128,39 @@ for (const command of [
   "npm test 2>&1 | tail -30", "javac A.java && java A", "node -e 1", "sleep 5 &", "diff <(rm x) y", "FOO=1 ls", "sort -o out in",
   "cat ~/.aws/credentials", "cat id_rsa",
 ]) check(`auto: not provably recoverable goes to review — ${command}`, auto(command).decision === "ask");
-check("auto: hard deny still precedes the recoverable check", auto("cat .env").decision === "deny" && auto("ls .git").decision === "deny");
+check("auto: hard deny still precedes the recoverable check", auto("cat .env").decision === "deny" && auto("cat .git/config").decision === "deny" && auto("rm -rf .git").decision === "deny");
+check("reading inside .git is not a hard deny", auto("ls -la .git/hooks/ 2>/dev/null | grep -v sample").decision === "allow"
+  && auto("find . -name '*.ts' -not -path '*/.git/*' | head").decision === "allow");
+for (const command of [
+  "command -v gh", "gh --version 2>&1 | head -2", "git config user.name", "git merge-base --is-ancestor abc origin/main", "git rev-list --count HEAD",
+  "gh pr view 18011 --json state", "gh pr checks 1 2>&1 | awk -F'\\t' '$2!=\"pass\"' | head", "gh api repos/o/r/pulls/1", "gh run list", "gh auth status",
+  "npm view agent-from-zero versions --json", "npm whoami", "git worktree list",
+]) check(`auto: common read runs unreviewed — ${command}`, auto(command).decision === "allow" && auto(command).readOnly === true);
+for (const command of ["gh pr create --title x --body y", "gh issue comment 3 --body ok", "git worktree remove ../wt", "git worktree prune"])
+  check(`auto: additive/recoverable write runs unreviewed — ${command}`, auto(command).decision === "allow" && auto(command).readOnly === false);
+for (const command of [
+  "gh pr merge 1", "gh api -X DELETE repos/o/r", "gh api graphql -f query=x", "gh auth status --show-token", "gh repo delete o/r --yes",
+  "npm config get //registry.npmjs.org/:_authToken", "npm publish", "awk 'BEGIN{system(\"rm x\")}'", "awk '{print > \"out\"}' f",
+  "git worktree remove --force ../wt", "git config user.name evil", "git config credential.token",
+]) check(`auto: irreversible or credential-bearing goes to review — ${command}`, auto(command).decision === "ask");
+
+// ---- auto mode: recoverable ground beyond the start directory -------------------------
+const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "perm-scratch-")));
+const repo = path.join(scratch, "repo");
+fs.mkdirSync(repo);
+execFileSync("git", ["init", "-q"], { cwd: repo });
+fs.writeFileSync(path.join(scratch, "note.txt"), "x");
+fs.symlinkSync(os.homedir(), path.join(scratch, "home-link"));
+check("the start directory is a git work tree", gitWorkTree(process.cwd()) === fs.realpathSync(execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim()));
+check("home is never treated as a work tree", gitWorkTree(os.homedir()) === null || gitWorkTree(os.homedir()) !== os.homedir());
+check("auto: git writes in another repo are recoverable", auto(`cd ${repo} && git add -A && git commit -m x`).decision === "allow");
+check("auto: git writes outside any work tree go to review", auto("cd / && git add -A").decision === "ask");
+check("auto: temp files can be written without review", checkPermission("write_file", JSON.stringify({ path: path.join(scratch, "msg.txt"), content: "x" }), true).decision === "allow");
+check("auto: temp files can be deleted without review", auto(`sleep 1; rm -f ${path.join(scratch, "note.txt")}`).decision === "allow");
+check("auto: the temp dir itself and symlinks out of it are not disposable", auto(`rm -rf ${os.tmpdir()}`).decision === "ask" && auto(`rm -rf ${path.join(scratch, "home-link")}/`).decision === "ask");
+const outside = path.join(os.homedir(), "Library", "mini-agent-never-written.txt");
+check("auto: writes outside any work tree or temp dir still need a human", checkPermission("write_file", JSON.stringify({ path: outside, content: "x" }), true).requiresHuman === true);
+fs.rmSync(scratch, { recursive: true, force: true });
 check("legacy mode asks for file redirection", checkPermission("run_bash", JSON.stringify({ command: "cat a > b" })).decision === "ask");
 check("auto: in-project edit runs unreviewed", checkPermission("edit_file", JSON.stringify({ path: "src/agent.ts", old_string: "a", new_string: "b" }), true).decision === "allow");
 setPlanMode(true);

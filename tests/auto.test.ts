@@ -232,10 +232,12 @@ try {
   fs.writeFileSync(".env", "TEST_SECRET=not-a-real-secret");
   fs.symlinkSync(path.join(temp, ".env"), "innocent.txt");
   check("symlink cannot hide secret reads", checkPermission("read_file", '{"path":"innocent.txt"}', true).decision === "deny");
-  fs.symlinkSync(outside, "linked-outside");
+  // Home is neither a git work tree nor a temp dir: the one place a symlinked
+  // write must still reach a human (temp dirs are recoverable ground now).
+  fs.symlinkSync(os.homedir(), "linked-outside");
   const outsideCount = requests;
-  await run("write_file", { path: "linked-outside/no.txt", content: "no" });
-  check("outside writes require a human even when Jev would allow", requests === outsideCount && !fs.existsSync(path.join(outside, "no.txt")));
+  await run("write_file", { path: "linked-outside/mini-agent-auto-test-no.txt", content: "no" });
+  check("outside writes require a human even when Jev would allow", requests === outsideCount && !fs.existsSync(path.join(os.homedir(), "mini-agent-auto-test-no.txt")));
 
   const subCount = requests;
   await run("run_bash", { command: "printf ok > child.txt" }, mode, { subAgent: true, canPrompt: false, autoRequests: ["Create child.txt with ok."] });

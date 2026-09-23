@@ -45,7 +45,20 @@ try {
   await run(true);
   await run(false);
   await run(false, false);
-  const all = events();
+  // A write outside any work tree or temp dir needs a human with no reviewer:
+  // it must still be counted as an interruption, labeled by its source.
+  const homeTarget = path.join(os.homedir(), "mini-agent-report-test-never-written.txt");
+  {
+    let round = 0;
+    const stream = { chat: { completions: { create: async () => (async function* () {
+      if (round++ === 0) yield { choices: [{ delta: { tool_calls: [{ index: 0, id: "w", function: { name: "write_file", arguments: JSON.stringify({ path: homeTarget, content: "no" }) } }] } }] };
+      else yield { choices: [{ delta: { content: "done" } }] };
+    })() } } };
+    await runLoop([], { client: stream as never, model: "fixture", quiet: true, autoMode: mode, autoRequests: ["Do the task."], signal: new AbortController().signal, isInterrupted: () => false, confirm: async () => false });
+  }
+  const all = events().filter((e) => e.source !== "requires_human");
+  const outsidePrompt = events().filter((e) => e.event === "agent_auto_human" && e.source === "requires_human");
+  check("a requires-human prompt is counted with its source, without a reviewId", outsidePrompt.length === 1 && outsidePrompt[0].reviewId === undefined && !fs.existsSync(homeTarget));
   const humans = all.filter((e) => e.event === "agent_auto_human");
   const reviewIds = new Set(all.filter((e) => e.event === "agent_auto_verdict").map((e) => e.reviewId));
   check("approve, decline and unattended block are each recorded once", humans.map((e) => e.decision).join(",") === "approved,declined,unattended");
@@ -61,7 +74,8 @@ try {
   const routes = events().filter((e) => e.event === "agent_auto_verdict" && e.policy === "rules").map((e) => e.route);
   check("rules routes distinguish fast pass from the history cliff", truncated.decision === "allow" && routes.join(",") === "jev_allow,history_truncated");
 
-  const report = summarize(events());
+  const report = summarize(events().filter((e) => e.source !== "requires_human")); // counts below cover the review path only
+  check("report splits prompts by source", summarize(events()).humanSources.some(([source, n]) => source === "requires_human" && n === 1));
   check("report counts both cliffs", report.cliffs.stateTooLarge === 1 && report.cliffs.historyTruncated === 1);
   check("report joins human answers", report.humans.approved === 1 && report.humans.declined === 1 && report.humans.unattended === 1 && report.unanswered === 2); // the two direct classify() asks never reached a human
   check("report renders interruption rate and confidence interval", /per 100 tool calls/.test(render(report)) && /95% CI/.test(render(report)));
