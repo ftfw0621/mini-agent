@@ -16,7 +16,9 @@ import { runHooks } from "./hooks.js"; // SessionStart lifecycle hook
 import { connectMcpServers, listMcpServers, mcpActionsFor, runMcpAction } from "./mcp.js"; // external tool servers (MCP) + /mcp
 import { Judge } from "./judge.js"; // optional LLM permission classifier
 import { AutoMode } from "./auto.js";
-import { effortMenu, setEffort } from "./effort.js";
+import { effortMenu, setEffort, selectedEffort } from "./effort.js";
+import { parseCli, applyCliOptions, readPrintPrompt, CliUsageError } from "./cli.js";
+import { reservePrintOutput, formatPrintResult } from "./print.js";
 import { FollowUpQueue } from "./follow-up.js";
 import { reviewDebugCommand } from "./auto-debug.js";
 import { isPlanMode, setPlanMode } from "./permissions.js"; // plan mode: research-only until the user approves a plan
@@ -43,14 +45,19 @@ import { loadDurableJobs, startCronScheduler, stopCronScheduler, listJobs } from
 const pkg = createRequire(import.meta.url)("../package.json") as { version: string };
 
 // ---- CLI arguments --------------------------------------------------------------
-// Tiny by design: a help text, a version, and a one-shot print mode. Anything
-// fancier belongs in settings files, not flags.
+// Process-local overrides share the same model/effort logic as the REPL.
 const USAGE = `mini-agent ${pkg.version} — a Claude Code-style CLI agent (any OpenAI-compatible model)
 
 Usage:
   mini-agent                 interactive session (REPL)
   mini-agent -r | --resume   continue the most recent session in this directory
   mini-agent -p "<task>"     one-shot: run a single task, print the result, exit
+  mini-agent exec "<task>"   alias for non-interactive print mode
+  cat file | mini-agent -p "<task>"  append piped text to the prompt
+  --prompt "<task>"          explicit prompt (instead of a positional prompt)
+  --model <id>               override the model for this run
+  --effort <level>           supported effort for this model, or default
+  --output-format text|json  final answer or a JSON result (print mode only)
   mini-agent --auto          review tool actions automatically (Jev or your current vendor)
   mini-agent -v | --version  print the version
   mini-agent -h | --help     this text
@@ -58,7 +65,12 @@ Usage:
 Configuration (optional):
   ${GLOBAL_SETTINGS_PATH}   your defaults (model, baseURL, permissions, hooks)
   ${PROJECT_SETTINGS_PATH}   per-project rules — both layers apply, deny always wins
-  MINI_AGENT_API_KEY / MINI_AGENT_BASE_URL / MINI_AGENT_MODEL override everything.
+  MINI_AGENT_API_KEY / MINI_AGENT_BASE_URL / MINI_AGENT_MODEL override settings.
+  CLI model/effort flags override this run only; they never change saved settings.
+
+Print mode: options may precede or follow the prompt; use -- for literal flags.
+stdout contains only the final result; diagnostics go to stderr.
+Exit codes: 0 success, 1 execution failure, 2 invalid arguments, 130 interrupted.
 
 In a session, type /help for the in-session commands.`;
 
@@ -111,38 +123,36 @@ keys (at the prompt):
 // mode it now lives in (the permission gate enforces them regardless).
 const PLAN_MODE_NOTICE = `[plan mode ON] Investigate this request using only read-only tools — read_file, search, and safe read-only shell (ls, cat, git status). Do NOT write files, edit, or run mutating commands; the permission gate will block them. When you have a concrete, ordered plan, call the exit_plan_mode tool with that plan. The user reviews and approves it before you make any change.`;
 
+let printOutput: ReturnType<typeof reservePrintOutput> | undefined;
+let printCleanup: (() => void) | undefined;
+
 async function main() {
   // ---- Flag handling, before anything touches the network -----------------------
-  const argv = process.argv.slice(2); // everything after "mini-agent"
-  if (argv.includes("-v") || argv.includes("--version")) {
+  const cli = parseCli(process.argv.slice(2));
+  if (cli.version) {
     console.log(pkg.version); // just the number — script-friendly
     return;
   }
-  if (argv.includes("-h") || argv.includes("--help")) {
+  if (cli.help) {
     console.log(USAGE); // the full help text
     return;
   }
-  // Options precede -p; everything after -p remains literal task text.
-  const optionEnd = argv.findIndex((a) => a === "-p" || a === "--print");
-  if (argv.slice(0, optionEnd < 0 ? argv.length : optionEnd).includes("--auto")) CONFIG.autoMode.enabled = true;
-  // Print mode: -p / --print takes the task from the remaining arguments.
-  const pIdx = argv.findIndex((a) => a === "-p" || a === "--print"); // where the flag sits
-  const printTask = pIdx >= 0 ? argv.slice(pIdx + 1).join(" ").trim() : null; // everything after it is the task
-  if (pIdx >= 0 && !printTask) {
-    console.error('Usage: mini-agent -p "<task>"'); // -p without a task is a usage error
-    process.exitCode = 2;
-    return;
+  applyCliOptions(cli);
+  const printTask = cli.print ? await readPrintPrompt(cli.prompt, process.stdin, !!process.stdin.isTTY) : null;
+  if (cli.print) {
+    printOutput = reservePrintOutput();
+    chalk.level = 0; // no terminal escapes in script diagnostics
   }
 
   // Interactive sessions default to the Ink REPL (a pinned input box, the
   // conversation scrolling above it — like Claude Code). It does its OWN full
   // setup (MCP, skills, judge, cost, hooks, session), so we hand off here before
   // the readline path below ever runs. Print mode (-p) is a non-interactive
-  // one-shot that streams to stdout, so it stays on the readline path. Set
+  // one-shot that writes its final result to stdout, so it stays on this path. Set
   // MINI_AGENT_NO_INK=1 to use the readline REPL below instead (a simpler
   // reference front-end, and an escape hatch for terminals Ink misbehaves in).
   if (printTask === null && process.env.MINI_AGENT_NO_INK !== "1") {
-    await launchInk({ resume: argv.includes("-r") || argv.includes("--resume") });
+    await launchInk({ resume: cli.resume });
     return;
   }
 
@@ -168,7 +178,7 @@ async function main() {
   let sessionId = newSessionId(); // this session's identity (and file name)
   let initialTitle: string | undefined; // only a resumed session has one already
   const sessionStartedAt = Date.now(); // for the status line's elapsed clock
-  if (argv.includes("-r") || argv.includes("--resume")) {
+  if (cli.resume) {
     const prev = latestSession(); // newest snapshot in this directory, if any
     if (prev) {
       messages.push(...prev.messages); // the old conversation joins the fresh constitution
@@ -187,6 +197,12 @@ async function main() {
   // finish before the first model call so the tools appear in the manual. A
   // server that fails to start is skipped, never fatal.
   const disconnectMcp = await connectMcpServers();
+  if (cli.print) printCleanup = () => {
+    stopCronScheduler();
+    killAllBackground();
+    killAllSubAgents();
+    disconnectMcp();
+  };
   process.on("exit", disconnectMcp); // best-effort cleanup of server subprocesses
   process.on("exit", killAllBackground); // Day 37: SIGKILL any background job (dev server, slow install) so it never outlives the agent as an orphan
   process.on("exit", killAllSubAgents); // mark any still-running sub-agents as killed so they don't leave pending promises
@@ -253,6 +269,7 @@ async function main() {
     const result = await runLoop(messages, {
       client,
       model: CONFIG.model,
+      quiet: true, // final result only; no spinner, reasoning or intermediate prose
       signal: controller.signal,
       isInterrupted: () => interrupted,
       subAgentModel: CONFIG.subAgentModel, // delegated work may run on a different tier
@@ -269,13 +286,17 @@ async function main() {
       },
     });
     saveSession(sessionId, CONFIG.model, messages); // print-mode runs are resumable too
+    await runHooks("SessionEnd", {});
     emit("agent_session_end"); // close the books
+    printOutput!.write(formatPrintResult(cli.outputFormat, {
+      sessionId, model: CONFIG.model, effort: selectedEffort(CONFIG.model), result, usage: costMeter.snapshot(),
+    }));
     if (result.reason !== TerminateReason.Done) {
       console.error(chalk.yellow(EXIT_NOTES[result.reason])); // human note on stderr
       if (result.detail) console.error(chalk.dim(result.detail.slice(0, 300))); // raw detail on stderr
       process.exitCode = result.reason === TerminateReason.UserInterrupt ? 130 : 1; // scripts can branch on this
     }
-    return; // the answer itself already streamed to stdout
+    return; // the outer finally closes scheduler/MCP handles so scripts can exit
   }
 
   // ---- Interactive session (REPL) -------------------------------------------------
@@ -931,4 +952,10 @@ async function main() {
   console.log(chalk.dim("bye.")); // a clean goodbye
 }
 
-main(); // kick everything off
+main().catch((error: unknown) => {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exitCode = error instanceof CliUsageError ? 2 : 1;
+}).finally(() => {
+  printCleanup?.();
+  printOutput?.restore();
+});

@@ -43,6 +43,42 @@ MINI_AGENT_MODEL=gpt-4.1-mini
 
 各家 base URL 见 [.env.example](.env.example)。两个注意:模型必须支持 function calling;窗口比 DeepSeek 小的话设 `MINI_AGENT_CONTEXT_WINDOW`(单位 token)。换完跑一遍 `npm run eval`——同样 10 道题,正好当模型横评。
 
+## 非交互执行（print / exec）
+
+像 `claude -p` 一样执行一次任务并退出，也可以使用 `exec` 入口：
+
+```bash
+mini-agent -p "解释这个项目" --model deepseek-flash --effort high
+mini-agent exec --model deepseek-flash --effort max --prompt "检查当前改动"
+cat error.log | mini-agent -p "分析这份日志"
+mini-agent -p "总结当前改动" --output-format json > result.json
+
+# 从源码运行同样的参数
+npm start -- -p "解释这个项目" --model deepseek-flash --effort high
+```
+
+`-p` / `--print` 是非交互开关，参数可以放在 prompt 前后；prompt 可以是位置参数或
+`--prompt`，二者不能同时使用。以 `-` 开头的任务文字放在 `--` 后，例如
+`mini-agent -p -- "--help 参数是什么意思"`。没有位置 prompt 时也可以只从 stdin 读取任务；
+有 prompt 时，管道内容追加在其后。管道会读到 EOF，脚本调用时应关闭 stdin，或用 `< /dev/null`。
+
+`--model` 和 `--effort` 只覆盖本次进程，不修改保存的配置；交互启动也接受这两个选项。
+effort 使用 `/effort` 的同一套能力判断，不支持的值会列出可选项并以退出码 2 退出。
+未知模型或代理需要在 settings 中配置 `effortProfiles`；`--effort default` 使用供应商默认值。
+`--model` 使用当前 endpoint 的模型 ID，不自动切换 vendor、endpoint 或 API key。
+
+默认 `text` 输出只包含最终回答，保留原始 Markdown；进度与诊断走 stderr，不输出动画或输入框。
+`--output-format json` 输出单个结果对象，含 `result`、`is_error`、`reason`、`session_id`、
+`model`、`effort`、`usage` 和 `estimated_cost_usd`。usage 与费用是本地会话计量，
+不含 Jev 等辅助审核调用。当前支持 text / json，不兼容 Claude 的 stream-json SDK 协议。
+
+退出码：`0` 正常完成，`1` 执行失败，`2` 参数错误，`130` 被中断。
+`-r` / `--resume` 仍可续接最近会话；`--auto` 仍经过原有审核，无人确认的操作直接拒绝。
+权限规则不会因为 print 模式而放宽。
+
+交互参考 [Claude Code CLI](https://code.claude.com/docs/en/cli-reference) 和本地
+`claude-code-sourcemap/restored-src/src/main.tsx` 的参数及 stdin 处理；不是其全部参数的兼容实现。
+
 ## Usage and account status
 
 输入 `/status` 查看当前模型、本会话 token／缓存命中／估算费用，以及 vendor 支持的账户信息。
