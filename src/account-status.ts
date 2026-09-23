@@ -129,8 +129,8 @@ export async function getAccountStatus(options: AccountOptions): Promise<Account
   const result: AccountStatus = {
     provider: provider ?? "custom", checkedAt: now.toISOString(), period: `${start.toISOString()} → ${now.toISOString()}`,
     balance: unavailable("No documented public balance endpoint integrated; check the vendor billing console"),
-    usage: unavailable("Not provided by this account API; see session usage below"),
-    cost: unavailable("Not provided by this account API; see session estimate below"), note: "",
+    usage: unavailable("Not provided by this account API; see Current session"),
+    cost: unavailable("Not provided by this account API; see Current session estimate"), note: "",
   };
   if (!provider) {
     result.note = "Custom/proxy endpoint: billing is vendor-specific. Use /status <provider> only to query a separate official account with its dedicated credential.";

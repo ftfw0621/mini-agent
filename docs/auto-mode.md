@@ -381,6 +381,40 @@ by Git. Logging is best-effort and cannot change permission decisions. Disable
 by restarting without the flag, and remove the file after diagnosis if desired.
 Requests rejected locally before a provider call have no provider trace.
 
+Tracing belongs to the agent process only. Shells the agent starts receive
+`MINI_AGENT_REVIEW_DEBUG=0`, and `npm test` exports the same value: otherwise
+`config.ts` re-reads `.env` in every child and test fixtures append mocked
+replies (HTTP 503, `{}` bodies, ~0 ms) that look like real provider failures.
+Earlier logs may contain such entries; real sessions show non-trivial
+`durationMs` and are distinguishable by `pid`.
+
+## Measure interruptions (`npm run auto:report`)
+
+Every review, in both policies, gets a `reviewId`. One `agent_auto_verdict`
+telemetry event per review records the decision, `durationMs`, `outcome`
+(`reviewed`, `precondition`, `unavailable`; scores policy) or `route`
+(`jev_allow`, `jev_flagged`, `history_truncated`, `jev_unavailable`, `no_jev`;
+rules policy), and the sizes behind the two known cliffs: `stateBytes` (over
+24 KB forces a human prompt) with its `requestBytes`/`historyBytes`/`actionBytes`
+parts, and `omittedActions` (above 0 disables the Jev fast pass).
+
+When a review asks, `agent_auto_human` records the answer with the same
+`reviewId`: `approved` (likely a false block), `declined` (a correct block) or
+`unattended` (no human could answer). `agent_tool_declined` and
+`agent_tool_auto_denied` carry the `reviewId` too. These are weak labels, since
+people also approve out of fatigue, so sample them before treating them as truth.
+
+```sh
+npm run auto:report                          # all local telemetry
+npm run auto:report -- --since=2026-09-23    # compare before/after a change
+```
+
+The report prints the share of tool calls that went to a reviewer, the ask
+rate with a Wilson 95% interval, human interruptions per 100 tool calls, the
+approved/declined split, both cliff counts, asks by tool and review latency
+(p50/p95) per backend. Events written before these fields existed count in the
+rates but not in joins or cliff counts. It makes no API requests.
+
 The current authority ledger captures original user **text** only. Image bytes,
 assistant explanations and unstructured tool output are not supplied to the
 reviewer. A screenshot-led request can therefore leave it without the task

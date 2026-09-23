@@ -1,6 +1,6 @@
 import type { ReviewHistory } from "./auto-context.js";
 
-export interface AutoVerdict { decision: "allow" | "deny" | "ask"; reason: string; ruleIds?: string[] }
+export interface AutoVerdict { decision: "allow" | "deny" | "ask"; reason: string; ruleIds?: string[]; reviewId?: string }
 export interface ReviewState {
   reviewId?: string;
   policyVersion?: string;

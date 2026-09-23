@@ -12,6 +12,14 @@ export type { AutoVerdict } from "./auto-review.js";
 
 const TIMEOUT_MS = 30_000;
 const MAX_STATE_BYTES = 24_000;
+// Sizes behind the two known cliffs, recorded on every verdict: stateBytes over
+// MAX_STATE_BYTES forces a human prompt, and omittedActions > 0 disables the Jev
+// fast pass. The parts say WHICH input grew (pasted requests vs. a big write).
+const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value) ?? "", "utf8");
+function stateSize(state: ReviewState): Record<string, number> {
+  return { stateBytes: bytes(state), requestBytes: bytes(state.userRequests), historyBytes: bytes(state.history.actions),
+    actionBytes: bytes(state.action.args), omittedActions: state.history.omittedActions };
+}
 
 // Compatibility helpers use the exact same parsers and policy as live review.
 export function interpretAutoOutput(value: unknown): AutoVerdict | null {
@@ -125,7 +133,16 @@ export class AutoMode {
 
   async classify(tool: string, argsJson: string, userRequests: readonly string[], signal: AbortSignal, options: AutoReviewOptions = {}): Promise<AutoVerdict> {
     if (this.policy === "rules") return this.classifyRules(tool, argsJson, userRequests, signal, options);
-    const ask = (reason: string): AutoVerdict => ({ decision: "ask", reason });
+    // One ID per review joins the debug log, this verdict event and the human's
+    // later decision in loop.ts — the join that turns logs into labeled data.
+    const reviewId = randomUUID();
+    const started = Date.now();
+    const measured: Record<string, number> = {};
+    const finish = (verdict: AutoVerdict, fields: Record<string, string | number> = {}): AutoVerdict => {
+      emit("agent_auto_verdict", { reviewId, policy: "scores", tool, verdict: verdict.decision, ...measured, ...fields, durationMs: Date.now() - started });
+      return { ...verdict, reviewId };
+    };
+    const ask = (reason: string): AutoVerdict => finish({ decision: "ask", reason }, { outcome: "precondition" });
     if (!this.jev && !this.model) return ask("Model judge unavailable; manual approval required");
     if (this.errors >= 3) return ask("Auto review disabled after 3 consecutive failures; manual approval required (toggle /auto off and on to retry)");
     if (signal.aborted) return ask("Auto review interrupted");
@@ -133,14 +150,14 @@ export class AutoMode {
     let args: unknown;
     try { args = JSON.parse(argsJson); } catch { return ask("Invalid tool arguments"); }
     const state: ReviewState = {
-      userRequests, projectInstructions: this.projectInstructions,
+      reviewId, userRequests, projectInstructions: this.projectInstructions,
       workingDirectory: process.cwd(), deniedBySettings: CONFIG.permissions.deny,
       history: options.history ?? { actions: [], omittedActions: 0 }, delegatedTask: options.delegatedTask,
       action: { tool, args, description: options.description },
     };
+    Object.assign(measured, stateSize(state));
     // Never silently truncate an action or earlier restrictions to get an allow.
-    if (Buffer.byteLength(JSON.stringify(state), "utf8") > MAX_STATE_BYTES) return ask("Auto review context is too large; manual approval required");
-    const started = Date.now();
+    if (measured.stateBytes > MAX_STATE_BYTES) return ask("Auto review context is too large; manual approval required");
     let activeBackend = this.backend;
     try {
       let assessment: ReviewAssessment | null = null;
@@ -167,7 +184,7 @@ export class AutoMode {
         signal.throwIfAborted();
         priorAssessment = `Jev authorization=${assessment.authorized}, risk=${assessment.risky} → `;
         activeBackend = `model judge (${CONFIG.judge.model || CONFIG.model})`;
-        const debug = beginReviewDebug("authorization-review", { state, jevAssessment: assessment, reviewer: activeBackend }, [this.apiKey]);
+        const debug = beginReviewDebug("authorization-review", { state, jevAssessment: assessment, reviewer: activeBackend }, [this.apiKey], reviewId);
         emit("agent_auto_authorization_review", { tool, model: CONFIG.judge.model || CONFIG.model });
         try {
           assessment = await withDeadline(signal, (reviewSignal) => this.model!.review(state, reviewSignal));
@@ -186,15 +203,14 @@ export class AutoMode {
       verdict.reason = `${priorAssessment}${backend === "jev" ? "Jev" : activeBackend}: ${verdict.reason}`;
       if (signal.aborted) return ask("Auto review interrupted");
       this.errors = 0;
-      emit("agent_auto_verdict", { tool, verdict: verdict.decision, backend,
+      return finish(verdict, { outcome: "reviewed", backend,
         model: backend === "jev" ? CONFIG.autoMode.model : CONFIG.judge.model || CONFIG.model,
         authorization: typeof assessment.authorized === "number" ? assessment.authorized : String(assessment.authorized),
-        risk: typeof assessment.risky === "number" ? assessment.risky : String(assessment.risky), durationMs: Date.now() - started });
-      return verdict;
+        risk: typeof assessment.risky === "number" ? assessment.risky : String(assessment.risky) });
     } catch {
       if (!signal.aborted) this.errors++;
       emit("agent_auto_unavailable", { tool, disabled: Number(this.errors >= 3) });
-      return ask(`${activeBackend} unavailable, timed out or returned an invalid response; manual approval required`);
+      return finish({ decision: "ask", reason: `${activeBackend} unavailable, timed out or returned an invalid response; manual approval required` }, { outcome: "unavailable" });
     }
   }
   private async classifyRules(tool: string, argsJson: string, userRequests: readonly string[], signal: AbortSignal, options: AutoReviewOptions): Promise<AutoVerdict> {
@@ -202,10 +218,13 @@ export class AutoMode {
     const policyVersion = RULE_POLICY_VERSION;
     let backend: "jev" | "model" = "model";
     const debug = beginReviewDebug("rules", { reviewId, policyVersion, routingVersion: RULE_ROUTING_VERSION, cutoff: JEV_CLEAR_RULE_MAX, tool }, [this.apiKey], reviewId);
+    const started = Date.now();
+    const measured: Record<string, number> = {};
+    let route = "none"; // how the review was routed: jev_allow, jev_flagged, history_truncated, jev_unavailable, no_jev
     const finish = (verdict: AutoVerdict): AutoVerdict => {
       debug("verdict", { policyVersion, routingVersion: RULE_ROUTING_VERSION, backend, verdict });
-      emit("agent_auto_verdict", { reviewId, policyVersion, tool, backend, model: backend === "jev" ? CONFIG.autoMode.model : CONFIG.judge.model || CONFIG.model, verdict: verdict.decision, rules: (verdict.ruleIds ?? []).join(",") });
-      return { ...verdict, reason: `${backend === "jev" ? "Jev" : `rule reviewer (${CONFIG.judge.model || CONFIG.model})`}: ${verdict.reason}` };
+      emit("agent_auto_verdict", { reviewId, policy: "rules", policyVersion, tool, backend, model: backend === "jev" ? CONFIG.autoMode.model : CONFIG.judge.model || CONFIG.model, verdict: verdict.decision, rules: (verdict.ruleIds ?? []).join(","), route, ...measured, durationMs: Date.now() - started });
+      return { ...verdict, reviewId, reason: `${backend === "jev" ? "Jev" : `rule reviewer (${CONFIG.judge.model || CONFIG.model})`}: ${verdict.reason}` };
     };
     const ask = (reason: string) => finish({ decision: "ask", ruleIds: [], reason });
     if (signal.aborted) return ask("Review interrupted");
@@ -220,7 +239,8 @@ export class AutoMode {
       history: ruleHistory(options.history ?? { actions: [], omittedActions: 0 }), delegatedTask: options.delegatedTask,
       action: { tool, args, description: tool === "run_bash" || tool === "run_bash_background" ? "Execute the supplied shell command." : options.description },
     };
-    if (Buffer.byteLength(JSON.stringify(state), "utf8") > MAX_STATE_BYTES) return ask("Review context too large; no evidence was silently truncated");
+    Object.assign(measured, stateSize(state));
+    if (measured.stateBytes > MAX_STATE_BYTES) return ask("Review context too large; no evidence was silently truncated");
     try {
       if (this.useJev && this.ruleJev) {
         try {
@@ -228,6 +248,7 @@ export class AutoMode {
           signal.throwIfAborted();
           const routing = screenRules(screening, state.history);
           debug("routing", { routingVersion: RULE_ROUTING_VERSION, cutoff: JEV_CLEAR_RULE_MAX, ...routing });
+          route = routing.route === "allow" ? "jev_allow" : state.history.omittedActions > 0 ? "history_truncated" : "jev_flagged";
           if (routing.route === "allow") {
             this.errors = 0;
             backend = "jev";
@@ -242,8 +263,12 @@ export class AutoMode {
             emit("agent_auto_fallback", { reason, model: CONFIG.judge.model || CONFIG.model });
           }
           debug("routing", { routingVersion: RULE_ROUTING_VERSION, route: "review", reason: "Jev unavailable" });
+          route = "jev_unavailable";
         }
-      } else debug("routing", { routingVersion: RULE_ROUTING_VERSION, route: "review", reason: this.jevFailed ? "Jev disabled after failure" : "No Jev key" });
+      } else {
+        route = "no_jev";
+        debug("routing", { routingVersion: RULE_ROUTING_VERSION, route: "review", reason: this.jevFailed ? "Jev disabled after failure" : "No Jev key" });
+      }
       // Same state, without first-stage scores. A suspicion is not a confirmed
       // rule match; the reasoning model evaluates the evidence independently.
       const assessment = await withDeadline(signal, (s) => this.ruleModel!.review(state, s));

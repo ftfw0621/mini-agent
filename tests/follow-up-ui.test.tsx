@@ -73,7 +73,7 @@ const key = async (text: string) => { stdin.write(text); await sleep(); };
 try {
   await sleep();
   await key("/status local"); await key("\r");
-  check("status command displays local usage without starting an agent turn", turns === 0 && allOutput.includes("tokens this session") && allOutput.includes("permission review/Jev"));
+  check("status command displays a framed usage card without starting an agent turn", turns === 0 && allOutput.includes("mini-agent · Status") && allOutput.includes("Current session") && allOutput.includes("permission review/Jev") && allOutput.includes(`╭${"─".repeat(78)}╮`));
   const previousFetch = globalThis.fetch;
   const previousKey = CONFIG.apiKey;
   let accountSignal: AbortSignal | null | undefined;

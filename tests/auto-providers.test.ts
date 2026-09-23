@@ -32,4 +32,14 @@ const assessments = await Promise.all([jev.review(state, signal), model.review(s
 check("adapters submit identical complete review state", JSON.stringify(jevState) === JSON.stringify(modelState) && JSON.stringify(jevState) === JSON.stringify(state));
 check("both providers receive the same effect-based policy", JSON.stringify(jevQuestions) === JSON.stringify(REVIEW_QUESTIONS) && modelSystem.endsWith(JSON.stringify(REVIEW_QUESTIONS)));
 check("the shared decision layer consumes either provider", assessments.every((a) => decideReview(a).decision === "allow"));
+
+// Reasoning models can spend the whole budget thinking and return empty content.
+let budget = 0;
+const truncating = { chat: { completions: { create: async (request: { max_tokens: number }) => {
+  budget = request.max_tokens;
+  return { choices: [{ finish_reason: "length", message: { content: "" } }] };
+} } } };
+const truncated = await modelReviewer(truncating as never, () => "vendor-model").review(state, signal).catch((e: Error) => e.message);
+check("model reviewer leaves room for reasoning", budget === 4096);
+check("token exhaustion is named, not reported as invalid JSON", truncated === "ran out of output tokens (max_tokens 4096)");
 finish();

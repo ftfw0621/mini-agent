@@ -67,7 +67,9 @@ function jevTransport<T>(apiKey: string, model: () => string, request: typeof fe
   } };
 }
 
-function modelTransport<T>(client: OpenAI, model: () => string, instructions: string, parse: (text: string) => T | null, decide: (assessment: T) => unknown, maxTokens = 2048) {
+// 4096 for both reviewers: a real deepseek-flash review spent all of an earlier
+// 2048 budget on reasoning_content and returned empty content.
+function modelTransport<T>(client: OpenAI, model: () => string, instructions: string, parse: (text: string) => T | null, decide: (assessment: T) => unknown, maxTokens = 4096) {
   return { async review(state: ReviewState, signal: AbortSignal) {
     const request: OpenAI.ChatCompletionCreateParamsNonStreaming = {
       model: model(), max_tokens: maxTokens, // reasoning models need room before the JSON
@@ -80,8 +82,10 @@ function modelTransport<T>(client: OpenAI, model: () => string, instructions: st
     try {
       const response = await client.chat.completions.create(request, { signal, maxRetries: 0 });
       debug("response", { response });
-      const result = parse(response.choices[0]?.message?.content ?? "");
-      if (!result) throw new ReviewProviderUnavailable("returned an invalid response");
+      const choice = response.choices[0];
+      const result = parse(choice?.message?.content ?? "");
+      // Name truncation separately so the log says "raise the budget", not "bad JSON".
+      if (!result) throw new ReviewProviderUnavailable(choice?.finish_reason === "length" ? `ran out of output tokens (max_tokens ${maxTokens})` : "returned an invalid response");
       debug("assessment", { assessment: result, verdict: decide(result) });
       return result;
     } catch (error) {
@@ -127,7 +131,7 @@ export function parseRuleProbabilities(value: unknown): RuleProbabilities | null
   return { kind: "probabilities", probabilities };
 }
 export function modelRuleReviewer(client: OpenAI, model: () => string): RuleProvider {
-  return modelTransport(client, model, `${RULE_REVIEW_INSTRUCTIONS}\nReturn ONLY JSON: {"matches":[{"ruleId":"a rule ID from the policy","evidence":"concrete evidence"}],"uncertainty":null}. Use matches=[] when no rule matches. uncertainty must be null when effects are understood, otherwise a nonempty string; all fields are required. Do not output a decision or scores.`, parseRuleAssessment, decideRules, 4096);
+  return modelTransport(client, model, `${RULE_REVIEW_INSTRUCTIONS}\nReturn ONLY JSON: {"matches":[{"ruleId":"a rule ID from the policy","evidence":"concrete evidence"}],"uncertainty":null}. Use matches=[] when no rule matches. uncertainty must be null when effects are understood, otherwise a nonempty string; all fields are required. Do not output a decision or scores.`, parseRuleAssessment, decideRules);
 }
 export function jevRuleReviewer(apiKey: string, model: () => string, request: typeof fetch): RuleProvider {
   return jevTransport(apiKey, model, request, RULE_QUESTIONS, parseRuleProbabilities, decideRules);

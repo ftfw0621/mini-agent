@@ -101,6 +101,11 @@ export class CostMeter {
     return this.total.output;
   }
 
+  // Structured values for status cards; callers cannot mutate the meter.
+  snapshot(): Usage & { calls: number; cost: number } {
+    return { ...this.total, calls: this.calls, cost: this.cost() };
+  }
+
   // The /cost report. Estimated, local-only.
   report(): string {
     const t = this.total;

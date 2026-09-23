@@ -657,6 +657,7 @@ async function authorizeCall(call: AssembledCall, opts: LoopOptions): Promise<st
     // safe; anything else still goes to the human. The judge never sees a deny.
     let autoAllowed = false;
     let reviewReason = "";
+    let reviewId = ""; // set when auto review ran; joins the human's answer to that review
     // Exiting plan mode always belongs to the human, never to a classifier.
     if (!v.requiresHuman && opts.autoMode && (auto ? call.name !== "exit_plan_mode" : !!opts.judge && call.name === "run_bash")) {
       const definition = toolsFor(opts).find((t) => t.type === "function" && t.function.name === call.name);
@@ -666,9 +667,10 @@ async function authorizeCall(call: AssembledCall, opts: LoopOptions): Promise<st
         notify: (message) => { if (!opts.quiet) sink(opts).note(chalk.yellow(`  ⎿ ${message}`)); },
       });
       if (opts.signal.aborted || opts.isInterrupted()) return "[permission] Interrupted before execution.";
+      reviewId = review.reviewId ?? "";
       if (review.decision === "deny") {
         opts.reviewBudget?.deny();
-        emit("agent_tool_auto_denied", { tool: call.name, rules: (review.ruleIds ?? []).join(",") });
+        emit("agent_tool_auto_denied", { tool: call.name, rules: (review.ruleIds ?? []).join(","), ...(reviewId ? { reviewId } : {}) });
         if (!opts.quiet) recordToolDetail(call.id, review.reason);
         return `[permission] Auto-denied (not a user refusal): ${review.reason}. Not executed. Choose a permitted approach or report the restriction. Do not retry the same prohibited effect through another tool, wrapper or worker.`;
       }
@@ -693,7 +695,10 @@ async function authorizeCall(call: AssembledCall, opts: LoopOptions): Promise<st
       if (preview) sink(opts).note(preview.replace(/^/gm, agentIndent(opts)));
     }
     const ok = autoAllowed || (!(auto && opts.canPrompt === false) && await opts.confirm(`${call.name} (${v.reason}):\n   ${v.summary}${reviewReason ? `\n   ${reviewReason}` : ""}`, call.name));
-    if (!ok) emit("agent_tool_declined", { tool: call.name }); // the human said no — that is signal
+    // The human's answer to an auto-review "ask" is a free label: approved is a
+    // likely false block, declined a correct one. "unattended" never reached a human.
+    if (reviewId && !autoAllowed) emit("agent_auto_human", { reviewId, tool: call.name, decision: ok ? "approved" : auto && opts.canPrompt === false ? "unattended" : "declined" });
+    if (!ok) emit("agent_tool_declined", { tool: call.name, ...(reviewId ? { reviewId } : {}) }); // the human said no — that is signal
     if (!ok && !opts.quiet) sink(opts).note(mark.declined); // make the refusal visible
     if (!ok) return `[permission] Action not approved${reviewReason ? `: ${reviewReason}` : ". The user declined this action"}. Ask the user how to proceed, or choose a safer alternative.`;
   }

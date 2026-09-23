@@ -426,7 +426,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
       statusRequest.current = controller;
       setBusy(true);
       setStatus("Checking account usage… (Esc to cancel)");
-      try { note(chalk.dim(await statusCommand(line, costMeter, { signal: controller.signal }))); }
+      try { note(await statusCommand(line, costMeter, { signal: controller.signal, columns })); }
       finally { statusRequest.current = null; setBusy(false); setStatus(null); }
       return true;
     }

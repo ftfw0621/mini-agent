@@ -9,6 +9,15 @@ export function reviewDebugPath(): string | undefined {
     ? path.resolve(".mini-agent", "review-debug.jsonl") : undefined;
 }
 
+// Environment for commands the agent runs. Tracing is for THIS process only:
+// a child `npm test` that inherited the flag appended its mocked reviews to the
+// real log, where they looked like provider failures and skewed measurement.
+// "0", not deleted: config.ts fills unset variables from .env, which would
+// switch tracing straight back on in any child that imports it.
+export function childEnv(): NodeJS.ProcessEnv {
+  return { ...process.env, MINI_AGENT_REVIEW_DEBUG: "0" };
+}
+
 // Shared by both frontends. This controls tracing only, never permission mode.
 export function reviewDebugCommand(line: string): string | null {
   if (!/^\/auto\s+debug(?:\s|$)/.test(line)) return null;

@@ -4,7 +4,8 @@ import path from "node:path";
 import { jevReviewer, modelReviewer } from "../src/auto-providers.js";
 import { type ReviewState } from "../src/auto-review.js";
 import { check, finish } from "./helpers.js";
-import { reviewDebugCommand } from "../src/auto-debug.js";
+import { childEnv, reviewDebugCommand } from "../src/auto-debug.js";
+import { dispatch } from "../src/tools.js";
 
 const cwd = process.cwd();
 const oldFlag = process.env.MINI_AGENT_REVIEW_DEBUG;
@@ -50,6 +51,8 @@ try {
   await modelReviewer(client as never, () => "fallback-model").review(state, signal);
   const modelEvents = records().filter((r) => r.backend === "model");
   check("fallback logs actual messages and categorical assessment", modelEvents[0].request.messages.length === 2 && modelEvents[2].assessment.authorized === true);
+  const inherited = await dispatch("run_bash", JSON.stringify({ command: "echo \"flag=${MINI_AGENT_REVIEW_DEBUG:-unset}\"" }), signal);
+  check("agent shells do not inherit review tracing", String(inherited).includes("flag=0") && childEnv().MINI_AGENT_REVIEW_DEBUG === "0" && process.env.MINI_AGENT_REVIEW_DEBUG === "1");
   const size = fs.statSync(file).size;
   reviewDebugCommand("/auto debug off");
   await reviewer.review(state, signal);

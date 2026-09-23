@@ -9,6 +9,7 @@ import { recordMutation } from "./undo.js"; // capture the before-state so /undo
 import { parseTodos, setTodos, summarizeTodos } from "./todos.js"; // the agent's own checklist (Day 36)
 import { startBackground, readBackground } from "./background.js"; // long-running commands that outlive the turn (Day 37)
 import { scheduleJob, cancelJob, listJobs } from "./cron.js"; // cron scheduler (Day s14): scheduled, recurring work
+import { childEnv } from "./auto-debug.js"; // shells never inherit review tracing
 
 // ============ Session state ============
 // The foundation of "read before edit": which files has this session actually read?
@@ -240,7 +241,7 @@ On error: failures return the error output — analyze it and try a different ap
   // instead of waiting out the 30s timeout.
   run: (args, signal) =>
     new Promise<string>((resolve) => {
-      const child = spawn(args.command, { shell: true, stdio: ["ignore", "pipe", "pipe"] }); // shell:true → bash semantics
+      const child = spawn(args.command, { shell: true, stdio: ["ignore", "pipe", "pipe"], env: childEnv() }); // shell:true → bash semantics
       let stdout = ""; // captured stdout
       let stderr = ""; // captured stderr (for the model, not the user's terminal)
       let settled = false; // resolve exactly once

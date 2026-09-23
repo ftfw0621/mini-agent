@@ -515,7 +515,7 @@ async function main() {
   // Handle a /slash command. Returns true if the line was a command.
   const handleCommand = async (line: string): Promise<boolean> => {
     if (line === "/status" || line.startsWith("/status ")) {
-      console.log(chalk.dim(await statusCommand(line, costMeter)));
+      console.log(await statusCommand(line, costMeter));
       return true;
     }
     if (line.startsWith("/skills ")) line = `/skill ${line.slice(8).trim()}`;

@@ -17,6 +17,7 @@
 // as events while the main loop runs. There is no shared-memory race to guard,
 // so the whole "daemon thread + mutex" dance collapses into plain callbacks.
 import { spawn, type ChildProcess } from "node:child_process";
+import { childEnv } from "./auto-debug.js";
 
 // A task's lifecycle. `running` until the process closes, then exactly one of
 // the terminal states. `killed` is its own state so a SIGKILL on exit reads
@@ -60,7 +61,7 @@ function append(task: BgTask, chunk: string): void {
 // to survive into later turns; only killAll, on session exit, stops them).
 export function startBackground(command: string): string {
   const id = `bg_${++seq}`;
-  const child = spawn(command, { shell: true, stdio: ["ignore", "pipe", "pipe"] }); // shell:true → bash semantics, same as run_bash
+  const child = spawn(command, { shell: true, stdio: ["ignore", "pipe", "pipe"], env: childEnv() }); // shell:true → bash semantics, same as run_bash
   const task: BgTask = {
     id,
     command,

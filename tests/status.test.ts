@@ -3,6 +3,9 @@ import { statusCommand, formatAccountStatus } from "../src/status.js";
 import { CONFIG } from "../src/config.js";
 import { CostMeter, DEFAULT_PRICING } from "../src/cost.js";
 import { check, finish } from "./helpers.js";
+import chalk from "chalk";
+import { stripVTControlCharacters } from "node:util";
+import { displayWidth } from "../src/editor.js";
 const now = new Date("2026-09-23T03:04:05Z");
 const opts: AccountOptions = { baseURL: "https://api.deepseek.com/v1", apiKey: "inference-secret", env: {}, now };
 let calls: { url: URL; init?: RequestInit }[] = [];
@@ -69,10 +72,25 @@ meter.record({ prompt_tokens: 100, completion_tokens: 10 });
 try {
   CONFIG.baseURL = "https://user:password@proxy.test/v1?token=secret";
   calls = [];
-  const local = await statusCommand("/status local", meter, { request: record({}) });
-  check("local status performs no network request and retains session usage", calls.length === 0 && local.includes("input:  100") && local.includes("output: 10") && local.includes("estimated cost"));
+  const local = stripVTControlCharacters(await statusCommand("/status local", meter, { request: record({}), columns: 80 }));
+  check("local status performs no network request and retains session usage", calls.length === 0 && /Input tokens:\s+100/.test(local) && /Output tokens:\s+10/.test(local) && local.includes("Estimated cost"));
   check("local estimate discloses excluded reviewer usage", local.includes("permission review/Jev") && local.includes("settings.pricing"));
   check("endpoint display excludes URL credentials and query secrets", !local.includes("password") && !local.includes("token=secret"));
   check("invalid command arguments cannot trigger a query", (await statusCommand("/status garbage", meter, { request: record({}) })).startsWith("Usage:") && calls.length === 0);
 } finally { CONFIG.baseURL = previousURL; }
+
+const previousModel = CONFIG.model;
+const previousColor = chalk.level;
+try {
+  chalk.level = 1;
+  CONFIG.model = "测试模型-".repeat(20);
+  for (const columns of [32, 60, 120]) {
+    const card = await statusCommand("/status deepseek", meter, { columns, env: { DEEPSEEK_API_KEY: "fixture" }, request: record({ is_available: true, balance_infos: [{ currency: "CNY", total_balance: "0" }] }) });
+    const plain = stripVTControlCharacters(card);
+    const lines = plain.split("\n");
+    check(`status card fits ${columns} columns with CJK and long values`, lines.every((line) => displayWidth(line) === Math.min(96, columns)) && lines[0].startsWith("╭") && lines.at(-1)!.endsWith("╯"));
+    check(`status card preserves sections, zero balance and unavailable reasons at ${columns} columns`, plain.includes("Current session") && plain.includes("Vendor account") && plain.includes("CNY 0.0000") && plain.includes("unavailable"));
+    check(`status card highlights values at ${columns} columns`, card.includes(chalk.green.bold("CNY 0.0000")) && card.includes(chalk.yellow.bold("$0.0000")));
+  }
+} finally { CONFIG.model = previousModel; chalk.level = previousColor; }
 finish();
