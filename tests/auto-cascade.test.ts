@@ -28,10 +28,10 @@ await mode.classify("run_bash_background", args, userRequests, new AbortControll
 check("next action still starts with Jev", jevCalls === 2 && modelCalls === 2);
 
 for (const [authorization, risk, expected, reviews] of [
-  [0.5, 0, "allow", 1], [0.799, 0.1, "allow", 1],
-  [0.8, 0.1, "allow", 0], [1, 0, "allow", 0],
+  [0.5, 0, "allow", 1], [0.799, 0.2, "allow", 1],
+  [0.8, 0.2, "allow", 0], [1, 0, "allow", 0],
   [0.499, 0.01, "ask", 0], [0, 0, "ask", 0],
-  [0.56, 0.101, "ask", 0], [1, 1, "ask", 0],
+  [0.56, 0.201, "ask", 0], [1, 1, "ask", 0],
 ] as const) {
   let calls = 0;
   const candidate = new AutoMode({ chat: { completions: { create: async () => {

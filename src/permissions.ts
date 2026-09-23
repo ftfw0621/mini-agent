@@ -93,6 +93,11 @@ interface Word { text: string; dynamic: boolean; glob: boolean } // dynamic: con
 function shellSegments(command: string): Word[][] | null {
   // Heredoc bodies are data (commit messages), not commands. A quoted delimiter
   // disables expansion; an unquoted one would run $(...) inside, so forbid it.
+  // The usual multi-line commit message, `-m "$(cat <<'EOF' … EOF\n)"`, is a
+  // literal too: with a quoted delimiter nothing inside expands, and `cat` of a
+  // heredoc only echoes it. Collapse it to a plain word before tokenizing; any
+  // other command substitution still falls through to review.
+  command = command.replace(/"\$\(cat <<-?\s*(['"])([A-Za-z_][\w-]*)\1\n[\s\S]*?\n\t*\2\n\s*\)"/g, '"heredoc-text"');
   const lines = command.split("\n");
   const kept: string[] = [];
   for (let i = 0; i < lines.length; i++) {
@@ -172,7 +177,7 @@ function shellSegments(command: string): Word[][] | null {
 // Pure readers. Flags that turn one into a writer or a code runner are listed.
 const READ_ONLY_COMMANDS = new Set(["ls", "pwd", "cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "rg", "du", "df", "file", "stat",
   "which", "whereis", "type", "echo", "printf", "date", "sort", "cut", "tr", "diff", "cmp", "tree", "jq", "basename", "dirname",
-  "realpath", "readlink", "true", "nl", "column", "whoami", "uname", "hostname"]);
+  "realpath", "readlink", "true", "nl", "column", "whoami", "uname", "hostname", "sleep"]);
 const WRITING_FLAG = /^(-o|--output(=.*)?|-s|--set(=.*)?|--pre(=.*)?)$/; // sort/tree -o, date -s, rg --pre
 
 const inside = (root: string, target: string) => {
@@ -237,10 +242,23 @@ function gitEffect(words: string[], inProject: boolean): "read" | "write" | null
 // null → review. Otherwise the command is recoverable, with readOnly telling
 // plan mode whether it changes anything at all.
 export function recoverableShell(command: string): { readOnly: boolean; reason: string } | null {
-  const segments = shellSegments(command);
-  if (!segments?.length) return null;
   let root: string;
   try { root = fs.realpathSync(process.cwd()); } catch { return null; }
+  // Agents open with `cd "$(git rev-parse --show-toplevel)" &&` or `cd "$(pwd)"`.
+  // Both substitutions only read, and at the very start they run in the
+  // process cwd, so evaluate them here; later ones stay unknown (→ review).
+  const lead = /^\s*cd\s+"\$\((git rev-parse --show-toplevel|pwd)\)"\s*(?=&&|;|$)/.exec(command);
+  if (lead) {
+    let dir = root;
+    if (lead[1] !== "pwd") {
+      try { dir = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: root, encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] }).trim(); }
+      catch { return null; }
+    }
+    if (/['\n]/.test(dir)) return null;
+    command = `cd '${dir}'${command.slice(lead[0].length)}`;
+  }
+  const segments = shellSegments(command);
+  if (!segments?.length) return null;
   let cwd = root; // `cd` changes where later segments act
   let readOnly = true;
   for (const [cmd, ...args] of segments) {

@@ -1,6 +1,14 @@
 // The tiny assertion helper shared by every suite. No test framework on
 // purpose: the project's dependency budget is part of its teaching value,
 // and PASS/FAIL lines plus an exit code are all CI ever needs.
+
+// Every suite imports this module, so tracing is switched off here for ALL of
+// them, however they are launched: config.ts copies MINI_AGENT_REVIEW_DEBUG=1
+// from .env, and a suite run directly (`npx tsx tests/x.test.ts`) would append
+// mocked reviews to the real .mini-agent/review-debug.jsonl. The flag is read
+// per call, so suites that test tracing set "1" themselves inside a temp dir.
+process.env.MINI_AGENT_REVIEW_DEBUG = "0";
+
 let passCount = 0; // how many checks passed so far
 let failCount = 0; // how many failed
 

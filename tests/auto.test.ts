@@ -15,11 +15,11 @@ check("clear authorization and low risk allow", interpretAutoOutput(response())?
 check("risk cannot be averaged away by authorization", interpretAutoOutput(response(1, 0.8))?.decision === "ask");
 check("safe but unauthorized still asks", interpretAutoOutput(response(0.1, 0))?.decision === "ask");
 check("uncertainty asks", interpretAutoOutput(response(0.7, 0.2))?.decision === "ask");
-check("authorization at 0.8 and risk at 0.1 allow", interpretAutoOutput(response(0.8, 0.1))?.decision === "allow");
+check("authorization at 0.8 and risk at 0.2 allow", interpretAutoOutput(response(0.8, 0.2))?.decision === "allow");
 check("authorization between 0.8 and the previous 0.9 threshold allows", interpretAutoOutput(response(0.85, 0.05))?.decision === "allow");
 check("authorization below the policy threshold asks", interpretAutoOutput(response(0.799, 0))?.decision === "ask");
-check("lower authorization threshold never relaxes the risk threshold", interpretAutoOutput(response(0.8, 0.101))?.decision === "ask");
-check("risk above the policy threshold asks", interpretAutoOutput(response(1, 0.11))?.decision === "ask");
+check("lower authorization threshold never relaxes the risk threshold", interpretAutoOutput(response(0.8, 0.201))?.decision === "ask");
+check("risk above the policy threshold asks", interpretAutoOutput(response(1, 0.21))?.decision === "ask");
 check("model fallback parses explicit approval", interpretModelOutput('{"authorized":true,"risky":false}')?.decision === "allow");
 check("model risk asks", interpretModelOutput('{"authorized":true,"risky":true}')?.decision === "ask");
 for (const invalid of ['yes', '{}', '{"authorized":"true","risky":false}', '<safe>yes</safe>', '{"authorized":true,"risky":false} more text']) {

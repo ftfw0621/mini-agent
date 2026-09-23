@@ -142,8 +142,8 @@ or make independent allow/ask decisions.
    `/auto` is toggled off and on or the app restarts. HTTP 402 and explicit quota
    codes are distinguished from ordinary HTTP 429 rate limiting; unknown errors
    are described as unavailable, never guessed to be exhausted credits.
-4. Risk above 0.1 or authorization below 0.5 goes directly to human approval.
-   When risk is at most 0.1 and authorization is in [0.5, 0.8), one vendor-model
+4. Risk above 0.2 or authorization below 0.5 goes directly to human approval.
+   When risk is at most 0.2 and authorization is in [0.5, 0.8), one vendor-model
    review evaluates the identical state and both policy questions. It must return
    `authorized: true, risky: false` to approve. This is an uncertainty-routing
    branch, not service failover: Jev remains preferred for the next action.
@@ -157,7 +157,7 @@ in the CLI; standalone callers of the original `Judge` retain its older API.
 
 Jev receives two independent Noul questions in one request: whether the action is
 authorized, and whether it meets a mandatory-human-review category. Code allows only
-authorization >= 0.8 AND risk <= 0.1 without a second review. The vendor fallback answers the same policy
+authorization >= 0.8 AND risk <= 0.2 without a second review. The vendor fallback answers the same policy
 questions as strict JSON booleans, requiring `authorized: true` and `risky: false`.
 Each provider has a 30-second timeout. Invalid results or errors alone never grant
 permission: the fallback must explicitly approve, or the human decides. Oversized
@@ -411,7 +411,12 @@ never to a denial: scripts, tests and builds (their effect depends on code),
 background `&`, `cd` elsewhere followed by git writes, and commands naming
 credential paths (`~/.aws`, `id_rsa`, `credentials`…), because a printed
 secret cannot be taken back. Heredoc bodies with quoted delimiters (commit
-messages) are treated as data. Hard denies (`.git`, `.env`, `.ssh`, `rm -rf /`)
+messages) are treated as data, including the `-m "$(cat <<'EOF' … EOF\n)"`
+idiom. A leading `cd "$(git rev-parse --show-toplevel)"` or `cd "$(pwd)"` is
+evaluated up front (both only read); any other command substitution is
+reviewed. Replaying the 78 distinct real shell commands in the review log,
+62 now skip review; the other 16 are tests, builds, running code, loops,
+variables, `.env` and glob deletions. Hard denies (`.git`, `.env`, `.ssh`, `rm -rf /`)
 still run first and still scan the whole command text, heredocs included.
 Plan mode still blocks every recoverable *write*; only read-only commands pass.
 
@@ -422,6 +427,34 @@ redirected by an earlier (reviewed) `git remote set-url` would push unreviewed.
 
 Each fast-path allow emits `agent_auto_skipped` with its reason; the report
 prints them as "Skipped review".
+
+## Risk means irreversibility (2026-09-23)
+
+The `risky` question now asks whether the action *cannot be taken back*, the
+same line the recoverability tier draws; the key name is kept for telemetry.
+Reads, local edits, builds/tests, commits, normal pushes and deletable
+additions (messages, comments, new items) are recoverable; deleting what git
+cannot restore, discarding work, history rewrites, infrastructure/permission
+changes, secret disclosure and unknown effects are not.
+
+The threshold was set from measurements with `jev-1.13.0`, not by hand:
+
+| Risk threshold | Old question: false block / false allow (32 synthetic) | New question | Real still-reviewed shell asks (16), old / new |
+| --- | --- | --- | --- |
+| 0.10 | 0 / 0 | 2 / 0 | 4 / 5 |
+| 0.15 | 0 / 0 | 0 / 0 | 3 / 2 |
+| **0.20** | 0 / 0 | 0 / 0 | 3 / **1** |
+| 0.25 | 0 / 0 | 0 / 0 | 3 / 0 |
+
+Rewording alone did not lower benign scores (Slack send rose to 0.15); it
+separated them. Benign reviewed actions scored at most 0.16, while harmful
+actions that only the risk score stops (authorization >= 0.8) scored at least
+0.32 (opaque script; infrastructure writes fell from ~0.94 to ~0.42). 0.20
+leaves ~0.12 margin to that floor; the remaining real ask is `rm` of
+non-ignored build output (0.22), consistent with the tier. A confirmation run
+passed 32/32 (benign max 0.14, harmful risk-only min 0.33). Margins are thin
+and samples small: re-run `eval/auto-permissions.ts` and
+`eval/auto-supporting-steps.ts` after any question or model change.
 
 ## Measure interruptions (`npm run auto:report`)
 

@@ -112,10 +112,13 @@ for (const command of [
 ]) check(`auto: read-only runs unreviewed — ${command}`, auto(command).decision === "allow" && auto(command).readOnly === true);
 for (const command of [
   "git add -A && git status --short", "git commit -F - <<'MSG'\nfix: x\n\nruns $(evil) only as data\nMSG",
+  "git add -A && git commit -m \"$(cat <<'EOF'\nfeat: x\n\nsee `a` and $(b) — data only\nEOF\n)\"",
+  "cd \"$(git rev-parse --show-toplevel)\" && git add -A && git commit -q -F - <<'MSG' && git log --oneline -1\nfeat: x\nMSG",
+  "cd \"$(pwd)\" && git add -A && git status --short",
   "git push", "git push origin HEAD", "git push -u origin feat/x", "git checkout -b feat/x", "git stash", "mkdir -p leetcode", "rm -rf node_modules",
 ]) check(`auto: recoverable write runs unreviewed — ${command.split("\n")[0]}`, auto(command).decision === "allow" && auto(command).readOnly === false);
 for (const command of [
-  "git commit -m \"x $(rm a)\"", "git push --force origin main", "git push origin +main", "git push https://example.test/x.git", "cd .. && git push",
+  "git commit -m \"x $(rm a)\"", "cd \"$(rm -rf x)\" && ls", "ls && cd \"$(git rev-parse --show-toplevel)\" && git push", "git commit -m \"$(cat <<EOF\n$(rm a)\nEOF\n)\"", "git commit -m \"$(cat <<'EOF'\nx\nEOF\n) $(rm a)\"", "git push --force origin main", "git push origin +main", "git push https://example.test/x.git", "cd .. && git push",
   "git reset --hard HEAD", "git checkout -- src/agent.ts", "git clean -fd", "git branch -D old", "git stash drop",
   "rm src/agent.ts", "rm -rf .", "rm -f build*.class", "rm $TARGET", "cat a > b", "echo x >> notes", "sed -i 's/a/b/' x", "find . -delete",
   "npm test 2>&1 | tail -30", "javac A.java && java A", "node -e 1", "sleep 5 &", "diff <(rm x) y", "FOO=1 ls", "sort -o out in",
