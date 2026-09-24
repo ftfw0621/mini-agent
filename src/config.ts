@@ -152,7 +152,7 @@ export const CONFIG = {
     process.env.MINI_AGENT_API_KEY || // generic key wins...
     process.env.DEEPSEEK_API_KEY || // ...over the back-compat one
     "", // empty = missing; requireApiKey() turns that into a helpful error
-  model: process.env.MINI_AGENT_MODEL || projectSettings.model || globalSettings.model || "deepseek-chat", // must support function calling
+  model: process.env.MINI_AGENT_MODEL || projectSettings.model || globalSettings.model || "deepseek-flash", // must support function calling
   effortProfiles: { ...(globalSettings.effortProfiles ?? {}), ...(projectSettings.effortProfiles ?? {}) } as Record<string, EffortProfile>,
   // Sub-agents (the task tool) can run on a DIFFERENT model than the orchestrator:
   // a cheap/fast one for grunt work (reading many files, broad search), or a

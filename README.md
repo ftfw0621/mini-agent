@@ -58,7 +58,7 @@ export DEEPSEEK_API_KEY=sk-你的key
 
 ```json
 {
-  "judge": { "model": "deepseek-chat" }
+  "judge": { "model": "deepseek-flash" }
 }
 ```
 
@@ -99,7 +99,7 @@ export MINI_AGENT_MODEL=gpt-4.1-mini
 
 ```json
 {
-  "contextWindows": { "gpt-4.1-mini": 1000000, "deepseek-chat": 128000 }
+  "contextWindows": { "gpt-4.1-mini": 1000000, "deepseek-v4-pro": 1000000 }
 }
 ```
 
