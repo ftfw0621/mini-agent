@@ -22,6 +22,7 @@ import { mark, thinkingWord, spinnerText } from "./ui.js"; // centralized termin
 import { recordToolCall, recordToolResult, recordToolDetail, recordReasoning } from "./tui.js"; // folded tool-call trace (Ctrl+T) + the model's hidden thinking (Ctrl+R)
 import { type LoopOutput, type AnswerSink, STDOUT_OUTPUT } from "./output.js"; // where the loop's screen output goes (stdout by default, Ink REPL passes its own)
 import { todoNag, getTodos, renderTodos } from "./todos.js"; // the agent's plan: show it on screen + nag when it goes stale
+import { currentSkills, skillBodyMessages, skillListingReminder, syncSkillTool } from "./skills.js"; // skill listing reminders + launched skill bodies
 import { pendingNotifications } from "./background.js"; // background tasks (Day 37): surface finished jobs as a turn
 import { consumeCronQueue, cronItemsPending, cronTriggerContent, startCronScheduler, loadDurableJobs } from "./cron.js"; // cron scheduler (Day s14): scheduled, recurring work
 
@@ -1299,6 +1300,16 @@ export async function runLoop(
           return { reason: TerminateReason.CompactionFailed, detail: `${compaction.failures} consecutive compaction failures` }; // the compaction circuit breaker
       }
 
+      // Skills: pick up any SKILL.md added or edited since the last call (no
+      // restart), then tell the model about skills it hasn't seen yet — a
+      // <system-reminder> user message with just the delta, as Claude Code does.
+      // Idempotent: a retry of this same call finds the reminder already sent.
+      // Teammates have no skill tool, so they get no listing.
+      const skills = currentSkills();
+      syncSkillTool(skills);
+      const listing = opts.teammate ? null : skillListingReminder(messages, skills);
+      if (listing) messages.push({ role: "user", content: listing });
+
       let out: Awaited<ReturnType<typeof streamModelCall>>;
       try {
         out = await streamModelCall(messages, opts); // streaming call with spinner + watchdog
@@ -1428,6 +1439,11 @@ export async function runLoop(
         const r = await runOneCall(out.toolCalls[i++], { ...opts, autoHistory: reviewHistory(messages, opts.autoHistory) });
         messages.push({ role: "tool", tool_call_id: r.id, content: r.content });
       }
+
+      // A launched skill's body arrives as its own user message, after ALL of
+      // this round's tool results (the tool result itself only says "Launching
+      // skill: <name>"). Same shape as Claude Code's skill invocation.
+      for (const body of skillBodyMessages(out.toolCalls, messages)) messages.push({ role: "user", content: body });
 
       // Cron (Day s14): deliver any triggered scheduled jobs right after this
       // round's results so the model sees them on the next round.

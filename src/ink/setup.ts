@@ -14,7 +14,7 @@ import { Judge } from "../judge.js";
 import { AutoMode } from "../auto.js";
 import { registerExternalTool } from "../tools.js";
 import { rememberTool, readMemory } from "../memory.js";
-import { loadSkills, buildSkillTool, type Skill } from "../skills.js";
+import { currentSkills, type Skill } from "../skills.js";
 import { killAllBackground } from "../background.js";
 import { killAllSubAgents } from "../loop.js";
 import { loadDurableJobs, startCronScheduler, stopCronScheduler, listJobs } from "../cron.js"; // cron scheduler (Day s14)
@@ -38,13 +38,13 @@ export interface InkSession {
   initialTitle?: string; // a resumed session's stored title, so the terminal tab is named from the first frame
   startedAt: number;
   costMeter: CostMeter;
-  skills: Skill[];
   judge?: Judge;
   autoMode: AutoMode;
   model: string;
   dir: string;
   branch: string | null;
   bannerText: string; // the welcome box
+  skills: () => Skill[]; // live: re-read from disk when a SKILL.md changes (the UI's /skills + completion)
   notices: string[]; // dim startup lines (resume / memory / skills / judge) shown under the banner
   getStatus: () => StatusData; // live ctx% / cost / elapsed for the status bar
   disconnectMcp: () => void; // best-effort cleanup of MCP server subprocesses
@@ -105,11 +105,10 @@ export async function buildInkSession(opts: { resume?: boolean } = {}): Promise<
   const memCount = readMemory().length;
   if (memCount) notices.push(`(long-term memory: ${memCount} facts loaded)`);
 
-  // Skills: model-invocable ones get the single `skill` tool; user-only ones are
-  // reachable via /skill <name>.
-  const skills: Skill[] = loadSkills();
-  if (skills.some((s) => !s.disableModelInvocation)) registerExternalTool(buildSkillTool(skills));
-  if (skills.length) notices.push(`(skills: ${skills.length} loaded — ${skills.map((s) => s.name).join(", ")})`);
+  // Skills are re-read before every model call (no restart needed); the loop
+  // registers the `skill` tool and sends the listing. Just announce them here.
+  const startupSkills = currentSkills();
+  if (startupSkills.length) notices.push(`(skills: ${startupSkills.length} loaded — ${startupSkills.map((s) => s.name).join(", ")})`);
 
   const costMeter = initCostMeter({
     inputPerM: CONFIG.pricing.inputPerM ?? DEFAULT_PRICING.inputPerM,
@@ -138,7 +137,7 @@ export async function buildInkSession(opts: { resume?: boolean } = {}): Promise<
     initialTitle,
     startedAt,
     costMeter,
-    skills,
+    skills: () => currentSkills(),
     judge,
     autoMode,
     model: CONFIG.model,

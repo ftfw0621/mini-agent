@@ -7,7 +7,7 @@
 mini-agent 是我模仿 Claude Code 自己搓的。从终端 UI 的样子，到背后的各种机制，基本都是照着 Claude Code 的做法来实现的：
 
 - **交互界面**：Ink 终端 UI、方向键审批菜单、多问题表单、`@file` 引用、diff 预览、推理过程流式展示
-- **Skill**：`SKILL.md` 按需加载，项目级放 `.mini-agent/skills/`，全局放 `~/.config/mini-agent/skills/`
+- **Skill**：`SKILL.md` 按需加载，项目级放 `.mini-agent/skills/`，全局放 `~/.config/mini-agent/skills/`。和 Claude Code 一样，skill 列表通过带 `<system-reminder>` 的 user message 告诉模型，新增或修改 skill 不用重启；可以用 `/skill <名字> [参数]` 或 `/<名字> [参数]` 手动运行
 - **MCP**：stdio 和 HTTP 两种传输都支持，远程服务器走 OAuth
 - **权限**：allow / ask / deny 三档，deny 永远优先；另外有 plan 模式、auto 模式（交给模型审核）、`--dangerously-skip-permissions`
 - **其他**：上下文压缩、长期记忆、hooks、子 agent、后台任务、todo、撤销、会话续接、成本统计、非交互的 `-p` 模式

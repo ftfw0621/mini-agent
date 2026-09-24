@@ -22,7 +22,7 @@ import { cronItemsPending, consumeCronQueue, cronTriggerContent } from "../cron.
 import { newSessionId, saveSession, listSessions, loadSession, setSessionTitle } from "../session.js";
 import { generateSessionTitle, setTerminalTitle } from "../title.js"; // concise session name, generated after the first message + the terminal tab that shows it
 import { isPlanMode, setPlanMode } from "../permissions.js";
-import { findSkill, skillInstructions } from "../skills.js";
+import { findSkill, userSkillMessages } from "../skills.js";
 import { extractMemories } from "../memory.js";
 import { displayWidth } from "../editor.js"; // display-width measurement (CJK-aware)
 import { runHooks } from "../hooks.js";
@@ -150,9 +150,9 @@ const EXIT_NOTES: Partial<Record<TerminateReason, string>> = {
   [TerminateReason.UserInterrupt]: "Interrupted — back at the prompt.",
 };
 
-export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSource; session: InkSession; runTurn: (input: string | null, hooks: TurnHooks) => Promise<LoopResult> }) {
+export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSource; session: InkSession; runTurn: (input: string | readonly string[] | null, hooks: TurnHooks) => Promise<LoopResult> }) {
   const { rows, columns } = useTerminalSize();
-  const { client, messages, systemMessage, costMeter, skills, judge, autoMode, model, dir, branch, getStatus } = session;
+  const { client, messages, systemMessage, costMeter, skills: liveSkills, judge, autoMode, model, dir, branch, getStatus } = session;
 
   // Seed the scrollback with the welcome banner + the dim startup notices.
   const [items, setItems] = useState<Item[]>(() => [{ kind: "note", text: session.bannerText }, ...session.notices.map((n) => ({ kind: "note" as const, text: chalk.dim(n) }))]);
@@ -202,7 +202,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
     void client.models.list().then((page) => setCompletionModels(page.data.map((m) => m.id))).catch(() => {});
   }, [wantsModels, client]);
   const completion = useSlashCompletion(input, completing, {
-    model: CONFIG.model, skills, models: completionModels, servers: listMcpServers().map((s) => s.name),
+    model: CONFIG.model, skills: liveSkills(), models: completionModels, servers: listMcpServers().map((s) => s.name),
   }, rows - 10);
 
   useEffect(() => {
@@ -227,7 +227,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
   // as the prompt (a user highlight bar, or a note for /skill); the loop appends
   // `content` to `messages` itself. The permission menu + ask_user form raise a
   // `pending` prompt that returns a promise the loop awaits.
-  const runConversationTurn = (content: string | null, display?: Item, attachments: readonly ImageAttachment[] = []) => {
+  const runConversationTurn = (content: string | readonly string[] | null, display?: Item, attachments: readonly ImageAttachment[] = []) => {
     setDetails(null);
     setDetailOffset(0);
     if (display) pushItem(display);
@@ -461,7 +461,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
       setAutoEnabled(autoMode.enabled);
       return true;
     }
-    const info = runInfoCommand(line, { skills, costMeter }); // /help /cost /memory /stats /todos /bg /team /tasks /skills /undo /diff
+    const info = runInfoCommand(line, { skills: liveSkills(), costMeter }); // /help /cost /memory /stats /todos /bg /team /tasks /skills /undo /diff
     if (info !== null) {
       note(info);
       return true;
@@ -511,9 +511,12 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
       return true;
     }
 
-    // /skill <name> — run a skill on the user's behalf (works for user-only skills)
+    // /skill <name> [args] — run a skill on the user's behalf (works for user-only
+    // skills). Claude Code's pair: a <command-name> marker, then the body.
     if (line === "/skill" || line.startsWith("/skill ")) {
-      const name = line.slice("/skill".length).trim();
+      const skills = liveSkills(); // live — a SKILL.md added mid-session is found
+      const [name = "", ...rest] = line.slice("/skill".length).trim().split(/\s+/);
+      const args = rest.join(" ");
       if (!name) {
         note(chalk.dim(skills.length ? `usage: /skill <name> — available: ${skills.map((s) => s.name).join(", ")}` : "(no skills in this project — add one at .mini-agent/skills/<name>/SKILL.md)"));
         return true;
@@ -523,8 +526,8 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
         note(chalk.yellow(`(no skill named "${name}")`));
         return true;
       }
-      autoMode.recordRequest(`Run the "${s.name}" skill.`);
-      runConversationTurn(`Run the "${s.name}" skill.\n\n${skillInstructions(s)}`, { kind: "note", text: chalk.dim(`(running skill: ${s.name})`) });
+      autoMode.recordRequest(`/${s.name}${args ? ` ${args}` : ""}`);
+      runConversationTurn(userSkillMessages(s, args), { kind: "note", text: chalk.dim(`(running skill: ${s.name})`) });
       return true;
     }
 
@@ -601,6 +604,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
         return true;
       }
       default:
+        if (line.startsWith("/") && findSkill(liveSkills(), line.slice(1).split(/\s+/)[0])) return handleCommand(`/skill ${line.slice(1)}`); // /<skill-name> [args], like Claude Code
         if (line.startsWith("/")) {
           note(chalk.dim(`unknown command: ${line} — try /help`));
           return true; // consumed — don't send typos to the model

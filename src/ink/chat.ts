@@ -30,9 +30,11 @@ export interface TurnHooks {
 // rest. All screen output flows through hooks.output (the Ink sink).
 export function makeRunTurn(client: OpenAI, messages: OpenAI.ChatCompletionMessageParam[]) {
   let reviewBudget = new AutoReviewBudget();
-  return async (input: string | null, hooks: TurnHooks): Promise<LoopResult> => {
+  // input: one user message, or several in order (a /skill run sends the
+  // <command-name> marker, then the skill body); images ride on the first.
+  return async (input: string | readonly string[] | null, hooks: TurnHooks): Promise<LoopResult> => {
     if (input !== null) reviewBudget = new AutoReviewBudget();
-    if (input !== null) messages.push({ role: "user", content: userContent(input, hooks.images ?? []) });
+    if (input !== null) [input].flat().forEach((text, i) => messages.push({ role: "user", content: i === 0 ? userContent(text, hooks.images ?? []) : text }));
     return runLoop(messages, {
       client,
       model: CONFIG.model,

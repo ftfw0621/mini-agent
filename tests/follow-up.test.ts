@@ -89,7 +89,7 @@ try {
   queue.enqueue({ text: "New direction", content: "New direction" }); controller.abort();
   check("immediate send interrupts without losing queued input", (await running).reason === TerminateReason.UserInterrupt && queue.size === 1);
   await makeRunTurn(finalClient as never, resumeMessages)(null, { ...base, followUps: queue });
-  check("restart delivers exactly one follow-up without a synthetic empty user turn", resumeMessages.filter((m) => m.role === "user").length === 2 && queue.size === 0);
+  check("restart delivers exactly one follow-up without a synthetic empty user turn", resumeMessages.filter((m) => m.role === "user" && !String(m.content).startsWith("<system-reminder>")).length === 2 && queue.size === 0);
 
   let approvalRound = 0;
   const approvalRequests: OpenAI.ChatCompletionMessageParam[][] = [];

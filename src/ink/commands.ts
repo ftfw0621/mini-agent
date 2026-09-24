@@ -45,7 +45,7 @@ export const SESSION_HELP = `commands:
   /diff      show every file changed this session, as a diff from where it started
   /resume    list recent sessions in this project and continue one of them
   /skills    list the reusable skills available in this project
-  /skill <name>  run a skill yourself (works even for user-only skills)
+  /skill <name> [args]  run a skill yourself (works even for user-only skills); /<name> [args] works too
   exit       leave (Ctrl+C does the same)
 
 keys (during or after a turn):

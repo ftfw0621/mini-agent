@@ -44,7 +44,7 @@ let modelLists = 0;
 const client = { models: { list: async () => { modelLists++; return { data: [{ id: "deepseek-flash" }, { id: "deepseek-v4-pro" }] }; } }, chat: { completions: { create: async () => ({ choices: [{ message: { content: "UI title" } }] }) } } };
 const autoMode = new AutoMode(undefined, { apiKey: "" });
 autoMode.enabled = true;
-const session = { client, messages: [], systemMessage: "test", initialSessionId: "ui-test", startedAt: Date.now(), costMeter: new CostMeter(DEFAULT_PRICING), skills: [parseSkill("---\ndescription: Review this project\n---\nInspect files", "review")], autoMode, model: "test", dir: "demo", branch: null, bannerText: "Follow-up fixture", notices: [], getStatus: () => ({ ctxPct: 1, cost: 0, elapsedMs: 1000 }), disconnectMcp: () => {} } as unknown as InkSession;
+const session = { client, messages: [], systemMessage: "test", initialSessionId: "ui-test", startedAt: Date.now(), costMeter: new CostMeter(DEFAULT_PRICING), skills: () => [parseSkill("---\ndescription: Review this project\n---\nInspect files", "review")], autoMode, model: "test", dir: "demo", branch: null, bannerText: "Follow-up fixture", notices: [], getStatus: () => ({ ctxPct: 1, cost: 0, elapsedMs: 1000 }), disconnectMcp: () => {} } as unknown as InkSession;
 let hooks!: TurnHooks;
 let turns = 0;
 let approved: boolean | undefined;
