@@ -1,5 +1,5 @@
 import path from "node:path"; // locate the mock server
-import { connectMcpServers, reloadMcpServers } from "../src/mcp.js"; // the unit under test
+import { connectMcpServers, reloadMcpServers, listMcpServers, mcpProblems, mcpActionsFor, mcpServerDetails, runMcpAction, disableMcpServer } from "../src/mcp.js"; // the unit under test
 import { CONFIG } from "../src/config.js"; // inject a server (the test seam)
 import { tools, dispatch } from "../src/tools.js"; // verify registration + execution
 import { checkPermission } from "../src/permissions.js"; // verify the gate treats MCP tools as "ask"
@@ -57,6 +57,39 @@ checkContains("reconnected server still runs", await dispatch("mcp__calc2__add",
 
 await reloadMcpServers({}); // remove everything
 check("empty map unregisters every mcp tool", !Object.keys(tools).some((n) => n.startsWith("mcp__")));
+
+// ---- background connect (the Ink UI's startup): never blocks, reports problems -----------
+{
+  CONFIG.mcpServers = { calc, dead: { url: "http://127.0.0.1:1/mcp" } }; // port 1: connection refused
+  const started = Date.now();
+  const stop = await connectMcpServers({ background: true });
+  check("background connect returns immediately", Date.now() - started < 200);
+  check("servers start out pending", mcpProblems().pending === 2);
+  check("the pending server's tools are not there yet", !("mcp__calc__add" in tools));
+  check("a working server connects in the background", await waitFor(() => "mcp__calc__add" in tools));
+  check("a failing server is reported for the red badge", await waitFor(() => mcpProblems().failed.join() === "dead"));
+  check("nothing left pending", mcpProblems().pending === 0);
+
+  // The /mcp server screen, Claude Code's fields and actions.
+  const info = listMcpServers().find((s) => s.name === "calc")!;
+  check("actions follow Claude Code's menu", mcpActionsFor(info).map((a) => a.label).join(",") === "View tools,Reconnect,Disable");
+  const http = { ...info, transport: "http" as const, authenticated: true };
+  check("an authenticated http server offers re-auth and clear-auth", mcpActionsFor(http).map((a) => a.label).join(",") === "View tools,Re-authenticate,Clear authentication,Reconnect,Disable");
+  const details = mcpServerDetails(info);
+  for (const field of ["Status:", "Protocol:", "Command:", "Config location:", "Capabilities:", "Tools:"]) checkContains(`details show ${field}`, details, field);
+  checkContains("details show the declared capability", details, "tools");
+  checkContains("View tools lists the server's tools", await runMcpAction("calc", "view-tools"), "add");
+  checkContains("clear-auth on a server without tokens still reconnects", await runMcpAction("calc", "clear-auth"), "Cleared authentication for calc");
+
+  // A slow background connect must not undo a later user action.
+  CONFIG.mcpServers = { calc, calc3: calc };
+  await connectMcpServers({ background: true });
+  await disableMcpServer("calc3"); // user disables it while it is still connecting
+  await new Promise((r) => setTimeout(r, 500));
+  check("disabling a pending server wins over its late connect", !("mcp__calc3__add" in tools) && listMcpServers().find((s) => s.name === "calc3")?.status === "disabled");
+  stop();
+  await reloadMcpServers({});
+}
 
 disconnect(); // kill the server subprocess
 CONFIG.mcpServers = {}; // reset for any suite that follows

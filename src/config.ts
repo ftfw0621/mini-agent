@@ -133,6 +133,17 @@ export function readMcpServers(): Record<string, McpServerDef> | null {
   return { ...(layers[0].mcpServers ?? {}), ...(layers[1].mcpServers ?? {}) }; // same merge as startup: project wins
 }
 
+// Which settings file defines this MCP server (the /mcp panel's "Config
+// location"). Project entries override global ones, so check the project first.
+export function mcpConfigPath(name: string): string {
+  try {
+    if ((JSON.parse(fs.readFileSync(PROJECT_SETTINGS_PATH, "utf8")) as SettingsFile).mcpServers?.[name]) return PROJECT_SETTINGS_PATH;
+  } catch {
+    /* no project settings (or unreadable) — it's global */
+  }
+  return GLOBAL_SETTINGS_PATH;
+}
+
 // User permission rules, both layers concatenated (deny from either layer wins).
 export interface PermissionRules {
   allow: string[]; // widens what runs without asking — can NEVER override a deny

@@ -80,9 +80,10 @@ export async function buildInkSession(opts: { resume?: boolean } = {}): Promise<
   initTelemetry(sessionId);
   emit("agent_session_start", { mode: "repl" });
 
-  // MCP servers — must finish before the first model call so their tools appear
-  // in the manual. A server that fails to start is skipped, never fatal.
-  const disconnectMcp = await connectMcpServers();
+  // MCP servers connect in the BACKGROUND, like Claude Code: the prompt is
+  // ready at once, each server's tools join the next model call the moment it
+  // connects, and a failure is flagged in the status bar (red, bottom right).
+  const disconnectMcp = await connectMcpServers({ background: true });
   process.on("exit", disconnectMcp);
   process.on("exit", watchMcpConfig()); // hot reload: a settings.json save adds/removes/reconnects servers, no restart
   process.on("exit", killAllBackground); // SIGKILL any background job so it never outlives the agent

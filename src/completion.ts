@@ -72,7 +72,7 @@ export function slashCompletions(input: string, ctx: CompletionContext): { items
     ], input.trimEnd()) };
   }
   if (command === "/mcp") {
-    const items = [{ value: "/mcp", description: "Open MCP server menu" }, { value: "/mcp reload", description: "Re-read MCP servers from settings.json" }, ...["reconnect", "auth", "enable", "disable"].flatMap((action) => ctx.servers.map((name) => ({ value: `/mcp ${action} ${name}`, description: `${action} ${name}` })))];
+    const items = [{ value: "/mcp", description: "Open MCP server menu" }, { value: "/mcp reload", description: "Re-read MCP servers from settings.json" }, ...["tools", "auth", "clear-auth", "reconnect", "enable", "disable"].flatMap((action) => ctx.servers.map((name) => ({ value: `/mcp ${action} ${name}`, description: `${action} ${name}` })))];
     return { items: filter(items, input.trimEnd()) };
   }
   return { items: filter(COMMANDS), hint: "Commands" };

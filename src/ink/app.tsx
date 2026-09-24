@@ -38,7 +38,7 @@ import { detailPage, summarizeActivity } from "./activity.js";
 import { useTerminalSize } from "./viewport.js";
 import { makeInkSink, type Item } from "./sink.js"; // turns the loop's output into React state
 import { runInfoCommand, SESSION_HELP, mcpStatusText } from "./commands.js"; // the non-interactive slash commands + /mcp status
-import { listMcpServers, mcpActionsFor, reloadMcpServers, runMcpAction } from "../mcp.js"; // /mcp: list + per-server actions
+import { listMcpServers, MCP_SUBCOMMANDS, mcpActionsFor, mcpProblems, mcpServerDetails, reloadMcpServers, runMcpAction } from "../mcp.js"; // /mcp: list + per-server actions
 import type { TurnHooks } from "./chat.js"; // what one turn needs from the App
 import type { InkSession } from "./setup.js"; // the bootstrapped session context
 
@@ -55,7 +55,7 @@ export interface StatusData {
 // readline REPL uses; onChoose(-1) means cancelled. `form` is the ask_user
 // multi-question form (form.ts's pure state machine).
 type Pending =
-  | { kind: "select"; header: string; options: string[]; onChoose: (index: number) => void }
+  | { kind: "select"; header: string; body?: string; options: string[]; onChoose: (index: number) => void }
   | { kind: "form"; questions: FormQuestion[]; resolve: (answers: FormAnswer[] | null) => void };
 
 // Injected when plan mode turns on, so the model knows the rules it now lives in.
@@ -194,6 +194,28 @@ function StatusBar({ model, dir, branch, status }: { model: string; dir: string;
   );
 }
 
+// Bottom-right MCP health, like Claude Code's footer notice: red when a
+// server failed, yellow when one needs sign-in, dim while servers are still
+// connecting in the background; nothing at all when every server is fine.
+// Re-read on every render (the app ticks once a second), so it follows
+// background connects, /mcp actions and settings reloads with no wiring.
+function McpBadge() {
+  const { failed, needsAuth, pending } = mcpProblems();
+  const parts: React.ReactNode[] = [];
+  if (failed.length) parts.push(<Text key="f" color="red">✗ MCP failed: {failed.join(", ")}</Text>);
+  if (needsAuth.length) parts.push(<Text key="a" color="yellow">△ {needsAuth.join(", ")} needs auth</Text>);
+  if (pending) parts.push(<Text key="p" dimColor>◌ connecting {pending} MCP server{pending === 1 ? "" : "s"}…</Text>);
+  if (!parts.length) return null;
+  return (
+    <Box flexShrink={1} marginLeft={2}>
+      <Text wrap="truncate-end">
+        {parts.map((p, i) => <React.Fragment key={i}>{i > 0 && <Text dimColor>{"  ·  "}</Text>}{p}</React.Fragment>)}
+        {failed.length || needsAuth.length ? <Text dimColor>{"  · /mcp"}</Text> : null}
+      </Text>
+    </Box>
+  );
+}
+
 // One human note per non-Done ending, so the user always learns why a turn stopped.
 const EXIT_NOTES: Partial<Record<TerminateReason, string>> = {
   [TerminateReason.ReviewLimit]: "Repeated automatic denials — stopped. Tell the agent how to proceed; prohibited actions were not executed.",
@@ -274,10 +296,10 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
   }, [session.initialTitle]);
 
   // Open a one-of-N menu and run `onChoose` with the picked index (-1 = cancel).
-  const openSelect = (header: string, options: string[], onChoose: (i: number) => void) => {
+  const openSelect = (header: string, options: string[], onChoose: (i: number) => void, body?: string) => {
     setDetails(null);
     setMenuSel(0);
-    setPending({ kind: "select", header, options, onChoose });
+    setPending({ kind: "select", header, body, options, onChoose });
   };
 
   // Run one conversation turn through the real loop. `display` is what scrolls up
@@ -453,11 +475,11 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
     }
 
     // Direct subcommands (scriptable, matching Claude Code): /mcp reconnect|auth|enable|disable <name>
-    if (parts.length >= 2 && ["reconnect", "auth", "authenticate", "enable", "disable"].includes(parts[0])) {
+    if (parts.length >= 2 && MCP_SUBCOMMANDS[parts[0]]) {
       const name = parts.slice(1).join(" ");
       setBusy(true);
       try {
-        const action = parts[0] === "auth" || parts[0] === "authenticate" ? "authenticate" : (parts[0] as "reconnect" | "enable" | "disable");
+        const action = MCP_SUBCOMMANDS[parts[0]];
         const msg = await runMcpAction(name, action, (url) => note(chalk.dim(`authenticate in your browser: ${url}`)));
         note(chalk.dim(msg));
       } catch (err) {
@@ -478,14 +500,14 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
       if (i < 0) return note(chalk.dim("(cancelled)"));
       const server = servers[i];
       const actions = mcpActionsFor(server);
-      openSelect(`${server.name} — ${mcpStatusText(server)}`, actions.map((a) => a.label), (j) => {
+      openSelect(`${server.name} MCP Server`, actions.map((a) => a.label), (j) => {
         if (j < 0) return note(chalk.dim("(cancelled)"));
         setBusy(true);
         runMcpAction(server.name, actions[j].action, (url) => note(chalk.dim(`authenticate in your browser: ${url}`)))
           .then((msg) => note(chalk.dim(msg)))
           .catch((err) => note(chalk.yellow((err as Error).message)))
           .finally(() => setBusy(false));
-      });
+      }, mcpServerDetails(server)); // Claude Code's server screen: status, auth, protocol, URL, config, capabilities, tools
     });
   };
 
@@ -962,6 +984,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
       {pending?.kind === "select" && (
         <Box flexDirection="column" marginTop={1}>
           <Text color="yellow">{pending.header}</Text>
+          {pending.body && <Box marginY={1}><Text>{pending.body}</Text></Box>}
           <Text>{renderMenu(pending.options, menuSel)}</Text>
           <Text>{MENU_HINT}</Text>
         </Box>
@@ -1063,7 +1086,10 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
       {rows >= 20 && busy && !details && !selectedAgent && !pending && <Text dimColor wrap="truncate-end">Enter queue follow-up · Ctrl+Enter interrupt and send now</Text>}
 
       {rows >= 20 && !details && !selectedAgent && !pending && !completion.visible && <AgentList agents={agents} focus={subAgentFocus} viewing={subAgentDetail} mainBusy={busy} maxRows={Math.max(2, Math.min(3, rows - 24))} />}
-      <StatusBar model={CONFIG.model} dir={dir} branch={branch} status={getStatus()} />
+      <Box justifyContent="space-between">
+        <Box flexShrink={1}><StatusBar model={CONFIG.model} dir={dir} branch={branch} status={getStatus()} /></Box>
+        <McpBadge />
+      </Box>
       {(planMode || autoEnabled || CONFIG.bypassPermissions) && (
         <Text wrap="truncate-end">
           <Text color={planMode ? "magenta" : CONFIG.bypassPermissions ? "red" : "yellow"}>{planMode ? "⏸ plan mode on" : CONFIG.bypassPermissions ? "▶▶ bypass permissions on" : "▶▶ auto mode on"}</Text>

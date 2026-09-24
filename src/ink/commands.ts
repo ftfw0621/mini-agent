@@ -30,7 +30,7 @@ export const SESSION_HELP = `commands:
   /memory    show the durable facts the agent remembers about this project
   /status    session usage and vendor account balance/cost
   /cost      tokens, cache hit rate and estimated spend this session (local)
-  /mcp       list configured MCP servers + status; select one to authenticate / reconnect / disable
+  /mcp       list configured MCP servers + status; select one to view tools / authenticate / clear auth / reconnect / disable
   /mcp reload  re-read mcpServers from settings.json (saves are also picked up automatically)
   /plan      toggle plan mode — research-only; the agent presents a plan you approve before any change
   /effort [level]  list/select the current model’s supported reasoning effort
@@ -64,6 +64,8 @@ keys (during or after a turn):
 // Colored status word for an MCP server (shared by the Ink + readline /mcp UIs).
 export function mcpStatusText(info: McpServerInfo): string {
   switch (info.status) {
+    case "pending":
+      return chalk.dim("connecting…");
     case "connected":
       return chalk.green("connected");
     case "needs-auth":

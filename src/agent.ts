@@ -13,7 +13,7 @@ import { newSessionId, saveSession, latestSession, listSessions, loadSession, se
 import { generateSessionTitle, setTerminalTitle } from "./title.js"; // concise session name, generated after the first message + the terminal tab that shows it
 import { initTelemetry, emit, statsReport } from "./telemetry.js"; // local-only event log + /stats
 import { runHooks } from "./hooks.js"; // SessionStart lifecycle hook
-import { connectMcpServers, listMcpServers, mcpActionsFor, reloadMcpServers, runMcpAction, watchMcpConfig } from "./mcp.js"; // external tool servers (MCP) + /mcp
+import { connectMcpServers, listMcpServers, MCP_SUBCOMMANDS, mcpActionsFor, mcpServerDetails, reloadMcpServers, runMcpAction, watchMcpConfig } from "./mcp.js"; // external tool servers (MCP) + /mcp
 import { Judge } from "./judge.js"; // optional LLM permission classifier
 import { AutoMode } from "./auto.js";
 import { effortMenu, setEffort, selectedEffort } from "./effort.js";
@@ -100,7 +100,7 @@ const SESSION_HELP = `commands:
   /memory    show the durable facts the agent remembers about this project
   /status    session usage and vendor account balance/cost
   /cost      tokens, cache hit rate and estimated spend this session (local)
-  /mcp       list configured MCP servers + status; select one to authenticate / reconnect / disable
+  /mcp       list configured MCP servers + status; select one to view tools / authenticate / clear auth / reconnect / disable
   /mcp reload  re-read mcpServers from settings.json (saves are also picked up automatically)
   /plan      toggle plan mode — research-only; the agent presents a plan you approve before any change
   /effort [level]  list/select the current model’s supported reasoning effort
@@ -494,7 +494,7 @@ async function main() {
 
   // /mcp — list configured MCP servers + status, then manage one (like Claude Code).
   const mcpStatusText = (status: string): string =>
-    status === "connected" ? chalk.green("connected") : status === "needs-auth" ? chalk.yellow("needs auth") : status === "failed" ? chalk.red("failed") : chalk.dim("disabled");
+    status === "connected" ? chalk.green("connected") : status === "needs-auth" ? chalk.yellow("needs auth") : status === "failed" ? chalk.red("failed") : status === "pending" ? chalk.dim("connecting…") : chalk.dim("disabled");
 
   const handleMcpCommand = async (arg: string): Promise<void> => {
     const parts = arg.trim().split(/\s+/).filter(Boolean);
@@ -504,9 +504,9 @@ async function main() {
       console.log(chalk.dim(changes.length ? `(mcp: ${changes.join(", ")})` : "(mcp: no changes in settings.json)"));
       return;
     }
-    if (parts.length >= 2 && ["reconnect", "auth", "authenticate", "enable", "disable"].includes(parts[0])) {
+    if (parts.length >= 2 && MCP_SUBCOMMANDS[parts[0]]) {
       const name = parts.slice(1).join(" ");
-      const action = parts[0] === "auth" || parts[0] === "authenticate" ? "authenticate" : (parts[0] as "reconnect" | "enable" | "disable");
+      const action = MCP_SUBCOMMANDS[parts[0]];
       try {
         console.log(chalk.dim(await runMcpAction(name, action, (url) => console.log(chalk.dim(`authenticate in your browser: ${url}`)))));
       } catch (err) {
@@ -530,6 +530,7 @@ async function main() {
       return;
     }
     const server = servers[choice];
+    console.log(`\n${chalk.bold(`${server.name} MCP Server`)}\n\n${mcpServerDetails(server)}\n`); // Claude Code's server screen
     const actions = mcpActionsFor(server);
     const actionChoice = await select(actions.map((a) => a.label));
     if (actionChoice < 0) {

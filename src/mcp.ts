@@ -5,7 +5,7 @@ import os from "node:os"; // home directory for token persistence
 import path from "node:path"; // path joining
 import fs from "node:fs"; // token file persistence
 import chalk from "chalk"; // status lines
-import { CONFIG, GLOBAL_SETTINGS_PATH, PROJECT_SETTINGS_PATH, readMcpServers, type McpServerDef } from "./config.js"; // configured servers + hot reload
+import { CONFIG, GLOBAL_SETTINGS_PATH, PROJECT_SETTINGS_PATH, mcpConfigPath, readMcpServers, type McpServerDef } from "./config.js"; // configured servers + hot reload
 import { registerExternalTool, unregisterExternalTool, type Tool } from "./tools.js"; // expose discovered tools
 import { emit } from "./telemetry.js"; // observability
 
@@ -44,7 +44,7 @@ const CLIENT_INFO = { name: "mini-agent", version: "0" }; // who we say we are i
 
 interface JsonRpcResponse {
   id: number; // matches the request
-  result?: { tools?: McpToolSpec[]; content?: McpContent[]; isError?: boolean; capabilities?: { tools?: { listChanged?: boolean } } }; // success payload
+  result?: { tools?: McpToolSpec[]; content?: McpContent[]; isError?: boolean; protocolVersion?: string; capabilities?: Record<string, unknown> & { tools?: { listChanged?: boolean } } }; // success payload
   error?: { message: string }; // failure
 }
 interface JsonRpcRequest {
@@ -348,6 +348,8 @@ class McpClient {
   private nextId = 1; // JSON-RPC request id counter
 
   onToolsChanged?: () => void; // set by the registry: re-fetch this server's tools
+  protocolVersion?: string; // what the server answered in the handshake (the /mcp panel shows it)
+  capabilities: string[] = []; // e.g. ["tools", "resources"] — the top-level keys the server declared
 
   constructor(def: McpServerDef, token?: string) {
     this.transport = makeTransport(def, token);
@@ -364,6 +366,8 @@ class McpClient {
   async start(): Promise<McpToolSpec[]> {
     const init = await this.request("initialize", { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: CLIENT_INFO }, INIT_TIMEOUT_MS);
     if (init.error) throw new Error(init.error.message); // server refused to initialize
+    this.protocolVersion = init.result?.protocolVersion;
+    this.capabilities = Object.keys(init.result?.capabilities ?? {});
     this.transport.notify("notifications/initialized", {}); // tell the server we're ready
     // A server that promises tools/list_changed may change its tools later —
     // open the channel it will announce that on (HTTP's event stream).
@@ -397,7 +401,7 @@ class McpClient {
 }
 
 // ---- connection-state registry ------------------------------------------------
-export type McpServerStatus = "connected" | "failed" | "needs-auth" | "disabled";
+export type McpServerStatus = "pending" | "connected" | "failed" | "needs-auth" | "disabled"; // pending = still connecting in the background
 
 export interface McpServerInfo {
   name: string;
@@ -407,6 +411,10 @@ export interface McpServerInfo {
   error?: string;
   authenticated: boolean; // has an OAuth token (http servers only)
   url?: string;
+  command?: string; // stdio: the command line that starts it
+  protocolVersion?: string; // from the handshake, once connected
+  capabilities: string[]; // what the server declared (tools, resources, prompts…)
+  toolSpecs: { name: string; description?: string }[]; // for "View tools"
 }
 
 interface RegistryEntry {
@@ -416,7 +424,9 @@ interface RegistryEntry {
   tools: number;
   error?: string;
   toolNames: string[]; // registered mcp__<server>__<tool> names, for unregistering
+  toolSpecs?: McpToolSpec[]; // the server's own tool list, for the /mcp panel
   challenge?: AuthChallenge; // the last 401's WWW-Authenticate hints, reused by /mcp auth
+  attempt?: object; // identity of the latest connect; a slower, older attempt must not overwrite it
 }
 
 const registry = new Map<string, RegistryEntry>();
@@ -789,8 +799,10 @@ function markNeedsAuth(name: string, challenge: NeedsAuthError): void {
 // Connect a single configured server and register its tools. Updates the
 // registry with the live status. Used by connectMcpServers() at startup and by
 // /mcp reconnect / enable / auth.
-async function connectOne(name: string, retried = false): Promise<void> {
+async function connectOne(name: string, retried = false, quiet = false): Promise<void> {
   const entry = entryFor(name);
+  const attempt = {}; // this connect's identity (see the guard after the handshake)
+  entry.attempt = attempt;
   // Unregister any stale tools from a previous connection.
   for (const n of entry.toolNames) unregisterExternalTool(n);
   entry.toolNames = [];
@@ -808,25 +820,31 @@ async function connectOne(name: string, retried = false): Promise<void> {
   try {
     client.onToolsChanged = () => void refreshServerTools(name, client);
     const specs = await client.start(); // handshake + discover
+    // Connecting runs in the background now, so the world may have moved on
+    // while we waited: the user disabled it, reconnected it (a newer attempt),
+    // or a settings reload removed it. Then this result is stale — drop it.
+    if (registry.get(name) !== entry || entry.attempt !== attempt || entry.status === "disabled") return client.kill();
     entry.client = client;
     entry.tools = registerTools(name, specs, client);
     entry.toolNames = specs.map((s) => `mcp__${name}__${s.name}`);
+    entry.toolSpecs = specs;
     entry.status = "connected";
     entry.error = undefined;
     emit("agent_mcp_connected", { server: name, tools: specs.length, transport: entry.def.url ? "http" : "stdio" });
-    console.log(chalk.dim(`(mcp: ${name} — ${specs.length} tools${entry.def.url ? " over http" : ""})`)); // visible at startup / on reconnect
+    if (!quiet) console.log(chalk.dim(`(mcp: ${name} — ${specs.length} tools${entry.def.url ? " over http" : ""})`)); // visible on reconnect; a background startup stays silent (the status bar reports problems)
   } catch (err) {
     client.kill(); // don't leak the process/session
+    if (registry.get(name) !== entry || entry.attempt !== attempt || entry.status === "disabled") return; // stale attempt — its failure no longer matters
     if (err instanceof NeedsAuthError) {
       // A stale token (expired early, revoked): one refresh + retry before giving up.
-      if (!retried && stored?.refreshToken && (await refreshAccessToken(name))) return connectOne(name, true);
+      if (!retried && stored?.refreshToken && (await refreshAccessToken(name))) return connectOne(name, true, quiet);
       markNeedsAuth(name, err);
     } else {
       entry.status = "failed";
       entry.error = (err as Error).message;
     }
     emit("agent_mcp_failed", { server: name });
-    console.error(chalk.yellow(`  [mcp] ${name} ${entry.status === "needs-auth" ? `needs authentication (run /mcp auth ${name})` : "failed to start"}: ${(err as Error).message}`));
+    if (!quiet) console.error(chalk.yellow(`  [mcp] ${name} ${entry.status === "needs-auth" ? `needs authentication (run /mcp auth ${name})` : "failed to start"}: ${(err as Error).message}`));
   }
 }
 
@@ -857,6 +875,7 @@ async function refreshServerTools(name: string, client: McpClient): Promise<void
       for (const n of entry.toolNames) unregisterExternalTool(n);
       entry.tools = registerTools(name, specs, client);
       entry.toolNames = specs.map((s) => `mcp__${name}__${s.name}`);
+      entry.toolSpecs = specs;
       emit("agent_mcp_tools_changed", { server: name, tools: specs.length });
       console.log(chalk.dim(`(mcp: ${name} tools changed — ${specs.length} tools)`));
     } while (state.again);
@@ -868,10 +887,20 @@ async function refreshServerTools(name: string, client: McpClient): Promise<void
 // Connect to every configured MCP server, register their tools, and return a
 // cleanup function. Failures are isolated: a server that won't start is logged
 // and skipped — it never stops the agent or the other servers.
-export async function connectMcpServers(): Promise<() => void> {
+//
+// Two modes. The interactive UI passes background: true — the Claude Code way:
+// every server is marked "pending" and connected in PARALLEL without blocking
+// startup; the prompt is usable at once, each server's tools appear the moment
+// it connects, and a failure shows up in the status bar instead of a log line.
+// Print mode (-p) and the readline REPL await everything first: a one-shot
+// task must see all its tools on the very first model call.
+export async function connectMcpServers(options: { background?: boolean } = {}): Promise<() => void> {
   const entries = Object.keys(CONFIG.mcpServers); // configured server names
-  for (const name of entries) {
-    await connectOne(name); // sequential: a slow start doesn't starve the next one
+  if (options.background) {
+    for (const name of entries) entryFor(name).status = "pending";
+    for (const name of entries) void connectOne(name, false, true); // fire and forget; connectOne never throws
+  } else {
+    for (const name of entries) await connectOne(name); // sequential: a slow start doesn't starve the next one
   }
   return () => {
     for (const entry of registry.values()) entry.client?.kill(); // cleanup on exit
@@ -975,31 +1004,69 @@ export function listMcpServers(): McpServerInfo[] {
     return {
       name,
       transport: def.url ? "http" : "stdio",
-      status: entry?.status ?? "failed",
+      status: entry?.status ?? "pending", // configured but not attempted yet (e.g. just added to settings)
       tools: entry?.tools ?? 0,
       error: entry?.error,
       authenticated: Boolean(oauthStore[name]?.accessToken),
       url: def.url,
+      command: def.command ? [def.command, ...(def.args ?? [])].join(" ") : undefined,
+      protocolVersion: entry?.status === "connected" ? entry.client?.protocolVersion : undefined,
+      capabilities: entry?.status === "connected" ? entry.client?.capabilities ?? [] : [],
+      toolSpecs: (entry?.toolSpecs ?? []).map((t) => ({ name: t.name, description: t.description })),
     };
   });
 }
 
-export type McpAction = "authenticate" | "reconnect" | "disable" | "enable";
+export type McpAction = "view-tools" | "authenticate" | "clear-auth" | "reconnect" | "disable" | "enable";
 
-// Which actions make sense for a server in a given state. Mirrors Claude Code's
-// per-server menu: authenticate when it needs auth, reconnect when it isn't,
-// enable/disable to toggle it off/on.
+// /mcp <subcommand> <server> → the menu action it runs (scriptable, like Claude Code's /mcp).
+export const MCP_SUBCOMMANDS: Record<string, McpAction> = { tools: "view-tools", auth: "authenticate", authenticate: "authenticate", "clear-auth": "clear-auth", reconnect: "reconnect", enable: "enable", disable: "disable" };
+
+// Which actions make sense for a server in a given state — Claude Code's menu,
+// in its order: View tools, (Re-)authenticate, Clear authentication,
+// Reconnect, Disable. A disabled server offers only Enable.
 export function mcpActionsFor(info: McpServerInfo): Array<{ label: string; action: McpAction }> {
   if (info.status === "disabled") {
     return [{ label: "Enable", action: "enable" }];
   }
   const out: Array<{ label: string; action: McpAction }> = [];
+  if (info.status === "connected" && info.tools > 0) out.push({ label: "View tools", action: "view-tools" });
   if (info.transport === "http") {
     out.push({ label: info.authenticated ? "Re-authenticate" : "Authenticate", action: "authenticate" });
+    if (info.authenticated) out.push({ label: "Clear authentication", action: "clear-auth" });
   }
   out.push({ label: "Reconnect", action: "reconnect" });
   out.push({ label: "Disable", action: "disable" });
   return out;
+}
+
+// The server's details for the /mcp panel, one "Label: value" per line —
+// the same fields Claude Code's server screen shows.
+export function mcpServerDetails(info: McpServerInfo): string {
+  const ok = (s: string) => chalk.green(`✔ ${s}`);
+  const status = { connected: ok("connected"), pending: chalk.dim("◌ connecting…"), "needs-auth": chalk.yellow("△ needs authentication"), failed: chalk.red("✗ failed"), disabled: chalk.dim("○ disabled") }[info.status];
+  const rows: [string, string][] = [["Status", status + (info.status === "failed" && info.error ? chalk.dim(`  ${info.error}`) : "")]];
+  if (info.transport === "http") rows.push(["Auth", info.authenticated ? ok("authenticated") : chalk.dim("not authenticated")]);
+  if (info.protocolVersion) rows.push(["Protocol", chalk.dim(info.protocolVersion)]);
+  rows.push(info.url ? ["URL", chalk.dim(info.url)] : ["Command", chalk.dim(info.command ?? "")]);
+  rows.push(["Config location", chalk.dim(mcpConfigPath(info.name))]);
+  if (info.capabilities.length) rows.push(["Capabilities", info.capabilities.join(" · ")]);
+  if (info.status === "connected") rows.push(["Tools", chalk.dim(`${info.tools} tool${info.tools === 1 ? "" : "s"}`)]);
+  const width = Math.max(...rows.map(([k]) => k.length)) + 3;
+  return rows.map(([k, v]) => chalk.bold(`${k}:`.padEnd(width)) + v).join("\n");
+}
+
+// What the status bar should flag: servers that failed or need auth, and how
+// many are still connecting. Claude Code shows the same in its footer.
+// Only servers we actually tried count (the registry), so a session that never
+// connects MCP (tests, a front-end without it) shows nothing.
+export function mcpProblems(): { failed: string[]; needsAuth: string[]; pending: number } {
+  const live = [...registry.entries()].filter(([name]) => name in CONFIG.mcpServers);
+  return {
+    failed: live.filter(([, e]) => e.status === "failed").map(([name]) => name),
+    needsAuth: live.filter(([, e]) => e.status === "needs-auth").map(([name]) => name),
+    pending: live.filter(([, e]) => e.status === "pending").length,
+  };
 }
 
 // Trade the stored refresh token for a new access token, at the token endpoint
@@ -1061,6 +1128,25 @@ export async function authenticateMcpServer(name: string, onUrl?: (url: string) 
     : `Authentication done, but ${name} is ${status} — use /mcp reconnect ${name} to retry.`;
 }
 
+// Forget a server's stored OAuth tokens, then reconnect — without a token it
+// comes back as "needs auth" (or connected, if its config carries a static
+// header). The next /mcp auth starts a fresh browser flow.
+export async function clearMcpAuthentication(name: string): Promise<string> {
+  if (!CONFIG.mcpServers[name]) return `No MCP server named "${name}"`;
+  delete oauthStore[name];
+  writeOAuthStore(oauthStore);
+  await connectOne(name, false, true);
+  return `Cleared authentication for ${name}${entryFor(name).status === "needs-auth" ? ` — run /mcp auth ${name} to sign in again` : ""}.`;
+}
+
+// The tool list as text (name + the first line of its description).
+export function describeMcpTools(name: string): string {
+  const info = listMcpServers().find((s) => s.name === name);
+  if (!info) return `No MCP server named "${name}"`;
+  if (!info.toolSpecs.length) return `${name} has no tools${info.status === "connected" ? "" : ` (${info.status})`}.`;
+  return [`${name} — ${info.toolSpecs.length} tool${info.toolSpecs.length === 1 ? "" : "s"}:`, ...info.toolSpecs.map((t) => `  ${chalk.bold(t.name)}${t.description ? chalk.dim(`  ${t.description.split("\n")[0].slice(0, 100)}`) : ""}`)].join("\n");
+}
+
 // Disconnect and reconnect a single server (re-registering its tools). A stale
 // stored token is refreshed inside connectOne, so this is just: connect again.
 export async function reconnectMcpServer(name: string): Promise<string> {
@@ -1097,6 +1183,10 @@ export async function enableMcpServer(name: string): Promise<string> {
 // Run one action from mcpActionsFor and return the note to display.
 export async function runMcpAction(name: string, action: McpAction, onUrl?: (url: string) => void): Promise<string> {
   switch (action) {
+    case "view-tools":
+      return describeMcpTools(name);
+    case "clear-auth":
+      return clearMcpAuthentication(name);
     case "authenticate":
       return authenticateMcpServer(name, onUrl);
     case "reconnect":
