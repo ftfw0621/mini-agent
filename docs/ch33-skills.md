@@ -138,6 +138,68 @@ case "skill":
 
 它补上了手册 §18 的核心:**给 agent 加能力,从「改代码发版」降级成「写个 Markdown 存盘」。** 这是 Claude Code 一个标志性的扩展点,也是 mini-agent 从「能用」走向「可生长」的一步。
 
+## 后续升级:对齐 Claude Code 的消息机制,改完不用重启
+
+> 上面第 1~5 步是 `day33` 的原始实现。后来对照 Claude Code 源码,把 skill 的「消息形状」整个换成了它的做法,并支持热加载。代码见 main 上的 `src/skills.ts`。
+
+### 列表不再放进工具说明书,改成 `<system-reminder>`
+
+第 3 步把列表塞进 `skill` 工具的 description,有两个问题:一是**加一个 skill 就改一次工具说明书**,工具列表在缓存前缀里,一改前缀就失效(Day 18);二是这份说明书只能在启动时生成,**中途新加的 skill 模型永远看不到**。
+
+Claude Code 的做法:`skill` 工具的说明书是**固定的**,只说「可用的 skill 列在对话里的 system-reminder 消息中」。列表本身作为一条 **user 消息**、用 `<system-reminder>` 包起来,在调用模型前插进对话:
+
+```text
+<system-reminder>
+The following skills are available for use with the skill tool:
+
+- changelog: Add an entry to the project changelog - When the user asks to record a change in CHANGELOG.md
+</system-reminder>
+```
+
+每行的格式是 `- 名字: description - when_to_use`,和 Claude Code 一致。而且**只发增量**:对话里已经发过的行不再重复发,新加的 skill、或者改过描述的 skill,才会补发一条。
+
+「哪些已经发过」不单独记账,而是**直接从对话记录里读回来**:扫一遍历史里的列表消息,里面有的就算发过。这样 `/clear`(历史清空 → 重新发全量)、`--resume`(历史里已有 → 不重复)、上下文压缩(旧列表被压掉 → 重新发)都自然正确,不需要任何额外处理。
+
+### 调用 skill:工具结果只说「启动了」,正文单独发
+
+以前 `skill` 工具直接把正文当工具结果返回。现在和 Claude Code 一样拆成两步:
+
+1. 工具参数是 `{ skill, args }`,工具结果只有一行 `Launching skill: changelog`。
+2. 这一轮**所有**工具结果都写回之后,loop 再追加一条 user 消息放正文:
+
+```text
+Base directory for this skill: /path/to/.mini-agent/skills/changelog
+
+1. Read CHANGELOG.md (create it if missing).
+...
+```
+
+为什么要等所有工具结果之后?因为 OpenAI 协议要求:一个 assistant 回合里的每个 `tool_call`,它的 `tool` 结果必须紧跟在后面、中间不能插别的消息。所以正文只能排在这一轮的工具结果全部写完之后。
+
+`Base directory` 让正文里的相对路径(比如 `scripts/check.sh`)有了落脚点。参数替换也照搬 Claude Code:`$ARGUMENTS` 是完整参数,`$0`、`$ARGUMENTS[1]` 取单个参数;正文里没写占位符的话,参数会以 `ARGUMENTS: ...` 附在末尾,不会被悄悄丢掉。
+
+### 用户手动触发:先发标记,再发正文
+
+`/skill changelog 修复登录 bug`(或者直接 `/changelog 修复登录 bug`)会发两条 user 消息:
+
+```text
+<command-message>changelog</command-message>
+<command-name>/changelog</command-name>
+<command-args>修复登录 bug</command-args>
+```
+
+然后是正文。`<command-name>` 标记告诉模型「这个 skill 已经加载好了」,`skill` 工具的说明书里也写明:看到这个标记就直接照着做,不要再调一次工具。
+
+### 热加载:每次调用模型前看一眼文件
+
+每次调用模型前,把 skill 目录下所有 `SKILL.md` 的路径、修改时间、大小拼成一个「指纹」,和上次比一下。变了就重新加载,顺便重新判断要不要注册 `skill` 工具(第一个 skill 出现时自动注册)。再配合上面的增量列表,新加、修改的 skill 在下一次调用模型时就能被模型看到,**不用重启**。
+
+Claude Code 用的是文件监听(chokidar)。这里没用监听,因为每次调用前几次 `readdir` + `stat` 的成本,和一次模型调用比可以忽略,而且没有定时器要清理、没有防抖要调、也没有竞态。
+
+### 还没移植的
+
+Claude Code 的 skill 还支持:在独立上下文里运行(`context: fork`)、正文里的 `` !`cmd` `` 命令展开、按访问的文件发现嵌套目录里的 `.claude/skills`、把 `allowed-tools` 变成真正的权限授予。这些都没做——本仓库里 `allowed-tools` 仍然只是附在正文末尾的一句提示,真正的拦截还是 Day 4 的权限闸门。
+
 ---
 
 *本章对应 commit:`Day 33: Markdown-as-plugin skill system`(tag `day33`)*
