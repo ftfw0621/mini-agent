@@ -33,7 +33,7 @@ import { promptSelect, promptForm } from "./menu.js"; // arrow-key approval menu
 import { editLine } from "./editor.js"; // our own line editor (keeps the status footer pinned even when input wraps)
 import { normalizeDroppedPaths } from "./drop.js"; // drag-and-drop: a dropped file's path → a clean absolute path in the input
 import { rememberTool, readMemory, readMemoryTyped, extractMemories, MEMORY_PATH } from "./memory.js"; // long-term project memory + auto-extract
-import { currentSkills, findSkill, userSkillMessages } from "./skills.js"; // Markdown-as-plugin skills
+import { allSkills, currentSkills, findSkill, skillLocked, skillMode, userSkillMessages } from "./skills.js"; // Markdown-as-plugin skills
 import { initCostMeter, DEFAULT_PRICING } from "./cost.js"; // token & cost accounting for /cost
 import { launchInk } from "./ink/launch.js"; // the Ink REPL — the default front-end for interactive sessions
 import { listBackground, hasRunningBackground, killAllBackground } from "./background.js"; // background tasks: /bg view + kill-on-exit (Day 37)
@@ -114,7 +114,7 @@ const SESSION_HELP = `commands:
   /undo      revert the most recent file write (write_file / edit_file) this session
   /diff      show every file changed this session, as a diff from where it started
   /resume    list recent sessions in this project and continue one of them
-  /skills    list the reusable skills available in this project
+  /skills    manage skills: turn each on, off, or user-only (search with /, sort with t)
   /skill <name> [args]  run a skill yourself (works even for user-only skills); /<name> [args] works too
   exit       leave (Ctrl+C at the prompt does the same)
 
@@ -615,14 +615,15 @@ async function main() {
     }
     switch (line) {
       case "/skills": {
-        const skills = currentSkills();
+        const skills = allSkills(); // every skill, with its on / user-only / off state (toggle them in the Ink UI's /skills)
         if (!skills.length) {
           console.log(chalk.dim("(no skills — add one at .mini-agent/skills/<name>/SKILL.md or ~/.config/mini-agent/skills/)"));
           return true;
         }
         console.log(chalk.dim(`skills in this project:`));
         for (const s of skills) {
-          const who = s.disableModelInvocation ? chalk.yellow("user-only") : chalk.green("model+user");
+          const mode = skillMode(s);
+          const who = mode === "on" ? chalk.green("on") : mode === "off" ? chalk.dim("off") : chalk.yellow(skillLocked(s) ? "user-only (locked)" : "user-only");
           console.log(chalk.dim(`  ${s.name} [${who}${chalk.dim("]")} — ${(s.whenToUse || s.description).slice(0, 70)}`));
         }
         return true;

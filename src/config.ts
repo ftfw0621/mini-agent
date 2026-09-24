@@ -66,6 +66,7 @@ interface SettingsFile {
   subAgentModel?: string; // model for delegated sub-agents (task tool); defaults to the main model
   baseURL?: string; // which OpenAI-compatible endpoint
   contextWindow?: number; // the model's context size in tokens
+  skillOverrides?: Record<string, "off" | "user-only">; // /skills toggles: a skill turned off, or hidden from the model (absent = on)
   contextWindows?: Record<string, number>; // per-model windows, e.g. { "deepseek-chat": 128000 } — /model switches follow them
   permissions?: {
     allow?: string[]; // bash first-words (e.g. "cargo") or "tool:<name>" to skip asking
@@ -170,6 +171,8 @@ export const CONFIG = {
   // strong one as an "advisor" to double-check. undefined → use the main model.
   subAgentModel:
     process.env.MINI_AGENT_SUBAGENT_MODEL || projectSettings.subAgentModel || globalSettings.subAgentModel || undefined,
+  // /skills on/off/user-only choices. Project entries override global ones.
+  skillOverrides: { ...(globalSettings.skillOverrides ?? {}), ...(projectSettings.skillOverrides ?? {}) } as Record<string, "off" | "user-only">,
   // Per-model windows (context.ts contextWindowFor): project entries override global ones.
   contextWindows: { ...(globalSettings.contextWindows ?? {}), ...(projectSettings.contextWindows ?? {}) } as Record<string, number>,
   contextWindow:

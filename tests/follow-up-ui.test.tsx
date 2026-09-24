@@ -46,7 +46,8 @@ let modelLists = 0;
 const client = { models: { list: async () => { modelLists++; return { data: [{ id: "deepseek-flash" }, { id: "deepseek-v4-pro" }] }; } }, chat: { completions: { create: async () => ({ choices: [{ message: { content: "UI title" } }] }) } } };
 const autoMode = new AutoMode(undefined, { apiKey: "" });
 autoMode.enabled = true;
-const session = { client, messages: [], systemMessage: "test", initialSessionId: "ui-test", startedAt: Date.now(), costMeter: new CostMeter(DEFAULT_PRICING), skills: () => [parseSkill("---\ndescription: Review this project\n---\nInspect files", "review")], autoMode, model: "test", dir: "demo", branch: null, bannerText: "Follow-up fixture", notices: [], getStatus: () => ({ ctxPct: 1, cost: 0, elapsedMs: 1000 }), disconnectMcp: () => {} } as unknown as InkSession;
+const reviewSkill = parseSkill("---\ndescription: Review this project\n---\nInspect files", "review");
+const session = { client, messages: [], systemMessage: "test", initialSessionId: "ui-test", startedAt: Date.now(), costMeter: new CostMeter(DEFAULT_PRICING), skills: () => [reviewSkill], allSkills: () => [reviewSkill], autoMode, model: "test", dir: "demo", branch: null, bannerText: "Follow-up fixture", notices: [], getStatus: () => ({ ctxPct: 1, cost: 0, elapsedMs: 1000 }), disconnectMcp: () => {} } as unknown as InkSession;
 let hooks!: TurnHooks;
 let turns = 0;
 let approved: boolean | undefined;
@@ -168,11 +169,22 @@ try {
   check("the chosen skill is highlighted in the input", rawFrame.includes("38;2;177;185;249") || rawFrame.includes("\x1b[38;5;"), JSON.stringify(rawFrame.slice(0, 200)));
   chalk.level = colourLevel;
   for (let i = 0; i < 8; i++) await key("\x7f"); // clear the draft
-  await key("/skills");
+  await key("/skills ");
   check("skills shows available names and descriptions inline", frame.includes("/skill review") && frame.includes("Review this project"));
   await key("\t");
   check("skill completion fills the executable invocation", frame.includes("❯ /skill review"));
   for (let i = 0; i < "/skill review".length; i++) await key("\x7f");
+  // ---- /skills: Claude Code's manager (no mode change here — that would write the real settings file)
+  await key("/skills"); await key("\r"); await sleep();
+  check("/skills opens the manager with state, source and cost", frame.includes("Skills") && frame.includes("enter/space to cycle") && frame.includes("✔ on") && frame.includes("review · ") && frame.includes("tok"));
+  await key("/"); await key("zzz");
+  check("/ searches the skills", frame.includes('No skills match "zzz"'));
+  await key("\x1b"); // leave search (clears it)
+  check("leaving search restores the list", frame.includes("review · "));
+  await key("t");
+  check("t cycles the sort order", frame.includes("to sort (tokens)"));
+  await key("\x1b");
+  check("Esc closes the manager and reports no changes", allOutput.includes("No changes") && !frame.includes("enter/space to cycle"));
   await key("/model"); await sleep();
   check("model options come from the active endpoint", frame.includes("/model deepseek-v4-pro") && modelLists === 1);
   await key(" "); await key("\x7f");

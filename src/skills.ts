@@ -2,7 +2,7 @@ import fs from "node:fs"; // discover and read SKILL.md files
 import os from "node:os"; // the global skills dir
 import path from "node:path"; // path resolution
 import type OpenAI from "openai"; // message shapes for the listing / body injection
-import { CONFIG } from "./config.js"; // the context window sizes the listing budget
+import { CONFIG, saveGlobalSetting } from "./config.js"; // the listing budget + /skills on/off choices
 import { registerExternalTool, tools, unregisterExternalTool, type Tool } from "./tools.js"; // a skill is exposed to the model as a tool
 
 // Skills: reusable procedures written as plain Markdown, executed by the MODEL,
@@ -136,13 +136,68 @@ function fingerprint(dirs: string[]): string {
   return parts.join("|");
 }
 
-// The live skill set: reloaded from disk only when a SKILL.md was added,
-// edited, or removed since the last call. `dirs` is injectable for tests.
-export function currentSkills(dirs: string[] = skillDirs()): Skill[] {
+// Every skill on disk, whatever its /skills setting: reloaded only when a
+// SKILL.md was added, edited, or removed since the last call. `dirs` is
+// injectable for tests. The /skills panel lists these.
+export function allSkills(dirs: string[] = skillDirs()): Skill[] {
   const key = dirs.join("\n");
   const fp = fingerprint(dirs);
   if (!cache || cache.key !== key || cache.fingerprint !== fp) cache = { key, fingerprint: fp, skills: loadSkills(dirs) };
   return cache.skills;
+}
+
+// The skills in effect — what the listing, the skill tool and /skill see.
+// The /skills choices apply here: "off" skills vanish entirely, "user-only"
+// ones stay runnable by the user but are hidden from the model.
+export function currentSkills(dirs: string[] = skillDirs()): Skill[] {
+  return allSkills(dirs)
+    .filter((s) => skillMode(s) !== "off")
+    .map((s) => (skillMode(s) === "user-only" && !s.disableModelInvocation ? { ...s, disableModelInvocation: true } : s));
+}
+
+// ---- /skills: on · user-only · off ---------------------------------------------------
+// Claude Code's three states. The SKILL.md author can pin a skill to
+// user-only (disable-model-invocation) — then it's locked and the panel can't
+// change it. Everything else is the user's call, saved in the global settings.
+export type SkillMode = "on" | "user-only" | "off";
+
+export const skillLocked = (s: Skill): boolean => s.disableModelInvocation;
+export function skillMode(s: Skill): SkillMode {
+  if (skillLocked(s)) return "user-only";
+  return CONFIG.skillOverrides[s.name] ?? "on";
+}
+
+// Enter/space in the panel: on → user-only → off → on.
+export const nextSkillMode = (m: SkillMode): SkillMode => (m === "on" ? "user-only" : m === "user-only" ? "off" : "on");
+
+// Apply and persist a choice. "on" is the default, so it removes the entry
+// rather than storing it — the settings file only lists exceptions.
+export function setSkillMode(name: string, mode: SkillMode, persist = true): void {
+  const next = { ...CONFIG.skillOverrides };
+  if (mode === "on") delete next[name];
+  else next[name] = mode;
+  CONFIG.skillOverrides = next;
+  if (persist) saveGlobalSetting("skillOverrides", next);
+}
+
+// One panel row's facts: where it lives and what it costs the model to know
+// about it (its listing line, ~4 bytes per token — the same estimate as context.ts).
+export function skillSource(s: Skill): "project" | "user" {
+  return s.path.startsWith(path.resolve(".mini-agent", "skills")) ? "project" : "user";
+}
+export const skillListingTokens = (s: Skill): number => Math.ceil(Buffer.byteLength(listingEntry(s)) / 4);
+
+export type SkillSort = "name" | "tokens" | "source";
+export const nextSkillSort = (s: SkillSort): SkillSort => (s === "name" ? "tokens" : s === "tokens" ? "source" : "name");
+
+// The panel's list: filtered by the search box (name or description), sorted.
+export function skillPanelRows(skills: Skill[], query: string, sort: SkillSort): Skill[] {
+  const q = query.trim().toLowerCase();
+  const rows = skills.filter((s) => !q || s.name.toLowerCase().includes(q) || s.description.toLowerCase().includes(q));
+  const byName = (a: Skill, b: Skill) => a.name.localeCompare(b.name);
+  if (sort === "tokens") return rows.sort((a, b) => skillListingTokens(b) - skillListingTokens(a) || byName(a, b));
+  if (sort === "source") return rows.sort((a, b) => skillSource(a).localeCompare(skillSource(b)) || byName(a, b));
+  return rows.sort(byName);
 }
 
 export function findSkill(skills: Skill[], name: string): Skill | undefined {

@@ -11,7 +11,7 @@ export interface Completion {
 export const COMMANDS: Completion[] = [
   { value: "/model", description: "Switch the model for this session", children: true },
   { value: "/effort", description: "Choose this model's reasoning effort", children: true },
-  { value: "/skills", description: "Browse and run available skills", children: true },
+  { value: "/skills", description: "Turn skills on, off, or user-only" },
   { value: "/skill", description: "Run a skill by name", children: true },
   { value: "/help", description: "Show commands and keyboard shortcuts" },
   { value: "/clear", description: "Start a fresh conversation" },
@@ -76,7 +76,7 @@ export function slashCompletions(input: string, ctx: CompletionContext): { items
     const menu = effortMenu(ctx.model);
     return { items: filter(menu.values.map((value, i) => ({ value: `/effort ${value}`, description: menu.labels[i] }))), hint: menu.header };
   }
-  if (command === "/skills" || command === "/skill") {
+  if ((command === "/skills" && parts.length) || command === "/skill") { // bare "/skills" opens the manager; "/skills <name>" still runs one
     return { items: ctx.skills.filter((s) => s.name.toLowerCase().startsWith(arg)).map((s) => ({ value: `/skill ${s.name}`, description: s.whenToUse || s.description })), hint: ctx.skills.length ? "Choose a skill to run" : "No skills found in project or user skill directories" };
   }
   if (command === "/model") {

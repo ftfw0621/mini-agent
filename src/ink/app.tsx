@@ -25,6 +25,7 @@ import { newSessionId, saveSession, listSessions, loadSession, setSessionTitle }
 import { generateSessionTitle, setTerminalTitle } from "../title.js"; // concise session name, generated after the first message + the terminal tab that shows it
 import { isPlanMode, setPlanMode } from "../permissions.js";
 import { findSkill, userSkillMessages } from "../skills.js";
+import { SkillsPanel } from "./skills-panel.js"; // /skills: Claude Code's on / user-only / off manager
 import { extractMemories } from "../memory.js";
 import { displayWidth } from "../editor.js"; // display-width measurement (CJK-aware)
 import { runHooks } from "../hooks.js";
@@ -57,7 +58,8 @@ export interface StatusData {
 // multi-question form (form.ts's pure state machine).
 type Pending =
   | { kind: "select"; header: string; body?: string; options: string[]; onChoose: (index: number) => void }
-  | { kind: "form"; questions: FormQuestion[]; resolve: (answers: FormAnswer[] | null) => void };
+  | { kind: "form"; questions: FormQuestion[]; resolve: (answers: FormAnswer[] | null) => void }
+  | { kind: "skills" }; // the /skills manager — it handles its own keys
 
 // Injected when plan mode turns on, so the model knows the rules it now lives in.
 const PLAN_MODE_NOTICE = `[plan mode ON] Investigate this request using only read-only tools — read_file, search, and safe read-only shell (ls, cat, git status). Do NOT write files, edit, or run mutating commands; the permission gate will block them. When you have a concrete, ordered plan, call the exit_plan_mode tool with that plan. The user reviews and approves it before you make any change.`;
@@ -233,7 +235,7 @@ const EXIT_NOTES: Partial<Record<TerminateReason, string>> = {
 
 export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSource; session: InkSession; runTurn: (input: string | readonly string[] | null, hooks: TurnHooks) => Promise<LoopResult> }) {
   const { rows, columns } = useTerminalSize();
-  const { client, messages, systemMessage, costMeter, skills: liveSkills, judge, autoMode, model, dir, branch, getStatus } = session;
+  const { client, messages, systemMessage, costMeter, skills: liveSkills, allSkills: everySkill, judge, autoMode, model, dir, branch, getStatus } = session;
 
   // Seed the scrollback with the welcome banner + the dim startup notices.
   const [items, setItems] = useState<Item[]>(() => [{ kind: "note", text: session.bannerText }, ...session.notices.map((n) => ({ kind: "note" as const, text: chalk.dim(n) }))]);
@@ -442,7 +444,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
         setPending(null);
         setFormState(null);
         if (pending.kind === "form") pending.resolve(null);
-        else pending.onChoose(-1);
+        else if (pending.kind === "select") pending.onChoose(-1);
       }
       if (immediate) interruptForFollowUp();
       return;
@@ -524,6 +526,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
       return true;
     }
     if (line.startsWith("/skills ")) line = `/skill ${line.slice(8).trim()}`;
+    if (line === "/skills") { setDetails(null); setPending({ kind: "skills" }); return true; } // Claude Code's manager: on / user-only / off per skill
     if (line === "/effort" || line.startsWith("/effort ")) {
       const target = CONFIG.model;
       const value = line.slice("/effort".length).trim();
@@ -711,6 +714,8 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
       tuiCleanup();
       return exit(); // Ctrl+C quits immediately (process.on exit cleans up MCP/background)
     }
+
+    if (pending?.kind === "skills") return; // the /skills panel owns the keyboard while it is open
 
     const modifiedReturn = char === "[13;5u" || char === "[27;5;13~";
     // A submitted follow-up may still be passing hooks. A second Enter must
@@ -992,13 +997,17 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
         </Box>
       )}
 
+      {pending?.kind === "skills" && (
+        <SkillsPanel skills={everySkill()} maxRows={Math.max(3, rows - 14)} onClose={(summary) => { setPending(null); note(chalk.dim(summary)); }} />
+      )}
+
       {/* the ask_user multi-question form */}
       {pending?.kind === "form" && formState && (
         <Box marginTop={1}>
           <Text>{renderForm(pending.questions, formState)}</Text>
         </Box>
       )}
-      {pending && <Text dimColor wrap="truncate-end">Type a follow-up · Enter sends text; empty input selects · Esc cancels</Text>}
+      {pending && pending.kind !== "skills" && <Text dimColor wrap="truncate-end">Type a follow-up · Enter sends text; empty input selects · Esc cancels</Text>}
 
       {/* the pinned input box — stays at the bottom, conversation scrolls above it.
           The caret is drawn AT its position: the char under it is inverted (a block

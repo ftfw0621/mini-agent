@@ -44,7 +44,7 @@ export const SESSION_HELP = `commands:
   /undo      revert the most recent file write (write_file / edit_file) this session
   /diff      show every file changed this session, as a diff from where it started
   /resume    list recent sessions in this project and continue one of them
-  /skills    list the reusable skills available in this project
+  /skills    manage skills: turn each on, off, or user-only (search with /, sort with t)
   /skill <name> [args]  run a skill yourself (works even for user-only skills); /<name> [args] works too
   exit       leave (Ctrl+C does the same)
 

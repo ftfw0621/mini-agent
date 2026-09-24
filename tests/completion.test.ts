@@ -16,7 +16,7 @@ try {
   check("effort exposes only supported model choices", JSON.stringify(values("/effort")) === JSON.stringify(["default", "none", "low", "high", "max"].map((v) => `/effort ${v}`)));
   check("argument prefixes filter choices", JSON.stringify(values("/effort h")) === JSON.stringify(["/effort high"]));
   check("skills plural completes to runnable singular command", JSON.stringify(values("/skills re")) === JSON.stringify(["/skill review"]));
-  check("missing skills are explained", slashCompletions("/skills", { ...ctx, skills: [] })?.hint?.includes("No skills") === true);
+  check("missing skills are explained", slashCompletions("/skills ", { ...ctx, skills: [] })?.hint?.includes("No skills") === true);
   check("model choices deduplicate the current model", values("/model").filter((v) => v === "/model deepseek-flash").length === 1);
   check("save model subcommand exposes endpoint models", values("/model save").includes("/model save deepseek-v4-pro"));
   check("auto debug arguments are selectable", values("/auto debug o").length === 2);

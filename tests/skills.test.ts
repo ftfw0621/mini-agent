@@ -2,7 +2,7 @@ import fs from "node:fs"; // create skill folders to load
 import os from "node:os"; // temp location
 import path from "node:path"; // join paths
 import type OpenAI from "openai"; // message shapes
-import { parseSkill, loadSkills, currentSkills, findSkill, skillListing, skillListingReminder, skillBody, skillBodyMessages, substituteArguments, userSkillMessages, buildSkillTool } from "../src/skills.js"; // unit under test
+import { parseSkill, loadSkills, allSkills, skillMode, setSkillMode, nextSkillMode, skillLocked, skillPanelRows, skillListingTokens, currentSkills, findSkill, skillListing, skillListingReminder, skillBody, skillBodyMessages, substituteArguments, userSkillMessages, buildSkillTool } from "../src/skills.js"; // unit under test
 import { runLoop, TerminateReason } from "../src/loop.js"; // the end-to-end wiring
 import { CONFIG } from "../src/config.js"; // hooks off for the loop run
 import { tools } from "../src/tools.js"; // is the skill tool registered?
@@ -91,6 +91,29 @@ checkContains("invoking an unknown skill errors", String(await tool.run({ skill:
   const msgs: OpenAI.ChatCompletionMessageParam[] = [{ role: "tool", tool_call_id: "a", content: "Launching skill: greet" }, { role: "tool", tool_call_id: "b", content: "[error] refused" }];
   const bodies = skillBodyMessages(calls, msgs, skills);
   check("a body follows only a successful launch", bodies.length === 1 && bodies[0].includes("Say hi to the user") && bodies[0].includes("ARGUMENTS: Bob"));
+}
+
+// ---- /skills: on · user-only · off --------------------------------------------------------
+{
+  const before = { ...CONFIG.skillOverrides };
+  const g = findSkill(allSkills([dir]), "greet")!;
+  const d = findSkill(allSkills([dir]), "deploy")!;
+  check("a skill is on by default", skillMode(g) === "on");
+  check("an author-pinned skill is locked user-only", skillLocked(d) && skillMode(d) === "user-only");
+  check("cycle order: on → user-only → off → on", nextSkillMode("on") === "user-only" && nextSkillMode("user-only") === "off" && nextSkillMode("off") === "on");
+  setSkillMode("greet", "user-only", false);
+  const hidden = findSkill(currentSkills([dir]), "greet");
+  check("user-only keeps it runnable by the user but hides it from the model", hidden?.disableModelInvocation === true);
+  check("user-only drops it from the model's listing", !(skillListingReminder([], currentSkills([dir])) ?? "").includes("- greet"));
+  setSkillMode("greet", "off", false);
+  check("off removes it from the skills in effect", findSkill(currentSkills([dir]), "greet") === undefined);
+  check("off still shows in the manager", findSkill(allSkills([dir]), "greet") !== undefined);
+  setSkillMode("greet", "on", false);
+  check("on stores nothing (the default)", !("greet" in CONFIG.skillOverrides) && findSkill(currentSkills([dir]), "greet")?.disableModelInvocation === false);
+  check("manager search matches name or description", skillPanelRows(allSkills([dir]), "hello", "name").length === 0 && skillPanelRows(allSkills([dir]), "gree", "name")[0]?.name === "greet");
+  check("manager sorts by name", skillPanelRows(allSkills([dir]), "", "name").map((x) => x.name).join() === "deploy,greet");
+  check("listing cost is a positive token estimate", skillListingTokens(g) > 0);
+  CONFIG.skillOverrides = before;
 }
 
 // ---- hot reload: currentSkills picks up adds, edits, removals --------------------------

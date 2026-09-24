@@ -14,7 +14,7 @@ import { Judge } from "../judge.js";
 import { AutoMode } from "../auto.js";
 import { registerExternalTool } from "../tools.js";
 import { rememberTool, readMemory } from "../memory.js";
-import { currentSkills, type Skill } from "../skills.js";
+import { allSkills, currentSkills, type Skill } from "../skills.js";
 import { killAllBackground } from "../background.js";
 import { killAllSubAgents } from "../loop.js";
 import { loadDurableJobs, startCronScheduler, stopCronScheduler, listJobs } from "../cron.js"; // cron scheduler (Day s14)
@@ -44,7 +44,8 @@ export interface InkSession {
   dir: string;
   branch: string | null;
   bannerText: string; // the welcome box
-  skills: () => Skill[]; // live: re-read from disk when a SKILL.md changes (the UI's /skills + completion)
+  skills: () => Skill[]; // live: re-read from disk when a SKILL.md changes, /skills choices applied (completion, /skill)
+  allSkills: () => Skill[]; // every skill on disk, even ones turned off — the /skills manager lists these
   notices: string[]; // dim startup lines (resume / memory / skills / judge) shown under the banner
   getStatus: () => StatusData; // live ctx% / cost / elapsed for the status bar
   disconnectMcp: () => void; // best-effort cleanup of MCP server subprocesses
@@ -139,6 +140,7 @@ export async function buildInkSession(opts: { resume?: boolean } = {}): Promise<
     startedAt,
     costMeter,
     skills: () => currentSkills(),
+    allSkills: () => allSkills(),
     judge,
     autoMode,
     model: CONFIG.model,
