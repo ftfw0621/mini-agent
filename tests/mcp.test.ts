@@ -32,6 +32,15 @@ CONFIG.permissions.allow.length = 0; // ...clean up
 const result = await dispatch("mcp__calc__add", JSON.stringify({ a: 17, b: 25 }));
 checkContains("mcp tool actually runs (17+25=42)", result, "42");
 
+// ---- tools/list_changed: the server announces new tools, we re-fetch ----------------
+const waitFor = async (cond: () => boolean) => { for (let i = 0; i < 50 && !cond(); i++) await new Promise((r) => setTimeout(r, 20)); return cond(); };
+check("no mul tool before the server grows", !("mcp__calc__mul" in tools));
+checkContains("grow runs", await dispatch("mcp__calc__grow", "{}"), "grown");
+check("list_changed notification registers the new tool", await waitFor(() => "mcp__calc__mul" in tools));
+checkContains("the new tool works", await dispatch("mcp__calc__mul", JSON.stringify({ a: 6, b: 7 })), "42");
+check("the old tools survive the swap", "mcp__calc__add" in tools);
+checkContains("server→client ping is answered", await dispatch("mcp__calc__pong", "{}"), "true");
+
 // ---- hot reload: diff the new mcpServers map against what is running --------------
 const calc = { command: process.execPath, args: [mockServer] };
 check("reload with an identical map changes nothing", (await reloadMcpServers({ calc: { args: [mockServer], command: process.execPath } })).length === 0); // key order ignored

@@ -44,7 +44,7 @@ const CLIENT_INFO = { name: "mini-agent", version: "0" }; // who we say we are i
 
 interface JsonRpcResponse {
   id: number; // matches the request
-  result?: { tools?: McpToolSpec[]; content?: McpContent[]; isError?: boolean }; // success payload
+  result?: { tools?: McpToolSpec[]; content?: McpContent[]; isError?: boolean; capabilities?: { tools?: { listChanged?: boolean } } }; // success payload
   error?: { message: string }; // failure
 }
 interface JsonRpcRequest {
@@ -93,11 +93,26 @@ export class NeedsAuthError extends Error implements AuthChallenge {
 // The wire under JSON-RPC. A request expects a matching response; a notification
 // is fire-and-forget (the handshake's "initialized" needs one). close() releases
 // whatever the transport holds (a subprocess, a session).
+//
+// Messages also flow the OTHER way: a server may send a notification on its own
+// — "notifications/tools/list_changed" when its tool set changes. Each transport
+// hands those to onNotification; listen() opens whatever channel the transport
+// needs to hear them when no request is in flight (stdio needs none).
 interface Transport {
   request(payload: JsonRpcRequest, timeoutMs: number): Promise<JsonRpcResponse>;
   notify(method: string, params: object): void;
   close(): void;
   setToken?(token: string): void; // http only: swap the bearer token after a refresh, keeping the session
+  onNotification?: (method: string, params: unknown) => void; // set by McpClient
+  listen?(): void; // http only: open the standalone server→client event stream
+}
+
+// A JSON-RPC message with a method is the server talking first: no id → a
+// notification; an id → a request that expects an answer.
+interface ServerMessage {
+  id?: number | string;
+  method?: string;
+  params?: unknown;
 }
 
 // ---- stdio transport: one JSON object per line, to a subprocess --------------
@@ -124,12 +139,22 @@ class StdioTransport implements Transport {
     this.child.stderr.on("data", () => {}); // the server's stderr is its own logging — never our stdout
   }
 
+  onNotification?: (method: string, params: unknown) => void;
+
   private onMessage(line: string): void {
-    let msg: JsonRpcResponse;
+    let msg: JsonRpcResponse & ServerMessage;
     try {
       msg = JSON.parse(line);
     } catch {
       return; // ignore anything that isn't valid JSON-RPC
+    }
+    if (msg.method) {
+      if (msg.id === undefined) return this.onNotification?.(msg.method, msg.params); // e.g. tools/list_changed
+      // A server→client request. We answer ping (the spec's liveness check) and
+      // refuse the rest — an unanswered request would leave the server waiting.
+      const reply = msg.method === "ping" ? { result: {} } : { error: { code: -32601, message: `Method not found: ${msg.method}` } };
+      this.child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, ...reply }) + "\n");
+      return;
     }
     const resolver = this.pending.get(msg.id);
     if (resolver) {
@@ -185,6 +210,8 @@ class HttpTransport implements Transport {
   private url: string;
   private headers: Record<string, string>;
   private sessionId?: string; // assigned by the server on initialize, echoed on every later request
+  private listening?: AbortController; // the standalone GET stream, if open
+  onNotification?: (method: string, params: unknown) => void;
 
   constructor(def: McpServerDef, token?: string) {
     this.url = def.url as string;
@@ -215,15 +242,70 @@ class HttpTransport implements Transport {
 
     const raw = await res.text();
     const payloads = res.headers.get("content-type")?.includes("text/event-stream") ? parseSseData(raw) : [raw];
+    let response: JsonRpcResponse | null = null;
     for (const p of payloads) {
+      // An SSE response may carry server notifications BEFORE the response we
+      // came for (Streamable HTTP allows it) — deliver those, keep looking.
+      if (this.deliver(p)) continue;
       try {
         const msg = JSON.parse(p) as JsonRpcResponse;
-        if (msg && (msg.result !== undefined || msg.error !== undefined)) return msg; // the response we came for
+        if (!response && msg && (msg.result !== undefined || msg.error !== undefined)) response = msg; // the response we came for
       } catch {
         /* skip non-JSON frames (SSE comments, keep-alives) */
       }
     }
-    return null;
+    return response;
+  }
+
+  // Hand one raw payload to onNotification if it is a server notification.
+  // Returns true when it was one (so the caller doesn't treat it as a response).
+  private deliver(raw: string): boolean {
+    try {
+      const msg = JSON.parse(raw) as ServerMessage;
+      if (!msg?.method || msg.id !== undefined) return false;
+      this.onNotification?.(msg.method, msg.params);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // Streamable HTTP's server→client channel: a long-lived GET that the server
+  // writes SSE frames into whenever it wants — that's where list_changed
+  // arrives between our requests. A server without one answers 405; then
+  // notifications can still ride along on POST responses (above). A dropped
+  // stream reconnects with backoff; one that keeps dying quickly gives up.
+  listen(): void {
+    if (this.listening) return;
+    const ctrl = (this.listening = new AbortController());
+    const run = async (attempt: number): Promise<void> => {
+      const started = Date.now();
+      try {
+        const res = await fetch(this.url, {
+          method: "GET",
+          headers: { accept: "text/event-stream", ...(this.sessionId ? { "mcp-session-id": this.sessionId } : {}), ...this.headers },
+          signal: ctrl.signal,
+        });
+        if (!res.ok || !res.body || !res.headers.get("content-type")?.includes("text/event-stream")) return; // no standalone stream (405 etc.) — not an error
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = "";
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          const frames = buf.split(/\r?\n\r?\n/);
+          buf = frames.pop() ?? ""; // an incomplete frame waits for the next chunk
+          for (const frame of frames) for (const data of parseSseData(frame)) this.deliver(data);
+        }
+      } catch {
+        if (ctrl.signal.aborted) return; // closed on purpose
+      }
+      if (ctrl.signal.aborted) return;
+      const next = Date.now() - started > 30_000 ? 0 : attempt + 1; // a stream that lived a while resets the backoff
+      if (next < 5) setTimeout(() => void run(next), 1000 * 2 ** next).unref(); // never keeps the process alive
+    };
+    void run(0);
   }
 
   async request(payload: JsonRpcRequest, timeoutMs: number): Promise<JsonRpcResponse> {
@@ -246,6 +328,7 @@ class HttpTransport implements Transport {
   }
 
   close(): void {
+    this.listening?.abort(); // stop the event stream first
     // Best-effort: tell the server to drop the session. No await, no error care.
     if (this.sessionId) {
       void fetch(this.url, { method: "DELETE", headers: { "mcp-session-id": this.sessionId, ...this.headers } }).catch(() => {});
@@ -264,8 +347,13 @@ class McpClient {
   private transport: Transport;
   private nextId = 1; // JSON-RPC request id counter
 
+  onToolsChanged?: () => void; // set by the registry: re-fetch this server's tools
+
   constructor(def: McpServerDef, token?: string) {
     this.transport = makeTransport(def, token);
+    this.transport.onNotification = (method) => {
+      if (method === "notifications/tools/list_changed") this.onToolsChanged?.();
+    };
   }
 
   private request(method: string, params: object, timeoutMs: number): Promise<JsonRpcResponse> {
@@ -277,7 +365,14 @@ class McpClient {
     const init = await this.request("initialize", { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: CLIENT_INFO }, INIT_TIMEOUT_MS);
     if (init.error) throw new Error(init.error.message); // server refused to initialize
     this.transport.notify("notifications/initialized", {}); // tell the server we're ready
-    const list = await this.request("tools/list", {}, INIT_TIMEOUT_MS); // ask what it offers
+    // A server that promises tools/list_changed may change its tools later —
+    // open the channel it will announce that on (HTTP's event stream).
+    if (init.result?.capabilities?.tools?.listChanged) this.transport.listen?.();
+    return this.listTools(); // ask what it offers
+  }
+
+  async listTools(): Promise<McpToolSpec[]> {
+    const list = await this.request("tools/list", {}, INIT_TIMEOUT_MS);
     if (list.error) throw new Error(list.error.message);
     return list.result?.tools ?? [];
   }
@@ -711,6 +806,7 @@ async function connectOne(name: string, retried = false): Promise<void> {
   }
   const client = new McpClient(entry.def, stored?.accessToken);
   try {
+    client.onToolsChanged = () => void refreshServerTools(name, client);
     const specs = await client.start(); // handshake + discover
     entry.client = client;
     entry.tools = registerTools(name, specs, client);
@@ -731,6 +827,41 @@ async function connectOne(name: string, retried = false): Promise<void> {
     }
     emit("agent_mcp_failed", { server: name });
     console.error(chalk.yellow(`  [mcp] ${name} ${entry.status === "needs-auth" ? `needs authentication (run /mcp auth ${name})` : "failed to start"}: ${(err as Error).message}`));
+  }
+}
+
+// The server said its tools changed (notifications/tools/list_changed): ask
+// again and swap the set in place — drop every mcp__<server>__ tool, register
+// the fresh ones, the same swap Claude Code does. The next model call sees the
+// new list (toolDefinitions() is rebuilt per call). A burst of notifications
+// coalesces: one refresh runs, and at most one more follows it.
+const refreshing = new Map<string, { again: boolean }>();
+
+async function refreshServerTools(name: string, client: McpClient): Promise<void> {
+  const running = refreshing.get(name);
+  if (running) return void (running.again = true); // already fetching — fetch once more when done
+  const state = { again: false };
+  refreshing.set(name, state);
+  try {
+    do {
+      state.again = false;
+      const entry = registry.get(name);
+      if (!entry || entry.client !== client) return; // reconnected, disabled or removed since — this client is stale
+      let specs: McpToolSpec[];
+      try {
+        specs = await client.listTools();
+      } catch {
+        return; // keep the tools we have; the next notification or a reconnect will retry
+      }
+      if (entry.client !== client) return;
+      for (const n of entry.toolNames) unregisterExternalTool(n);
+      entry.tools = registerTools(name, specs, client);
+      entry.toolNames = specs.map((s) => `mcp__${name}__${s.name}`);
+      emit("agent_mcp_tools_changed", { server: name, tools: specs.length });
+      console.log(chalk.dim(`(mcp: ${name} tools changed — ${specs.length} tools)`));
+    } while (state.again);
+  } finally {
+    refreshing.delete(name);
   }
 }
 

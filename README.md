@@ -111,7 +111,7 @@ export MINI_AGENT_MODEL=gpt-4.1-mini
 
 ### 配置 MCP
 
-在 `~/.config/mini-agent/settings.json`（全局）或 `.mini-agent/settings.json`（项目级）的 `mcpServers` 里添加服务器，写法和 Claude Code 一样。保存后会话里自动生效，不用重启：新加的服务器会连上，删掉的会断开，改过的会重连。也可以手动运行 `/mcp reload`。输入 `/mcp` 可以查看连接状态。
+在 `~/.config/mini-agent/settings.json`（全局）或 `.mini-agent/settings.json`（项目级）的 `mcpServers` 里添加服务器，写法和 Claude Code 一样。保存后会话里自动生效，不用重启：新加的服务器会连上，删掉的会断开，改过的会重连。也可以手动运行 `/mcp reload`。服务器自己的工具有增减时（MCP 的 `tools/list_changed` 通知），工具列表也会自动更新。输入 `/mcp` 可以查看连接状态。
 
 ### 非交互模式
 
