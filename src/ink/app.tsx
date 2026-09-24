@@ -1031,6 +1031,8 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
           {followUps.size > 2 && <Text dimColor>  … {followUps.size - 2} earlier messages queued</Text>}
         </Box>
       )}
+      {/* The /skills panel owns the keyboard — hide the input box so there is only one cursor on screen. */}
+      {pending?.kind !== "skills" && (
       <Box borderStyle="round" borderColor={planMode ? "magenta" : CONFIG.bypassPermissions ? "red" : autoEnabled ? "yellow" : "cyan"} paddingX={1} marginTop={rows >= 20 ? 1 : 0} flexDirection="column" flexShrink={0}>
         {(() => {
           const prompt = "❯ ";
@@ -1126,6 +1128,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
           });
         })()}
       </Box>
+      )}
       {completion.view}
       {rows >= 20 && busy && !details && !selectedAgent && !pending && <Text dimColor wrap="truncate-end">Enter queue follow-up · Ctrl+Enter interrupt and send now</Text>}
 

@@ -35,6 +35,7 @@ export function SkillsPanel({ skills, maxRows, onClose }: { skills: Skill[]; max
       if (key.escape || key.return) { setSearching(false); if (key.escape) setQuery(""); return; }
       if (key.backspace || key.delete) { setQuery((q) => q.slice(0, -1)); setCursor(0); return; }
       if (key.upArrow || key.downArrow) { setSearching(false); } // fall through to navigation
+      else if (char === "/") return; // skill names never contain "/": a second "/" press must not become the query
       else if (char && !key.ctrl && !key.meta) { setQuery((q) => q + char); setCursor(0); return; }
       else return;
     }
@@ -62,9 +63,15 @@ export function SkillsPanel({ skills, maxRows, onClose }: { skills: Skill[]; max
   return (
     <Box flexDirection="column" marginTop={1}>
       <Text bold color={LAVENDER}>Skills</Text>
-      <Text dimColor>{skills.length} skill{skills.length === 1 ? "" : "s"} · enter/space to cycle, / to search, t to sort ({SORT_LABEL[sort]}), Esc to close</Text>
+      <Text dimColor>
+        {skills.length} skill{skills.length === 1 ? "" : "s"} · {searching ? "type to filter, ↑↓ to pick, Enter/Esc when done" : `enter/space to cycle, / to search, t to sort (${SORT_LABEL[sort]}), Esc to close`}
+      </Text>
+      {/* Plain "Search:" — no ⌕ glyph: terminals disagree on its width, and a
+          wide render shoves the cursor off the line. */}
       <Box borderStyle="round" borderColor={searching ? LAVENDER : "gray"} paddingX={1} marginTop={1}>
-        <Text dimColor={!query && !searching}>⌕ {query || (searching ? "" : "Search skills…")}{searching ? <Text inverse> </Text> : null}</Text>
+        <Text color={searching ? LAVENDER : undefined} dimColor={!searching}>Search: </Text>
+        <Text dimColor={!query && !searching}>{query || (searching ? "" : "press / to search skills…")}</Text>
+        {searching && <Text inverse> </Text>}
       </Box>
       {start > 0 && <Text dimColor>  ↑ {start} more above</Text>}
       {shown.map((s, i) => {

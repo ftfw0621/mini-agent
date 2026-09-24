@@ -183,8 +183,9 @@ try {
   // ---- /skills: Claude Code's manager (no mode change here — that would write the real settings file)
   await key("/skills"); await key("\r"); await sleep();
   check("/skills opens the manager with state, source and cost", frame.includes("Skills") && frame.includes("enter/space to cycle") && frame.includes("✔ on") && frame.includes("review · ") && frame.includes("tok"));
-  await key("/"); await key("zzz");
-  check("/ searches the skills", frame.includes('No skills match "zzz"'));
+  check("the input box is hidden while the manager owns the keyboard", !frame.includes("│ ❯"));
+  await key("/"); await key("/"); await key("zzz"); // a second "/" (people press it twice) must not become the query
+  check("/ searches the skills", frame.includes('No skills match "zzz"') && frame.includes("type to filter"));
   await key("\x1b"); // leave search (clears it)
   check("leaving search restores the list", frame.includes("review · "));
   await key("t");
