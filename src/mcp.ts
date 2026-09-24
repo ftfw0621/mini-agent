@@ -5,7 +5,7 @@ import os from "node:os"; // home directory for token persistence
 import path from "node:path"; // path joining
 import fs from "node:fs"; // token file persistence
 import chalk from "chalk"; // status lines
-import { CONFIG, type McpServerDef } from "./config.js"; // configured servers
+import { CONFIG, GLOBAL_SETTINGS_PATH, PROJECT_SETTINGS_PATH, readMcpServers, type McpServerDef } from "./config.js"; // configured servers + hot reload
 import { registerExternalTool, unregisterExternalTool, type Tool } from "./tools.js"; // expose discovered tools
 import { emit } from "./telemetry.js"; // observability
 
@@ -744,6 +744,95 @@ export async function connectMcpServers(): Promise<() => void> {
   }
   return () => {
     for (const entry of registry.values()) entry.client?.kill(); // cleanup on exit
+  };
+}
+
+// ---- hot reload: pick up settings.json edits without a restart ----------------
+// Adding a server used to mean quitting and relaunching. Now a settings change
+// is DIFFED against what is running and only the difference is touched:
+//   added   → connect it and register its tools
+//   removed → kill it and unregister its tools
+//   changed → reconnect it with the new definition
+//   same    → left alone (an unrelated settings edit reconnects nothing)
+// The tool list sent to the model is rebuilt every turn (toolDefinitions()), so
+// the next model call simply sees the new set. A tool call already in flight to
+// a server being removed fails with a readable error, like any dropped server.
+//
+// Claude Code swaps MCP tools the same way (drop every mcp__<server>__ tool,
+// append the fresh ones), but it only re-reads MCP config on explicit triggers
+// like /reload-plugins. We also watch the files, so a save is enough.
+
+// Key-order-independent JSON, so reformatting an entry doesn't count as a change.
+const stableJson = (v: unknown): string =>
+  JSON.stringify(v, (_k, val) => (val && typeof val === "object" && !Array.isArray(val) ? Object.fromEntries(Object.entries(val).sort(([a], [b]) => a.localeCompare(b))) : val));
+
+// Reloads run one at a time: a second save while the first reload is still
+// connecting queues behind it instead of racing it over the same registry.
+let reloadChain: Promise<unknown> = Promise.resolve();
+
+// Apply a new mcpServers map. `next` is the test seam; by default both settings
+// files are re-read. Returns one human-readable line per change ([] = nothing
+// changed), or a single warning line when the files can't be parsed right now.
+export function reloadMcpServers(next?: Record<string, McpServerDef>): Promise<string[]> {
+  const run = async (): Promise<string[]> => {
+    const servers = next ?? readMcpServers();
+    if (!servers) return ["settings.json is not valid JSON right now — MCP servers left unchanged"];
+    const previous = CONFIG.mcpServers;
+    CONFIG.mcpServers = servers; // entryFor / listMcpServers read the new map from here on
+
+    const changes: string[] = [];
+    for (const name of Object.keys(previous)) {
+      if (name in servers) continue;
+      const entry = registry.get(name);
+      if (entry) {
+        for (const n of entry.toolNames) unregisterExternalTool(n);
+        entry.client?.kill();
+        registry.delete(name); // gone from the config → gone from /mcp too
+      }
+      changes.push(`removed ${name}`);
+    }
+    for (const [name, def] of Object.entries(servers)) {
+      const old = previous[name];
+      if (old && stableJson(old) === stableJson(def)) continue; // untouched
+      const entry = registry.get(name);
+      if (entry) entry.def = def; // entryFor only builds new entries, so swap the def by hand
+      if (entry?.status === "disabled") {
+        changes.push(`updated ${name} (still disabled)`); // the user turned it off this session — respect that
+        continue;
+      }
+      await connectOne(name); // replaces any stale client + tools, logs its own status line
+      changes.push(`${old ? "reconnected" : "added"} ${name} (${registry.get(name)?.status})`);
+    }
+    return changes;
+  };
+  const result = reloadChain.then(run, run);
+  reloadChain = result.catch(() => {}); // a failed reload must not wedge the ones after it
+  return result;
+}
+
+// Watch both settings files and hot-reload on save. Polling (fs.watchFile), not
+// fs.watch: editors often save by writing a temp file and renaming it over the
+// original, which silently detaches an fs.watch handle; a stat poll just sees a
+// new mtime. It also works for a file that doesn't exist yet — create
+// .mini-agent/settings.json mid-session and it is picked up. Returns a stop function.
+const WATCH_INTERVAL_MS = 1000; // how often to stat; Claude Code polls ~/.claude.json at the same rate
+const RELOAD_DEBOUNCE_MS = 300; // a burst of writes (save + format-on-save) → one reload
+
+export function watchMcpConfig(): () => void {
+  let timer: NodeJS.Timeout | undefined;
+  const onChange = (curr: fs.Stats, prev: fs.Stats): void => {
+    if (curr.mtimeMs === prev.mtimeMs) return; // a stat tick with nothing new
+    clearTimeout(timer);
+    timer = setTimeout(async () => {
+      const changes = await reloadMcpServers().catch((err: Error) => [`reload failed: ${err.message}`]);
+      if (changes.length) console.log(chalk.dim(`(mcp config changed: ${changes.join(", ")})`));
+    }, RELOAD_DEBOUNCE_MS);
+  };
+  const files = [GLOBAL_SETTINGS_PATH, PROJECT_SETTINGS_PATH];
+  for (const file of files) fs.watchFile(file, { interval: WATCH_INTERVAL_MS, persistent: false }, onChange); // persistent:false — never keeps the process alive
+  return () => {
+    clearTimeout(timer);
+    for (const file of files) fs.unwatchFile(file, onChange);
   };
 }
 

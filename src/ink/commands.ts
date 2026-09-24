@@ -31,6 +31,7 @@ export const SESSION_HELP = `commands:
   /status    session usage and vendor account balance/cost
   /cost      tokens, cache hit rate and estimated spend this session (local)
   /mcp       list configured MCP servers + status; select one to authenticate / reconnect / disable
+  /mcp reload  re-read mcpServers from settings.json (saves are also picked up automatically)
   /plan      toggle plan mode — research-only; the agent presents a plan you approve before any change
   /effort [level]  list/select the current model’s supported reasoning effort
   /auto      toggle auto mode — risky or uncertain actions still require approval

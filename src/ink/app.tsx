@@ -37,7 +37,7 @@ import { detailPage, summarizeActivity } from "./activity.js";
 import { useTerminalSize } from "./viewport.js";
 import { makeInkSink, type Item } from "./sink.js"; // turns the loop's output into React state
 import { runInfoCommand, SESSION_HELP, mcpStatusText } from "./commands.js"; // the non-interactive slash commands + /mcp status
-import { listMcpServers, mcpActionsFor, runMcpAction } from "../mcp.js"; // /mcp: list + per-server actions
+import { listMcpServers, mcpActionsFor, reloadMcpServers, runMcpAction } from "../mcp.js"; // /mcp: list + per-server actions
 import type { TurnHooks } from "./chat.js"; // what one turn needs from the App
 import type { InkSession } from "./setup.js"; // the bootstrapped session context
 
@@ -383,6 +383,18 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
   const handleMcpCommand = async (arg: string) => {
     const parts = arg.trim().split(/\s+/).filter(Boolean);
 
+    // /mcp reload — re-read settings.json now (the file watcher normally does this on save).
+    if (parts[0] === "reload") {
+      setBusy(true);
+      try {
+        const changes = await reloadMcpServers();
+        note(chalk.dim(changes.length ? `(mcp: ${changes.join(", ")})` : "(mcp: no changes in settings.json)"));
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+
     // Direct subcommands (scriptable, matching Claude Code): /mcp reconnect|auth|enable|disable <name>
     if (parts.length >= 2 && ["reconnect", "auth", "authenticate", "enable", "disable"].includes(parts[0])) {
       const name = parts.slice(1).join(" ");
@@ -455,7 +467,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
       return true;
     }
 
-    // /mcp [reconnect|auth|enable|disable <name>]
+    // /mcp [reload | reconnect|auth|enable|disable <name>]
     if (line === "/mcp" || line.startsWith("/mcp ")) {
       await handleMcpCommand(line.slice("/mcp".length).trim());
       return true;

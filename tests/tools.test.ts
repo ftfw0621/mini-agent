@@ -24,7 +24,7 @@ checkContains("edit really applied", fs.readFileSync(f, "utf8"), "BBB");
 const srcDir = path.resolve(import.meta.dirname, "../src"); // search our own source tree
 checkContains("search finds constant", await dispatch("search", JSON.stringify({ pattern: "TOOL_RESULT_LIMIT", path: srcDir })), "tools.ts:");
 const globHits = await dispatch("search", JSON.stringify({ pattern: "tool-calling", path: path.resolve(import.meta.dirname, ".."), file_glob: "*.md" }));
-checkContains("search glob filter", globHits, "README.md:");
+checkContains("search glob filter", globHits, "ch01-raw-loop.md:"); // a tutorial chapter — stable, unlike the README
 check("glob excludes non-md", !globHits.includes(".ts:"), "a .ts file leaked through the *.md glob");
 checkContains("invalid regex error", await dispatch("search", JSON.stringify({ pattern: "[" })), "Invalid regex");
 

@@ -9,7 +9,7 @@ import { gitBranch } from "../tui.js";
 import { newSessionId, latestSession } from "../session.js";
 import { initTelemetry, emit } from "../telemetry.js";
 import { runHooks } from "../hooks.js";
-import { connectMcpServers } from "../mcp.js";
+import { connectMcpServers, watchMcpConfig } from "../mcp.js";
 import { Judge } from "../judge.js";
 import { AutoMode } from "../auto.js";
 import { registerExternalTool } from "../tools.js";
@@ -84,6 +84,7 @@ export async function buildInkSession(opts: { resume?: boolean } = {}): Promise<
   // in the manual. A server that fails to start is skipped, never fatal.
   const disconnectMcp = await connectMcpServers();
   process.on("exit", disconnectMcp);
+  process.on("exit", watchMcpConfig()); // hot reload: a settings.json save adds/removes/reconnects servers, no restart
   process.on("exit", killAllBackground); // SIGKILL any background job so it never outlives the agent
   process.on("exit", killAllSubAgents); // mark any still-running sub-agents as killed
   process.on("exit", stopCronScheduler); // Day s14: stop the setInterval on exit

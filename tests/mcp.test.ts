@@ -1,5 +1,5 @@
 import path from "node:path"; // locate the mock server
-import { connectMcpServers } from "../src/mcp.js"; // the unit under test
+import { connectMcpServers, reloadMcpServers } from "../src/mcp.js"; // the unit under test
 import { CONFIG } from "../src/config.js"; // inject a server (the test seam)
 import { tools, dispatch } from "../src/tools.js"; // verify registration + execution
 import { checkPermission } from "../src/permissions.js"; // verify the gate treats MCP tools as "ask"
@@ -31,6 +31,23 @@ CONFIG.permissions.allow.length = 0; // ...clean up
 // ---- end-to-end call through dispatch ------------------------------------------------
 const result = await dispatch("mcp__calc__add", JSON.stringify({ a: 17, b: 25 }));
 checkContains("mcp tool actually runs (17+25=42)", result, "42");
+
+// ---- hot reload: diff the new mcpServers map against what is running --------------
+const calc = { command: process.execPath, args: [mockServer] };
+check("reload with an identical map changes nothing", (await reloadMcpServers({ calc: { args: [mockServer], command: process.execPath } })).length === 0); // key order ignored
+
+let changes = await reloadMcpServers({ calc, calc2: calc }); // add a second server
+checkContains("reload reports the added server", changes.join(","), "added calc2 (connected)");
+check("added server's tools are registered", "mcp__calc2__add" in tools);
+
+changes = await reloadMcpServers({ calc2: { ...calc, env: { X: "1" } } }); // drop calc, change calc2
+checkContains("reload reports the removed server", changes.join(","), "removed calc");
+checkContains("reload reconnects a changed server", changes.join(","), "reconnected calc2 (connected)");
+check("removed server's tools are unregistered", !("mcp__calc__add" in tools));
+checkContains("reconnected server still runs", await dispatch("mcp__calc2__add", JSON.stringify({ a: 1, b: 2 })), "3");
+
+await reloadMcpServers({}); // remove everything
+check("empty map unregisters every mcp tool", !Object.keys(tools).some((n) => n.startsWith("mcp__")));
 
 disconnect(); // kill the server subprocess
 CONFIG.mcpServers = {}; // reset for any suite that follows

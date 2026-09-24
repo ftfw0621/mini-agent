@@ -13,7 +13,7 @@ import { newSessionId, saveSession, latestSession, listSessions, loadSession, se
 import { generateSessionTitle, setTerminalTitle } from "./title.js"; // concise session name, generated after the first message + the terminal tab that shows it
 import { initTelemetry, emit, statsReport } from "./telemetry.js"; // local-only event log + /stats
 import { runHooks } from "./hooks.js"; // SessionStart lifecycle hook
-import { connectMcpServers, listMcpServers, mcpActionsFor, runMcpAction } from "./mcp.js"; // external tool servers (MCP) + /mcp
+import { connectMcpServers, listMcpServers, mcpActionsFor, reloadMcpServers, runMcpAction, watchMcpConfig } from "./mcp.js"; // external tool servers (MCP) + /mcp
 import { Judge } from "./judge.js"; // optional LLM permission classifier
 import { AutoMode } from "./auto.js";
 import { effortMenu, setEffort, selectedEffort } from "./effort.js";
@@ -101,6 +101,7 @@ const SESSION_HELP = `commands:
   /status    session usage and vendor account balance/cost
   /cost      tokens, cache hit rate and estimated spend this session (local)
   /mcp       list configured MCP servers + status; select one to authenticate / reconnect / disable
+  /mcp reload  re-read mcpServers from settings.json (saves are also picked up automatically)
   /plan      toggle plan mode — research-only; the agent presents a plan you approve before any change
   /effort [level]  list/select the current model’s supported reasoning effort
   /auto      toggle auto mode — risky or uncertain actions still require approval
@@ -207,6 +208,7 @@ async function main() {
     disconnectMcp();
   };
   process.on("exit", disconnectMcp); // best-effort cleanup of server subprocesses
+  if (!cli.print) process.on("exit", watchMcpConfig()); // hot reload: a settings.json save adds/removes/reconnects servers, no restart (a one-shot -p run doesn't need it)
   process.on("exit", killAllBackground); // Day 37: SIGKILL any background job (dev server, slow install) so it never outlives the agent as an orphan
   process.on("exit", killAllSubAgents); // mark any still-running sub-agents as killed so they don't leave pending promises
   process.on("exit", stopCronScheduler); // Day s14: stop the setInterval on exit
@@ -497,6 +499,12 @@ async function main() {
 
   const handleMcpCommand = async (arg: string): Promise<void> => {
     const parts = arg.trim().split(/\s+/).filter(Boolean);
+    // /mcp reload — re-read settings.json now (the file watcher normally does this on save).
+    if (parts[0] === "reload") {
+      const changes = await reloadMcpServers();
+      console.log(chalk.dim(changes.length ? `(mcp: ${changes.join(", ")})` : "(mcp: no changes in settings.json)"));
+      return;
+    }
     if (parts.length >= 2 && ["reconnect", "auth", "authenticate", "enable", "disable"].includes(parts[0])) {
       const name = parts.slice(1).join(" ");
       const action = parts[0] === "auth" || parts[0] === "authenticate" ? "authenticate" : (parts[0] as "reconnect" | "enable" | "disable");
@@ -597,7 +605,7 @@ async function main() {
       if (r.reason !== TerminateReason.Done) console.log(chalk.yellow(`\n⚠️ ${EXIT_NOTES[r.reason]}`));
       return true;
     }
-    // /mcp [reconnect|auth|enable|disable <name>]
+    // /mcp [reload | reconnect|auth|enable|disable <name>]
     if (line === "/mcp" || line.startsWith("/mcp ")) {
       await handleMcpCommand(line.slice("/mcp".length).trim());
       return true;

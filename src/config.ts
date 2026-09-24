@@ -111,6 +111,27 @@ function readSettings(p: string): SettingsFile {
 const globalSettings = readSettings(GLOBAL_SETTINGS_PATH); // the user's defaults
 const projectSettings = readSettings(PROJECT_SETTINGS_PATH); // this project's rules
 
+// Re-read ONLY the mcpServers map from both layers, mid-session (the MCP hot
+// reload in mcp.ts). Unlike startup, a file that won't parse is NOT fatal here:
+// an editor saving in two steps can leave half-written JSON for a moment, and
+// killing a live session over that would be absurd. Return null instead — the
+// caller keeps the servers it already has and waits for the next save.
+export function readMcpServers(): Record<string, McpServerDef> | null {
+  const layers: SettingsFile[] = [];
+  for (const p of [GLOBAL_SETTINGS_PATH, PROJECT_SETTINGS_PATH]) {
+    if (!fs.existsSync(p)) {
+      layers.push({});
+      continue;
+    }
+    try {
+      layers.push(JSON.parse(fs.readFileSync(p, "utf8")) as SettingsFile);
+    } catch {
+      return null; // unparseable right now — don't guess, keep what is running
+    }
+  }
+  return { ...(layers[0].mcpServers ?? {}), ...(layers[1].mcpServers ?? {}) }; // same merge as startup: project wins
+}
+
 // User permission rules, both layers concatenated (deny from either layer wins).
 export interface PermissionRules {
   allow: string[]; // widens what runs without asking — can NEVER override a deny
