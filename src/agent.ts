@@ -33,7 +33,7 @@ import { promptSelect, promptForm } from "./menu.js"; // arrow-key approval menu
 import { editLine } from "./editor.js"; // our own line editor (keeps the status footer pinned even when input wraps)
 import { normalizeDroppedPaths } from "./drop.js"; // drag-and-drop: a dropped file's path → a clean absolute path in the input
 import { rememberTool, readMemory, readMemoryTyped, extractMemories, MEMORY_PATH } from "./memory.js"; // long-term project memory + auto-extract
-import { allSkills, currentSkills, findSkill, skillLocked, skillMode, userSkillMessages } from "./skills.js"; // Markdown-as-plugin skills
+import { allSkills, currentSkills, findSkill, recordSkillUsage, skillLocked, skillMode, userSkillMessages } from "./skills.js"; // Markdown-as-plugin skills
 import { initCostMeter, DEFAULT_PRICING } from "./cost.js"; // token & cost accounting for /cost
 import { launchInk } from "./ink/launch.js"; // the Ink REPL — the default front-end for interactive sessions
 import { listBackground, hasRunningBackground, killAllBackground } from "./background.js"; // background tasks: /bg view + kill-on-exit (Day 37)
@@ -598,6 +598,7 @@ async function main() {
       }
       for (const content of userSkillMessages(s, args)) messages.push({ role: "user", content });
       autoMode.recordRequest(`/${s.name}${args ? ` ${args}` : ""}`);
+      recordSkillUsage(s.name); // feeds the "/" typeahead's most-used ranking
       console.log(chalk.dim(`(running skill: ${s.name})`));
       running = true;
       interrupted = false;

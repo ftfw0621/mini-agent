@@ -2,7 +2,7 @@ import fs from "node:fs"; // create skill folders to load
 import os from "node:os"; // temp location
 import path from "node:path"; // join paths
 import type OpenAI from "openai"; // message shapes
-import { parseSkill, loadSkills, allSkills, skillMode, setSkillMode, nextSkillMode, skillLocked, skillPanelRows, skillListingTokens, currentSkills, findSkill, skillListing, skillListingReminder, skillBody, skillBodyMessages, substituteArguments, userSkillMessages, buildSkillTool } from "../src/skills.js"; // unit under test
+import { recordSkillUsage, skillUsageScore, parseSkill, loadSkills, allSkills, skillMode, setSkillMode, nextSkillMode, skillLocked, skillPanelRows, skillListingTokens, currentSkills, findSkill, skillListing, skillListingReminder, skillBody, skillBodyMessages, substituteArguments, userSkillMessages, buildSkillTool } from "../src/skills.js"; // unit under test
 import { runLoop, TerminateReason } from "../src/loop.js"; // the end-to-end wiring
 import { CONFIG } from "../src/config.js"; // hooks off for the loop run
 import { tools } from "../src/tools.js"; // is the skill tool registered?
@@ -91,6 +91,18 @@ checkContains("invoking an unknown skill errors", String(await tool.run({ skill:
   const msgs: OpenAI.ChatCompletionMessageParam[] = [{ role: "tool", tool_call_id: "a", content: "Launching skill: greet" }, { role: "tool", tool_call_id: "b", content: "[error] refused" }];
   const bodies = skillBodyMessages(calls, msgs, skills);
   check("a body follows only a successful launch", bodies.length === 1 && bodies[0].includes("Say hi to the user") && bodies[0].includes("ARGUMENTS: Bob"));
+}
+
+// ---- usage ranking for the "/" typeahead --------------------------------------------------
+{
+  process.env.MINI_AGENT_SKILL_USAGE = path.join(dir, "usage.json"); // scratch — never the real file
+  const now = Date.UTC(2026, 0, 1);
+  recordSkillUsage("greet", now); recordSkillUsage("greet", now);
+  check("usage counts each run", skillUsageScore("greet", now) === 2);
+  check("usage halves every 7 days", Math.abs(skillUsageScore("greet", now + 7 * 86_400_000) - 1) < 1e-9);
+  check("usage never fades below a tenth", Math.abs(skillUsageScore("greet", now + 365 * 86_400_000) - 0.2) < 1e-9);
+  check("never-used skills score 0", skillUsageScore("deploy", now) === 0);
+  delete process.env.MINI_AGENT_SKILL_USAGE;
 }
 
 // ---- /skills: on · user-only · off --------------------------------------------------------

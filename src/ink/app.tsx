@@ -9,7 +9,7 @@ import { initFormState, reduceForm, renderForm, collectAnswers, type FormQuestio
 import { CONFIG, saveGlobalSetting } from "../config.js"; // session allowlist + /model save
 import { effortMenu, setEffort } from "../effort.js";
 import { useSlashCompletion } from "./completion.js";
-import { skillTokenRanges } from "../completion.js"; // which /skill tokens in the draft to paint
+import { commandNames, commandTokenRanges, inlineCommandGhost } from "../completion.js"; // which /command tokens to paint + the mid-text ghost suggestion
 import { TerminateReason, type LoopResult, listAgentViews } from "../loop.js"; // how a turn can end
 import { compactHistory, compactThreshold, contextWindowFor } from "../context.js"; // /compact + /model info
 import { forgetFilesExcept } from "../tools.js"; // /clear resets the file read-state
@@ -24,7 +24,7 @@ import { cronItemsPending, consumeCronQueue, cronTriggerContent } from "../cron.
 import { newSessionId, saveSession, listSessions, loadSession, setSessionTitle } from "../session.js";
 import { generateSessionTitle, setTerminalTitle } from "../title.js"; // concise session name, generated after the first message + the terminal tab that shows it
 import { isPlanMode, setPlanMode } from "../permissions.js";
-import { findSkill, userSkillMessages } from "../skills.js";
+import { findSkill, recordSkillUsage, skillSource, skillUsageScores, userSkillMessages } from "../skills.js";
 import { SkillsPanel } from "./skills-panel.js"; // /skills: Claude Code's on / user-only / off manager
 import { extractMemories } from "../memory.js";
 import { displayWidth } from "../editor.js"; // display-width measurement (CJK-aware)
@@ -284,9 +284,12 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
     modelListEndpoint.current = CONFIG.baseURL;
     void client.models.list().then((page) => setCompletionModels(page.data.map((m) => m.id))).catch(() => {});
   }, [wantsModels, client]);
+  const typeaheadSkills = liveSkills().map((s) => ({ name: s.name, description: s.description, whenToUse: s.whenToUse, argNames: s.argNames, argumentHint: s.argumentHint, source: skillSource(s) }));
   const completion = useSlashCompletion(input, completing, {
-    model: CONFIG.model, skills: liveSkills(), models: completionModels, servers: listMcpServers().map((s) => s.name),
-  }, rows - 10);
+    model: CONFIG.model, skills: typeaheadSkills, models: completionModels, servers: listMcpServers().map((s) => s.name), usage: completing && input.startsWith("/") ? skillUsageScores() : undefined,
+  }, rows - 10, columns);
+  // A "/" later in the text: no list, just the rest of the best match as dim ghost text (Tab accepts).
+  const ghost = completing && cursor === input.length ? inlineCommandGhost(input, { skills: typeaheadSkills }) : null;
 
   useEffect(() => {
     const id = setInterval(() => setTick((t) => t + 1), 1000);
@@ -611,6 +614,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
         return true;
       }
       autoMode.recordRequest(`/${s.name}${args ? ` ${args}` : ""}`);
+      recordSkillUsage(s.name); // feeds the "/" typeahead's most-used ranking
       runConversationTurn(userSkillMessages(s, args), { kind: "note", text: chalk.dim(`(running skill: ${s.name})`) });
       return true;
     }
@@ -817,6 +821,11 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
       }
     }
 
+    if (key.tab && ghost) { // accept the inline suggestion as "/name "
+      const next = input.slice(0, ghost.start) + `/${ghost.full} `;
+      setInput(next); setCursor(next.length); setHistIdx(null);
+      return;
+    }
     const completionAction = completion.handleKey(key, (value) => { setInput(value); setCursor(value.length); setHistIdx(null); });
     if (completionAction.handled && !completionAction.submit) return;
 
@@ -1059,7 +1068,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
           // "/<skill>" tokens anywhere in the draft are painted — the typeahead
           // only opens at the start, but a real skill name lights up wherever
           // it is. paint() splits a slice of a line into plain and lit runs.
-          const lit = skillTokenRanges(input, liveSkills());
+          const lit = commandTokenRanges(input, commandNames({ skills: liveSkills() }));
           const isLit = (at: number) => lit.some(([a, b]) => at >= a && at < b);
           const paint = (text: string, from: number, keyBase: string): React.ReactNode[] => {
             const runs: React.ReactNode[] = [];
@@ -1102,8 +1111,9 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
                 <Box key={i}>
                   {i === 0 && <Text color={promptColor}>{prompt}</Text>}
                   <Text>{paint(before, base, "b")}</Text>
-                  <Text inverse color={isLit(base + cuOff) ? SKILL_COLOR : undefined}>{at}</Text>
+                  <Text inverse color={isLit(base + cuOff) ? SKILL_COLOR : undefined}>{ghost ? ghost.suffix[0] : at}</Text>
                   <Text>{paint(after, base + cuOff + at.length, "a")}</Text>
+                  {ghost && <Text dimColor>{ghost.suffix.slice(1)}</Text>}
                 </Box>
               );
             }

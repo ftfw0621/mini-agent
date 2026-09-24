@@ -36,6 +36,7 @@ export interface Skill {
   allowedTools: string[]; // the tools the skill should use (least privilege; advisory here)
   disableModelInvocation: boolean; // true → only the user can trigger it (/skill name), the model can't
   argumentHint: string; // e.g. "<ticket-id>", shown in completion
+  argNames: string[]; // named arguments (frontmatter `arguments`) — a skill with any is filled in on Enter, not run
   body: string; // the Markdown instructions
   path: string; // where it came from (the SKILL.md)
   dir: string; // the skill's folder — its scripts and references live here
@@ -74,6 +75,7 @@ export function parseSkill(raw: string, fallbackName: string, filePath = ""): Sk
       .filter(Boolean),
     disableModelInvocation: /^true$/i.test(fm.disableModelInvocation || fm["disable-model-invocation"] || ""),
     argumentHint: fm["argument-hint"] || "",
+    argNames: (fm.arguments || "").replace(/^\[|\]$/g, "").split(/[\s,]+/).map((a) => a.replace(/^["']|["']$/g, "")).filter(Boolean), // "a, b" or "[a, b]"
     body,
     path: filePath,
     dir: filePath ? path.dirname(filePath) : "",
@@ -203,6 +205,47 @@ export function skillPanelRows(skills: Skill[], query: string, sort: SkillSort):
 export function findSkill(skills: Skill[], name: string): Skill | undefined {
   const n = name.trim().replace(/^\//, "").toLowerCase(); // "/deploy" and "deploy" both work, like Claude Code
   return skills.find((s) => s.name.toLowerCase() === n);
+}
+
+// ---- usage: what the "/" typeahead puts first -----------------------------------------
+// Claude Code ranks a bare "/" by how much you use each skill: every run you
+// start yourself (/name or /skill name) counts, and old use fades — the score
+// halves every 7 days, never below a tenth. Kept in its own small file (not in
+// settings.json, which is for choices, not counters).
+// MINI_AGENT_SKILL_USAGE relocates it (tests point it at a scratch file).
+const usagePath = () => process.env.MINI_AGENT_SKILL_USAGE || path.join(os.homedir(), ".config", "mini-agent", "skill-usage.json");
+type Usage = Record<string, { usageCount: number; lastUsedAt: number }>;
+
+function readUsage(): Usage {
+  try {
+    return JSON.parse(fs.readFileSync(usagePath(), "utf8")) as Usage;
+  } catch {
+    return {}; // none yet, or unreadable — ranking just falls back to groups + names
+  }
+}
+
+export function recordSkillUsage(name: string, now = Date.now()): void {
+  const usage = readUsage();
+  usage[name] = { usageCount: (usage[name]?.usageCount ?? 0) + 1, lastUsedAt: now };
+  try {
+    fs.mkdirSync(path.dirname(usagePath()), { recursive: true });
+    fs.writeFileSync(usagePath(), JSON.stringify(usage, null, 2) + "\n");
+  } catch {
+    /* a counter is never worth failing a skill run over */
+  }
+}
+
+// One read of the usage file, scored per name — for the typeahead, which asks about every skill per keystroke.
+export function skillUsageScores(now = Date.now()): (name: string) => number {
+  const usage = readUsage();
+  return (name) => skillUsageScore(name, now, usage);
+}
+
+export function skillUsageScore(name: string, now = Date.now(), usage: Usage = readUsage()): number {
+  const u = usage[name];
+  if (!u) return 0;
+  const days = (now - u.lastUsedAt) / 86_400_000;
+  return u.usageCount * Math.max(0.5 ** (days / 7), 0.1);
 }
 
 // ---- the listing, as a <system-reminder> ------------------------------------------

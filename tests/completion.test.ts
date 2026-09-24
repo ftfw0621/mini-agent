@@ -1,4 +1,4 @@
-import { slashCompletions, skillTokenRanges, COMMANDS, type CompletionContext } from "../src/completion.js";
+import { slashCompletions, commandTokenRanges, commandNames, inlineCommandGhost, COMMANDS, type CompletionContext } from "../src/completion.js";
 import { SESSION_HELP } from "../src/ink/commands.js";
 import { CONFIG } from "../src/config.js";
 import { check, finish } from "./helpers.js";
@@ -24,23 +24,52 @@ try {
   check("status lists local and official account choices", values("/status").includes("/status local") && values("/status").includes("/status anthropic"));
   check("unknown commands have no fabricated choices", values("/unknown").length === 0);
 
-  // ---- skills in the "/" typeahead -------------------------------------------------------
-  const sk: CompletionContext = { ...ctx, skills: [{ name: "grill-me", description: "Interview me about a plan", whenToUse: "" }, { name: "pr-loop", description: "PR loop", whenToUse: "" }, { name: "help", description: "clashes with /help", whenToUse: "" }] };
+  // ---- skills in the "/" typeahead (Claude Code's generateCommandSuggestions) ------------------
+  const sk: CompletionContext = {
+    ...ctx,
+    skills: [
+      { name: "grill-me", description: "Interview me about a plan", whenToUse: "", source: "user" },
+      { name: "pr-loop", description: "Drive a pull request to merge", whenToUse: "", source: "user", argNames: ["pr"] },
+      { name: "zeta", description: "Project helper", whenToUse: "", source: "project" },
+      { name: "help", description: "clashes with /help", whenToUse: "" },
+    ],
+    usage: (name) => (name === "zeta" ? 5 : name === "grill-me" ? 1 : 0),
+  };
   const sv = (input: string) => slashCompletions(input, sk)?.items.map((item) => item.value) ?? [];
-  check("bare slash lists skills first, then commands", sv("/")[0] === "/grill-me" && sv("/")[1] === "/pr-loop" && sv("/").includes("/model"));
-  check("typing filters skills by prefix", JSON.stringify(sv("/gri")) === JSON.stringify(["/grill-me"]));
-  check("substring matches follow prefix matches", sv("/loop").includes("/pr-loop"));
+  const bare = sv("/");
+  check("bare slash: most-used skills first, by score", bare[0] === "/zeta" && bare[1] === "/grill-me");
+  check("then built-ins, alphabetical", bare[2] === "/auto" && bare.indexOf("/model") < bare.indexOf("/pr-loop"));
+  check("then user skills, then project skills", bare.at(-1) === "/pr-loop" || bare.indexOf("/pr-loop") > bare.indexOf("/undo"));
+  check("a prefix match comes first", sv("/gri")[0] === "/grill-me");
+  check("fuzzy: a name part matches", sv("/loop").includes("/pr-loop"));
+  check("fuzzy: description words match too", sv("/interview").includes("/grill-me"));
+  check("exact name beats everything", sv("/plan")[0] === "/plan" && sv("/mod")[0] === "/model");
   check("a built-in command wins a name clash", sv("/help").filter((v) => v === "/help").length === 1);
-  check("a skill item shows its description", slashCompletions("/gri", sk)?.items[0].description === "Interview me about a plan");
-  check("choosing a skill fills it for arguments instead of sending", slashCompletions("/gri", sk)?.items[0].children === true);
-  check("typing arguments after a skill closes the list", slashCompletions("/grill-me the plan", sk) === null);
+  {
+    const item = slashCompletions("/gri", sk)?.items[0];
+    check("a skill row shows its source like Claude Code", item?.description === "Interview me about a plan (User)");
+  }
+  check("a skill without arguments runs on Enter", slashCompletions("/gri", sk)?.items[0].children === false);
+  const pr = slashCompletions("/pr-l", sk)?.items[0];
+  check("a skill with arguments is filled in on Enter", pr?.children === true && pr.description.includes("(arguments: pr)"));
+  check("after the name, a skill with arguments shows its hint", slashCompletions("/pr-loop ", sk)?.hint === "<pr>" && slashCompletions("/pr-loop ", sk)?.items.length === 0);
+  check("once arguments are typed, nothing is in the way", slashCompletions("/pr-loop 42", sk) === null);
   check("the list only opens at the very start", slashCompletions("please /gri", sk) === null);
 
-  // ---- which /skill tokens get highlighted --------------------------------------------------
-  const r = (text: string) => JSON.stringify(skillTokenRanges(text, sk.skills));
+  // ---- a "/" later in the text: ghost text, not a list -------------------------------------------
+  const g = inlineCommandGhost("please /gri", sk);
+  check("mid-text slash suggests the rest of the best match", g?.suffix === "ll-me" && g.full === "grill-me" && g.start === 7);
+  check("built-in commands are suggested too", inlineCommandGhost("then /mod", sk)?.full === "model");
+  check("a complete name needs no ghost", inlineCommandGhost("x /model", sk) === null);
+  check("no ghost at the very start (that is the list's job)", inlineCommandGhost("/gri", sk) === null);
+
+  // ---- which /command tokens get highlighted (commands AND skills, anywhere) ----------------------
+  const names = commandNames(sk);
+  const r = (text: string) => JSON.stringify(commandTokenRanges(text, names));
   check("a skill at the start is highlighted", r("/grill-me") === "[[0,9]]");
   check("a skill anywhere in the text is highlighted", r("hi /grill-me now") === "[[3,12]]");
-  check("several skills, each highlighted", r("/pr-loop then /grill-me") === "[[0,8],[14,23]]");
+  check("built-in commands are highlighted too", r("try /model then /pr-loop") === "[[4,10],[16,24]]");
+  check("punctuation after the name still highlights", r("/grill-me, please") === "[[0,9]]");
   check("a partial name is not highlighted", r("/grill") === "[]");
   check("a longer word is not highlighted", r("/grill-mean") === "[]");
   check("a path-like token is not highlighted", r("a/grill-me") === "[]");

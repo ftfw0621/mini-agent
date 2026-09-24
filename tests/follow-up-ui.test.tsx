@@ -46,6 +46,7 @@ let modelLists = 0;
 const client = { models: { list: async () => { modelLists++; return { data: [{ id: "deepseek-flash" }, { id: "deepseek-v4-pro" }] }; } }, chat: { completions: { create: async () => ({ choices: [{ message: { content: "UI title" } }] }) } } };
 const autoMode = new AutoMode(undefined, { apiKey: "" });
 autoMode.enabled = true;
+process.env.MINI_AGENT_SKILL_USAGE = path.join(os.tmpdir(), `ma-ui-usage-${process.pid}.json`); // never read or write the real usage file
 const reviewSkill = parseSkill("---\ndescription: Review this project\n---\nInspect files", "review");
 const session = { client, messages: [], systemMessage: "test", initialSessionId: "ui-test", startedAt: Date.now(), costMeter: new CostMeter(DEFAULT_PRICING), skills: () => [reviewSkill], allSkills: () => [reviewSkill], autoMode, model: "test", dir: "demo", branch: null, bannerText: "Follow-up fixture", notices: [], getStatus: () => ({ ctxPct: 1, cost: 0, elapsedMs: 1000 }), disconnectMcp: () => {} } as unknown as InkSession;
 let hooks!: TurnHooks;
@@ -147,9 +148,9 @@ try {
   check("folded paste submits full text alongside real image data", submitted.at(-1) === `Please inspect: ${longText}[Image #3]` && JSON.stringify(submittedContent.at(-1)).includes("data:image/png;base64,"));
   check("sent follow-up keeps the compact display", allOutput.includes("> Please inspect: [Pasted text #1 +13 lines][Image #3]"));
   await key("/");
-  check("slash opens described command list below the input", frame.indexOf("Switch the model") > frame.indexOf("❯ /") && frame.includes("Choose this model"));
+  check("slash opens described command list below the input", frame.indexOf("Toggle automatic permission review") > frame.indexOf("❯ /") && frame.includes("› /auto"));
   await key("\x1b[A");
-  check("command navigation reaches choices beyond the visible window", frame.includes("› /resume"));
+  check("command navigation reaches choices beyond the visible window", frame.includes("› /review"));
   const listClears = clears; await sleep(1100);
   check("large command list stays inside viewport without repeated clears", clears === listClears && frame.trimEnd().split("\n").length < stdout.rows);
   stdout.columns = 42; stdout.rows = 12; stdout.emit("resize"); await sleep();
@@ -173,7 +174,12 @@ try {
   check("skills shows available names and descriptions inline", frame.includes("/skill review") && frame.includes("Review this project"));
   await key("\t");
   check("skill completion fills the executable invocation", frame.includes("❯ /skill review"));
-  for (let i = 0; i < "/skill review".length; i++) await key("\x7f");
+  for (let i = 0; i < "/skill review ".length; i++) await key("\x7f"); // Tab fills "/name " with a trailing space, like Claude Code
+  await key("hi /rev");
+  check("a slash mid-text shows the rest of the match as ghost text, no list", frame.includes("hi /review") && !frame.includes("↑↓ choose"));
+  await key("\t");
+  check("Tab accepts the ghost as /name ", frame.includes("❯ hi /review"));
+  for (let i = 0; i < "hi /review ".length; i++) await key("\x7f");
   // ---- /skills: Claude Code's manager (no mode change here — that would write the real settings file)
   await key("/skills"); await key("\r"); await sleep();
   check("/skills opens the manager with state, source and cost", frame.includes("Skills") && frame.includes("enter/space to cycle") && frame.includes("✔ on") && frame.includes("review · ") && frame.includes("tok"));
