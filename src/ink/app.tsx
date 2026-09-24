@@ -1,3 +1,4 @@
+import { stripVTControlCharacters } from "node:util"; // plain text of a styled status line, to find the verb
 import { statusCommand } from "../status.js";
 import React, { useState, useEffect, useRef } from "react";
 import { Box, Text, Static, useInput, useApp } from "ink";
@@ -60,7 +61,13 @@ type Pending =
 // Injected when plan mode turns on, so the model knows the rules it now lives in.
 const PLAN_MODE_NOTICE = `[plan mode ON] Investigate this request using only read-only tools — read_file, search, and safe read-only shell (ls, cat, git status). Do NOT write files, edit, or run mutating commands; the permission gate will block them. When you have a concrete, ordered plan, call the exit_plan_mode tool with that plan. The user reviews and approves it before you make any change.`;
 
-const SPINNER_FRAMES = ["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"];
+// No ✳ (U+2733): it has an emoji presentation, and terminals that honour it draw
+// it two cells wide — the text after the glyph then jumps on every other frame.
+const SPINNER_FRAMES = ["·", "✢", "✶", "✻", "✽", "✻", "✶", "✢"];
+const SPINNER_COLOR = "#D77757"; // Claude Code's orange
+const SHIMMER_PEAK = "#FFD2BD"; // the highlight that sweeps across the verb
+const SHIMMER_TICK_MS = 100; // one animation clock for glyph + shimmer → one repaint per tick
+const SHIMMER_RADIUS = 3; // how many cells the highlight fades over on each side
 
 // Cap the live streaming preview to a terminal-aware tail. THIS IS LOAD-BEARING:
 // Ink redraws the whole dynamic region (everything below <Static>) on every
@@ -78,13 +85,63 @@ function liveTail(s: string, rows: number, columns: number, queued: boolean): st
   return (page.pages > 1 ? "… " : "") + page.text;
 }
 
-function Spinner() {
-  const [f, setF] = useState(0);
+// A shared animation clock. One interval drives both the glyph and the shimmer,
+// so the live region repaints once per tick instead of once per effect.
+function useTick(): number {
+  const [tick, setTick] = useState(0);
   useEffect(() => {
-    const id = setInterval(() => setF((x) => (x + 1) % SPINNER_FRAMES.length), 120);
+    const id = setInterval(() => setTick((t) => t + 1), SHIMMER_TICK_MS);
     return () => clearInterval(id);
   }, []);
-  return <Text color="#D77757">{SPINNER_FRAMES[f]}</Text>;
+  return tick;
+}
+
+// The glyph lives in a fixed two-cell box: whatever the frame, the text after it
+// starts in the same column.
+function Glyph({ tick }: { tick: number }) {
+  return (
+    <Box width={2} flexShrink={0}>
+      <Text color={SPINNER_COLOR}>{SPINNER_FRAMES[Math.floor(tick / 2) % SPINNER_FRAMES.length]}</Text>
+    </Box>
+  );
+}
+
+function Spinner() {
+  return <Glyph tick={useTick()} />;
+}
+
+// Blend two #rrggbb colours; t = 0 → a, 1 → b.
+function mix(a: string, b: string, t: number): string {
+  const ch = (hex: string, i: number) => parseInt(hex.slice(1 + i * 2, 3 + i * 2), 16);
+  return "#" + [0, 1, 2].map((i) => Math.round(ch(a, i) + (ch(b, i) - ch(a, i)) * t).toString(16).padStart(2, "0")).join("");
+}
+
+// The light sweep: each character is coloured by its distance from a moving
+// highlight. Only COLOUR changes between frames — never a character, never a
+// width — so the line shimmers without a single cell moving.
+export function shimmer(text: string, pos: number): string {
+  return [...text].map((c, i) => {
+    const glow = Math.max(0, 1 - Math.abs(i - pos) / SHIMMER_RADIUS);
+    return chalk.hex(mix(SPINNER_COLOR, SHIMMER_PEAK, glow))(c);
+  }).join("");
+}
+
+// "✶ Thinking… (3s · ↓ 281 tokens · thought for 1s)": the verb (everything up to
+// and including the first "…") shimmers; the stats after it stay put. A pause
+// between sweeps (the highlight travels past the end) keeps it calm.
+function SpinnerLine({ text }: { text: string }) {
+  const tick = useTick();
+  const plain = stripVTControlCharacters(text);
+  const cut = plain.indexOf("…");
+  const verb = cut >= 0 && text.startsWith(plain.slice(0, cut + 1)) ? plain.slice(0, cut + 1) : ""; // shimmer only an unstyled verb
+  const period = verb.length + SHIMMER_RADIUS * 2 + 8;
+  const pos = (tick % period) - SHIMMER_RADIUS;
+  return (
+    <Box>
+      <Glyph tick={tick} />
+      <Text color={SPINNER_COLOR} wrap="truncate-end">{verb ? shimmer(verb, pos) : ""}{text.slice(verb.length)}</Text>
+    </Box>
+  );
 }
 
 // One committed line of conversation. `user` is a highlight bar; `answer` is a
@@ -879,8 +936,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
       {/* The animation remains active while calling a model or executing tools. */}
       {!details && !pending && !selectedAgent && (status !== null || busy) && (
         <Box marginTop={rows >= 20 ? 1 : 0}>
-          <Spinner />
-          <Text color="#D77757" wrap="truncate-end"> {status?.replace("Ctrl+C to interrupt", "Esc to interrupt") ?? (live !== null ? "Writing…" : "Working…")}</Text>
+          <SpinnerLine text={status?.replace("Ctrl+C to interrupt", "Esc to interrupt") ?? (live !== null ? "Writing…" : "Working…")} />
         </Box>
       )}
       {rows >= 20 && !details && !selectedAgent && !pending && (busy || getToolCallCount() > 0) && (

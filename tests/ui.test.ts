@@ -37,6 +37,9 @@ checkContains("spinner says how to bail", st, "interrupt");
 checkContains("sub-agent spinner is labeled", spinnerText("Pondering", 1, true), "sub-agent");
 checkContains("spinner shows streamed tokens", spinnerText("Mulling", 90, false, 4000), "↓ 4.0k tokens");
 check("spinner omits tokens when zero", !spinnerText("Mulling", 1, false, 0).includes("↓"));
+checkContains("spinner says thinking while reasoning streams", spinnerText("Mulling", 3, false, 100, { active: true, ms: 1500 }), "thinking");
+checkContains("spinner says thought for Ns after reasoning", spinnerText("Mulling", 3, false, 100, { active: false, ms: 1400 }), "thought for 1s");
+check("reasoning never prefixes the verb (no sideways jump)", spinnerText("Mulling", 3, false, 0, { active: true, ms: 10 }).startsWith("Mulling…"));
 
 // ---- formatters ----------------------------------------------------------------------
 check("formatTokens compacts thousands", formatTokens(4000) === "4.0k");

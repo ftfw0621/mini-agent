@@ -481,7 +481,9 @@ async function streamModelCall(
   // Reasoning is COLLAPSED by default: while the model thinks, the spinner keeps
   // spinning (with a 💭 hint) instead of dumping the trace; we stash it for Ctrl+R.
   let reasoningBuf = ""; // the accumulated thinking, hidden behind the spinner
-  let reasoningActive = false; // true while reasoning tokens are arriving → spinner shows 💭
+  let reasoningActive = false; // true while reasoning tokens are arriving → spinner says "thinking"
+  let reasoningStartedAt = 0; // when the first reasoning token arrived (0 = no reasoning this call)
+  let reasoningEndedAt = 0; // when it stopped → "thought for Ns"
   let reasoningShown = false; // has this trace been stored for Ctrl+R?
   const spinner = opts.quiet || opts.subAgent
     ? null // the eval harness wants silence
@@ -495,9 +497,10 @@ async function streamModelCall(
   // - stall (slow but alive for 30s) → log it and keep waiting
   // It also ticks the spinner: elapsed seconds + a live token estimate (~chars/4).
   const watchdog = setInterval(() => {
-    // While the model is reasoning, prefix the spinner with 💭 so "it's thinking"
-    // reads differently from "it's waiting on the first token".
-    if (spinner?.spinning) spinner.set((reasoningActive ? chalk.dim("💭 ") : "") + spinnerText(word, Math.floor((Date.now() - startedAt) / 1000), !!opts.subAgent, Math.round(streamedChars / 4)));
+    // While the model is reasoning the spinner says "thinking", then "thought
+    // for Ns" — inside the parentheses, so the verb never shifts sideways.
+    const thinking = reasoningStartedAt ? { active: reasoningActive, ms: (reasoningActive ? Date.now() : reasoningEndedAt) - reasoningStartedAt } : undefined;
+    if (spinner?.spinning) spinner.set(spinnerText(word, Math.floor((Date.now() - startedAt) / 1000), !!opts.subAgent, Math.round(streamedChars / 4), thinking));
     const quietMs = Date.now() - lastEvent; // ms since the last event
     if (quietMs > IDLE_TIMEOUT_MS) {
       emit("agent_watchdog_idle"); // record the cut — these should be rare
@@ -531,6 +534,7 @@ async function streamModelCall(
       if (!reasoningBuf || reasoningShown) return;
       reasoningShown = true;
       reasoningActive = false;
+      reasoningEndedAt = Date.now();
       if (opts.quiet || opts.subAgent) return; // no UI for silent / nested runs
       recordReasoning(reasoningBuf); // keep it for Ctrl+R (never goes into history)
     };
@@ -554,7 +558,8 @@ async function streamModelCall(
         streamedChars += reasoning.length; // count reasoning toward the live token estimate
         if (opts.progress) opts.progress.liveTokens = Math.ceil(streamedChars / 4);
         reasoningBuf += reasoning; // stash it for Ctrl+R instead of streaming it
-        reasoningActive = true; // the spinner now shows 💭 (set by the watchdog)
+        reasoningActive = true; // the spinner now says "thinking" (set by the watchdog)
+        if (!reasoningStartedAt) reasoningStartedAt = Date.now();
       }
 
       if (delta.content) {

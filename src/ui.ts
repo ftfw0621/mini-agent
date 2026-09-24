@@ -111,10 +111,16 @@ export function formatElapsed(ms: number): string {
 
 // Live activity, elapsed time and streamed tokens. The persistent status line
 // owns the model name, so each animation need not repeat it.
-export function spinnerText(word: string, elapsedSec: number, subAgent: boolean, tokens?: number): string {
+//
+// Everything that changes lives INSIDE the parentheses, after the verb. The verb
+// must never move: a prefix that comes and goes (the old "💭 " while reasoning)
+// shoves the whole line sideways every time it toggles. Reasoning is shown the
+// way Claude Code does it — "thinking" while it streams, "thought for Ns" after.
+export function spinnerText(word: string, elapsedSec: number, subAgent: boolean, tokens?: number, thinking?: { active: boolean; ms: number }): string {
   const head = subAgent ? "sub-agent" : word;
   const bits = [`${elapsedSec}s`];
   if (tokens && tokens > 0) bits.push(`↓ ${formatTokens(tokens)} tokens`);
+  if (thinking) bits.push(thinking.active ? "thinking" : `thought for ${Math.max(1, Math.round(thinking.ms / 1000))}s`);
   bits.push("Ctrl+C to interrupt");
   return `${head}… ${chalk.dim(`(${bits.join(" · ")})`)}`;
 }
