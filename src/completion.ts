@@ -39,6 +39,34 @@ export interface CompletionContext {
   models: string[];
   servers: string[];
 }
+// Every "/<skill-name>" token in the text that names a real skill, as
+// [start, end) code-unit ranges — the input box paints these. A token must
+// stand alone (start of text or after whitespace, then whitespace or end),
+// so "a/b" or "/review-ish" never light up. Case-insensitive, like findSkill.
+export function skillTokenRanges(text: string, skills: Pick<Skill, "name">[]): [number, number][] {
+  const names = new Set(skills.map((s) => s.name.toLowerCase()));
+  const out: [number, number][] = [];
+  for (const m of text.matchAll(/(^|\s)(\/[^\s/]+)(?=\s|$)/g)) {
+    const start = (m.index ?? 0) + m[1].length;
+    if (names.has(m[2].slice(1).toLowerCase())) out.push([start, start + m[2].length]);
+  }
+  return out;
+}
+
+// Typeahead over skills + built-in commands for a bare "/token" at the start
+// of the box (Claude Code lists them together, skills first). Prefix matches
+// rank above substring matches, so "/loop" still finds "pr-loop". A built-in
+// command wins a name clash — it is what actually runs.
+function commandTypeahead(input: string, ctx: CompletionContext): Completion[] {
+  const q = input.slice(1).toLowerCase();
+  const skills: Completion[] = ctx.skills
+    .filter((s) => !COMMANDS.some((c) => c.value === `/${s.name}`))
+    .map((s) => ({ value: `/${s.name}`, description: s.description || s.whenToUse, children: true })); // children → Enter fills "/name " for arguments instead of sending
+  const all = [...skills, ...COMMANDS];
+  const name = (c: Completion) => c.value.slice(1).toLowerCase();
+  return [...all.filter((c) => name(c).startsWith(q)), ...all.filter((c) => !name(c).startsWith(q) && name(c).includes(q))];
+}
+
 export function slashCompletions(input: string, ctx: CompletionContext): { items: Completion[]; hint?: string } | null {
   if (!input.startsWith("/") || /[\r\n]/.test(input)) return null;
   const [command, ...parts] = input.split(/\s+/);
@@ -75,5 +103,8 @@ export function slashCompletions(input: string, ctx: CompletionContext): { items
     const items = [{ value: "/mcp", description: "Open MCP server menu" }, { value: "/mcp reload", description: "Re-read MCP servers from settings.json" }, ...["tools", "auth", "clear-auth", "reconnect", "enable", "disable"].flatMap((action) => ctx.servers.map((name) => ({ value: `/mcp ${action} ${name}`, description: `${action} ${name}` })))];
     return { items: filter(items, input.trimEnd()) };
   }
+  if (!/\s/.test(input)) return { items: commandTypeahead(input, ctx), hint: "No matching commands or skills" };
+  // "/<skill> args…": the user is typing arguments now — no menu in the way.
+  if (ctx.skills.some((s) => `/${s.name.toLowerCase()}` === command.toLowerCase())) return null;
   return { items: filter(COMMANDS), hint: "Commands" };
 }

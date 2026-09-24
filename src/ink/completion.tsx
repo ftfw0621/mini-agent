@@ -35,7 +35,7 @@ export function useSlashCompletion(input: string, enabled: boolean, context: Com
     view: menu && (
       <Box flexDirection="column" paddingX={1}>
         {items.slice(start, start + count).map((item, i) => (
-          <Text key={item.value} color={start + i === selected ? "cyan" : undefined} bold={start + i === selected} wrap="truncate-end">
+          <Text key={item.value} color={start + i === selected ? "#B1B9F9" : undefined} bold={start + i === selected} wrap="truncate-end">
             {start + i === selected ? "› " : "  "}{item.value}  <Text dimColor>{item.description.replace(/\s+/g, " ")}</Text>
           </Text>
         ))}

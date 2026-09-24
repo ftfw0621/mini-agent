@@ -1,3 +1,4 @@
+import chalk from "chalk";
 import React from "react";
 import { spinnerText } from "../src/ui.js";
 import { render } from "ink";
@@ -30,6 +31,7 @@ CONFIG.hooks = {}; CONFIG.memory.autoExtract = false;
 const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => {}, ref: () => {}, unref: () => {} });
 const stdout = Object.assign(new PassThrough(), { isTTY: true, columns: 80, rows: 24 });
 let frame = "";
+let rawFrame = ""; // the same frame with its colours, for highlight checks
 let clears = 0;
 let allOutput = "";
 stdout.on("data", (bytes) => {
@@ -37,7 +39,7 @@ stdout.on("data", (bytes) => {
   if (text.includes("\x1b[2J")) clears++;
   const plain = stripVTControlCharacters(text);
   allOutput += plain;
-  if (plain.includes("ctx")) frame = plain;
+  if (plain.includes("ctx")) { frame = plain; rawFrame = text; }
 });
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=", "base64");
 let modelLists = 0;
@@ -158,6 +160,14 @@ try {
   check("typing filters and Tab completes a command without executing it", frame.includes("❯ /effort") && frame.includes("/effort max") && !frame.includes("empty input selects"));
   await key("high"); await key("\r");
   check("Enter submits the completed effort argument", allOutput.includes("deepseek-flash → high"));
+  const colourLevel = chalk.level; chalk.level = 3; // this check needs real colour codes (Ink colours through the same chalk)
+  await key("/rev");
+  check("typing /<skill> at the start lists the skill with its description", frame.includes("› /review") && frame.includes("Review this project"));
+  await key("\t");
+  check("Tab fills the skill for arguments and closes the list", frame.includes("❯ /review") && !frame.includes("↑↓ choose"));
+  check("the chosen skill is highlighted in the input", rawFrame.includes("38;2;177;185;249") || rawFrame.includes("\x1b[38;5;"), JSON.stringify(rawFrame.slice(0, 200)));
+  chalk.level = colourLevel;
+  for (let i = 0; i < 8; i++) await key("\x7f"); // clear the draft
   await key("/skills");
   check("skills shows available names and descriptions inline", frame.includes("/skill review") && frame.includes("Review this project"));
   await key("\t");

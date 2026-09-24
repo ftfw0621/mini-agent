@@ -9,6 +9,7 @@ import { initFormState, reduceForm, renderForm, collectAnswers, type FormQuestio
 import { CONFIG, saveGlobalSetting } from "../config.js"; // session allowlist + /model save
 import { effortMenu, setEffort } from "../effort.js";
 import { useSlashCompletion } from "./completion.js";
+import { skillTokenRanges } from "../completion.js"; // which /skill tokens in the draft to paint
 import { TerminateReason, type LoopResult, listAgentViews } from "../loop.js"; // how a turn can end
 import { compactHistory, compactThreshold, contextWindowFor } from "../context.js"; // /compact + /model info
 import { forgetFilesExcept } from "../tools.js"; // /clear resets the file read-state
@@ -65,6 +66,7 @@ const PLAN_MODE_NOTICE = `[plan mode ON] Investigate this request using only rea
 // it two cells wide — the text after the glyph then jumps on every other frame.
 const SPINNER_FRAMES = ["·", "✢", "✶", "✻", "✽", "✻", "✶", "✢"];
 const SPINNER_COLOR = "#D77757"; // Claude Code's orange
+const SKILL_COLOR = "#B1B9F9"; // Claude Code's lavender for a recognised /skill in the input
 const SHIMMER_PEAK = "#FFD2BD"; // the highlight that sweeps across the verb
 const SHIMMER_TICK_MS = 100; // one animation clock for glyph + shimmer → one repaint per tick
 const SHIMMER_RADIUS = 3; // how many cells the highlight fades over on each side
@@ -1022,6 +1024,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
 
           // Build visual lines display-width-aware (CJK, emoji = 2 cols).
           const lines: string[] = [""];
+          const lineStarts = [0]; // code-unit offset where each visual line begins (for skill highlighting)
           let row = 0;
           let col = 0;
           // Cursor tracking: map code-unit offset → (line, display-column).
@@ -1034,7 +1037,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
             if (!set && cu === cursor) { cursorLine = row; cursorCol = col; set = true; }
             const cw = displayWidth(ch);
             const limit = row === 0 ? firstW : innerWidth;
-            if (col + cw > limit) { row++; col = 0; lines[row] = ""; }
+            if (col + cw > limit) { row++; col = 0; lines[row] = ""; lineStarts[row] = cu; }
             lines[row] += ch;
             col += cw;
             cu += ch.length;
@@ -1042,7 +1045,28 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
           if (!set) { cursorLine = row; cursorCol = col; } // cursor at end
           // Cursor exactly at edge → wrap to start of next line for visibility
           const edge = cursorLine === 0 ? firstW : innerWidth;
-          if (cursorCol >= edge) { cursorLine++; cursorCol = 0; if (lines.length <= cursorLine) lines.push(""); }
+          if (cursorCol >= edge) { cursorLine++; cursorCol = 0; if (lines.length <= cursorLine) { lines.push(""); lineStarts.push(cu); } }
+
+          // "/<skill>" tokens anywhere in the draft are painted — the typeahead
+          // only opens at the start, but a real skill name lights up wherever
+          // it is. paint() splits a slice of a line into plain and lit runs.
+          const lit = skillTokenRanges(input, liveSkills());
+          const isLit = (at: number) => lit.some(([a, b]) => at >= a && at < b);
+          const paint = (text: string, from: number, keyBase: string): React.ReactNode[] => {
+            const runs: React.ReactNode[] = [];
+            let run = "";
+            let runLit = false;
+            let at = from;
+            const flush = () => { if (run) runs.push(<Text key={`${keyBase}${runs.length}`} color={runLit ? SKILL_COLOR : undefined}>{run}</Text>); run = ""; };
+            for (const ch of text) {
+              const l = isLit(at);
+              if (l !== runLit) { flush(); runLit = l; }
+              run += ch;
+              at += ch.length;
+            }
+            flush();
+            return runs;
+          };
 
           // Map display-column back to code-unit offset within the target line.
           const cursorLineText = lines[cursorLine] ?? "";
@@ -1064,19 +1088,20 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
               const before = line.slice(0, cuOff);
               const at = line.slice(cuOff, cuOff + 1) || " ";
               const after = line.slice(cuOff + 1);
+              const base = lineStarts[i] ?? 0;
               return (
                 <Box key={i}>
                   {i === 0 && <Text color={promptColor}>{prompt}</Text>}
-                  <Text>{before}</Text>
-                  <Text inverse>{at}</Text>
-                  <Text>{after}</Text>
+                  <Text>{paint(before, base, "b")}</Text>
+                  <Text inverse color={isLit(base + cuOff) ? SKILL_COLOR : undefined}>{at}</Text>
+                  <Text>{paint(after, base + cuOff + at.length, "a")}</Text>
                 </Box>
               );
             }
             return (
               <Box key={i}>
                 {i === 0 && <Text color={promptColor}>{prompt}</Text>}
-                <Text>{line}</Text>
+                <Text>{paint(line, lineStarts[i] ?? 0, "l")}</Text>
               </Box>
             );
           });
