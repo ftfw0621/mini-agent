@@ -8,7 +8,7 @@ import { CONFIG, requireApiKey, saveGlobalSetting, PROJECT_SETTINGS_PATH, GLOBAL
 import { runLoop, TerminateReason, MAX_RETRIES, type LoopResult, killAllSubAgents } from "./loop.js"; // the state machine
 import { buildSystemMessage, readProjectInstructions } from "./prompt.js"; // the constitution + optional AGENT.md project memory
 import { forgetFilesExcept, registerExternalTool } from "./tools.js"; // file-state reset + tool registration
-import { compactHistory, estimateHistoryTokens, COMPACT_AT } from "./context.js"; // for the manual /compact command
+import { compactHistory, compactThreshold, contextPercent, contextWindowFor } from "./context.js"; // /compact, /model info, the ctx % in the status line
 import { newSessionId, saveSession, latestSession, listSessions, loadSession, setSessionTitle } from "./session.js"; // conversation persistence (project-local) + the /resume picker
 import { generateSessionTitle, setTerminalTitle } from "./title.js"; // concise session name, generated after the first message + the terminal tab that shows it
 import { initTelemetry, emit, statsReport } from "./telemetry.js"; // local-only event log + /stats
@@ -474,7 +474,7 @@ async function main() {
       chalk.dim(
         `model: ${CONFIG.model}\n` +
           (CONFIG.subAgentModel ? `sub-agent model: ${CONFIG.subAgentModel} (delegated task work)\n` : "") +
-          `endpoint: ${CONFIG.baseURL}\ncontext window: ${CONFIG.contextWindow} tokens (compaction at ~${COMPACT_AT})`,
+          `endpoint: ${CONFIG.baseURL}\ncontext window: ${contextWindowFor()} tokens (auto-compact at ~${compactThreshold()})`,
       ),
     );
     if (!process.stdin.isTTY) return; // no picker without a TTY — switch with: /model <name>
@@ -863,7 +863,7 @@ async function main() {
     // input stays clean.
     let footer: string | undefined;
     if (process.stdin.isTTY) {
-      const ctxPct = Math.min(100, Math.round((estimateHistoryTokens(messages) / CONFIG.contextWindow) * 100));
+      const ctxPct = contextPercent(messages); // % of the way to auto-compaction
       console.log(""); // one blank line separates the previous answer from the prompt
       footer = statusLine(CONFIG.model, path.basename(process.cwd()), gitBranch(), ctxPct, costMeter.cost(), Date.now() - sessionStartedAt); // status pinned below the prompt
     }

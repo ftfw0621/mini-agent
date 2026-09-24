@@ -3,7 +3,7 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import { CONFIG, requireApiKey } from "../config.js";
 import { buildSystemMessage, readProjectInstructions } from "../prompt.js";
-import { estimateHistoryTokens } from "../context.js";
+import { contextPercent } from "../context.js";
 import { initCostMeter, DEFAULT_PRICING, type CostMeter } from "../cost.js";
 import { gitBranch } from "../tui.js";
 import { newSessionId, latestSession } from "../session.js";
@@ -124,7 +124,7 @@ export async function buildInkSession(opts: { resume?: boolean } = {}): Promise<
   const branch = gitBranch();
 
   const getStatus = (): StatusData => ({
-    ctxPct: Math.min(100, Math.round((estimateHistoryTokens(messages) / CONFIG.contextWindow) * 100)),
+    ctxPct: contextPercent(messages), // % of the way to auto-compaction
     cost: costMeter.cost(),
     elapsedMs: Date.now() - startedAt,
   });

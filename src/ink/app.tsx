@@ -10,7 +10,7 @@ import { CONFIG, saveGlobalSetting } from "../config.js"; // session allowlist +
 import { effortMenu, setEffort } from "../effort.js";
 import { useSlashCompletion } from "./completion.js";
 import { TerminateReason, type LoopResult, listAgentViews } from "../loop.js"; // how a turn can end
-import { compactHistory, COMPACT_AT } from "../context.js"; // /compact
+import { compactHistory, compactThreshold, contextWindowFor } from "../context.js"; // /compact + /model info
 import { forgetFilesExcept } from "../tools.js"; // /clear resets the file read-state
 import { clearUndo } from "../undo.js";
 import { clearTodos } from "../todos.js";
@@ -549,7 +549,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
         apply(name);
         return true;
       }
-      note(chalk.dim(`model: ${CONFIG.model}\nendpoint: ${CONFIG.baseURL}\ncontext window: ${CONFIG.contextWindow} tokens (compaction at ~${COMPACT_AT})`));
+      note(chalk.dim(`model: ${CONFIG.model}\nendpoint: ${CONFIG.baseURL}\ncontext window: ${contextWindowFor()} tokens (auto-compact at ~${compactThreshold()})`));
       let models: string[] = [];
       try {
         const page = await client.models.list();

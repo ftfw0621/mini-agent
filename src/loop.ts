@@ -6,7 +6,7 @@ import { toolDefinitions, dispatch, snapshotFileState, restoreFileState, isReadO
 import { classifyError, ApiErrorKind } from "./errors.js"; // failure taxonomy
 import { checkPermission } from "./permissions.js"; // the allow/ask/deny gate
 import { previewChange } from "./diff.js"; // show the diff before a write so approval is informed
-import { estimateHistoryTokens, compactHistory, COMPACT_AT, MAX_COMPACTIONS_PER_QUERY, MAX_COMPACT_FAILURES } from "./context.js"; // context management
+import { contextTokens, compactHistory, compactThreshold, recordContextUsage, MAX_COMPACTIONS_PER_QUERY, MAX_COMPACT_FAILURES } from "./context.js"; // context management
 import { SUB_AGENT_PROMPT, TEAMMATE_PROMPT } from "./prompt.js"; // the sub-agent + teammate constitutions
 import { LEAD, MAX_TEAMMATES, sendMessage, sendProtocol, readInbox, inboxCount, registerTeammate, finishTeammate, teammateExists, teammateCount, createRequest, resolveResponse, setTeammateState, anyTeammateBusy, runningTeammates, markShutdown, shutdownRequestId, resetTeam, listTeammateViews } from "./team.js"; // agent teams (Day 38) + team protocols (Day 39): mailboxes, registry, request/response contracts
 import { createTask, listTasks, claimTask, completeTask, claimNextAvailable, boardSummary, resetBoard } from "./board.js"; // the shared task board (Day 40): autonomous work claiming
@@ -474,6 +474,7 @@ async function streamModelCall(
   const idleAbort = new AbortController(); // the watchdog's own kill switch
   const signal = AbortSignal.any([opts.signal, idleAbort.signal]); // either the user or the watchdog can abort
   const word = thinkingWord(modelCallSeq++); // a rotating "thinking" word for this call
+  const sentCount = messages.length; // how much history this request carries — the usage anchor (context.ts)
   const startedAt = Date.now(); // for the spinner's live elapsed counter
   let reportedTokens: number | undefined;
   if (opts.progress) { opts.progress.activity = "Thinking"; opts.progress.liveTokens = 0; }
@@ -544,6 +545,7 @@ async function streamModelCall(
       stallWarned = false; // the stream spoke — reset the stall warning
       if (chunk.usage) {
         recordUsage(chunk.usage as unknown as Record<string, unknown>);
+        recordContextUsage(messages, sentCount, chunk.usage); // the real size of what we just sent — anchors the context count
         if (typeof chunk.usage.completion_tokens === "number") reportedTokens = chunk.usage.completion_tokens;
       } // the final usage chunk — meter it
       const delta = chunk.choices[0]?.delta; // this chunk's increment
@@ -1296,8 +1298,10 @@ export async function runLoop(
       receiveFollowUps();
 
       // Proactive compaction: act BEFORE the API rejects us. Waiting for the
-      // hard limit means the failure already happened.
-      if (estimateHistoryTokens(messages) > COMPACT_AT) {
+      // hard limit means the failure already happened. The count is the last
+      // response's real prompt_tokens + an estimate of what was added since, so
+      // the threshold can sit close to the window (see compactThreshold).
+      if (contextTokens(messages) > compactThreshold(opts.model)) {
         if (compaction.count >= MAX_COMPACTIONS_PER_QUERY)
           return { reason: TerminateReason.CompactionFailed, detail: `already compacted ${compaction.count}x this query — the task is too big for one session` };
         const ok = await tryCompact(messages, opts, compaction); // shrink the history

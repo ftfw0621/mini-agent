@@ -95,7 +95,19 @@ export MINI_AGENT_BASE_URL=https://api.openai.com/v1
 export MINI_AGENT_MODEL=gpt-4.1-mini
 ```
 
-模型必须支持 function calling。如果它的上下文窗口比 DeepSeek 小，记得设置 `MINI_AGENT_CONTEXT_WINDOW`。
+模型必须支持 function calling。如果它的上下文窗口比 DeepSeek 小（默认按约 1M 算），在 settings.json 里按模型配置窗口大小，`/model` 切换模型时会跟着变：
+
+```json
+{
+  "contextWindows": { "gpt-4.1-mini": 1000000, "deepseek-chat": 128000 }
+}
+```
+
+也可以用环境变量 `MINI_AGENT_CONTEXT_WINDOW` 统一覆盖所有模型。
+
+### 上下文和自动压缩
+
+上下文大小用的是 API 每次返回的真实 `prompt_tokens`，再加上之后新增消息的估算值，所以基本是准的。快满时自动压缩：触发点是窗口减去给回复预留的 20k 和 13k 安全余量（约 1M 的窗口大概在 97% 左右）。状态栏的 `ctx N%` 表示离自动压缩还有多远，到 100% 时下一次调用模型前就会先压缩。也可以随时手动 `/compact`。
 
 ### 配置 MCP
 

@@ -3,15 +3,34 @@ import fs from "node:fs"; // re-reading files from disk during recovery
 import OpenAI from "openai"; // API types + client type
 import chalk from "chalk"; // status lines
 import { CONFIG } from "./config.js"; // the resolved context window (env > settings files > default)
-import { recentFiles, forgetFilesExcept } from "./tools.js"; // session file state (what was read/edited, and when)
+import { recentFiles, forgetFilesExcept, toolDefinitions } from "./tools.js"; // session file state (what was read/edited, and when) + the tool manuals we send
 
 // ---- The context window ------------------------------------------------------
 // The default (1,048,565) came from a real API error message, not from docs.
 // Trust what the API tells you over what you remember reading.
-export const CONTEXT_WINDOW = CONFIG.contextWindow; // resolved in config.ts: env > project file > global file > default
-// Compact well before the hard limit: estimation is approximate and the summary
-// itself needs room. 80% is deliberately conservative.
-export const COMPACT_AT = Number(process.env.MINI_AGENT_COMPACT_AT || Math.floor(CONTEXT_WINDOW * 0.8)); // env override kept so tests can trigger compaction cheaply
+//
+// The window belongs to a MODEL, not to the session: /model can switch to one
+// with a smaller window mid-conversation. Resolution, most specific first:
+//   env MINI_AGENT_CONTEXT_WINDOW  >  settings contextWindows[<model>]  >  settings contextWindow  >  default
+export function contextWindowFor(model = CONFIG.model): number {
+  return Number(process.env.MINI_AGENT_CONTEXT_WINDOW) || CONFIG.contextWindows[model] || CONFIG.contextWindow;
+}
+
+// When to compact, the Claude Code way: not at a fixed percentage, but at
+// "window minus what we must keep free". Two reservations:
+//   - room for the model's reply (the compaction call itself writes a summary)
+//   - a safety buffer for what we can't count exactly (the tail estimate)
+// On a ~1M window that's ~97% full; on a 128k window it's ~74%, because the
+// same 33k is a bigger slice of a smaller window. The floor keeps a tiny window
+// from getting a threshold at or below zero.
+export const RESERVED_OUTPUT_TOKENS = 20_000; // Claude Code reserves min(max output, 20k)
+export const AUTOCOMPACT_BUFFER_TOKENS = 13_000; // Claude Code's AUTOCOMPACT_BUFFER_TOKENS
+export function compactThreshold(model = CONFIG.model): number {
+  const env = Number(process.env.MINI_AGENT_COMPACT_AT); // explicit override (tests use it to trigger compaction cheaply)
+  if (env) return env;
+  const window = contextWindowFor(model);
+  return Math.max(Math.floor(window * 0.6), window - RESERVED_OUTPUT_TOKENS - AUTOCOMPACT_BUFFER_TOKENS);
+}
 
 // How many times one query may compact / fail to compact before we give up.
 export const MAX_COMPACTIONS_PER_QUERY = 4; // a query that needs more is too big — stop, don't loop
@@ -39,6 +58,42 @@ export function estimateHistoryTokens(messages: OpenAI.ChatCompletionMessagePara
     if ("reasoning_content" in m && typeof m.reasoning_content === "string") total += estimateTokens(m.reasoning_content);
   }
   return total;
+}
+
+// ---- Measuring the context: real usage + an estimated tail ------------------------
+// A pure estimate has to be pessimistic, so it forces compaction early. But
+// every response already tells us the truth: usage.prompt_tokens is exactly
+// what the last request cost — system prompt, tool manuals, history, all of it.
+// So, like Claude Code: context = the last request's real prompt_tokens + an
+// estimate of only the messages appended since (the reply, tool results, the
+// next prompt). The estimated part is small, so the total is nearly exact.
+//
+// The anchor remembers the last message that request contained. If that
+// message is no longer where it was — compaction or /clear rewrote the array —
+// the anchor is stale and we fall back to estimating everything.
+type Msg = OpenAI.ChatCompletionMessageParam;
+const usageAnchors = new WeakMap<Msg[], { last: Msg; count: number; promptTokens: number }>();
+
+export function recordContextUsage(messages: Msg[], sentCount: number, usage: { prompt_tokens?: number } | null | undefined): void {
+  const promptTokens = Number(usage?.prompt_tokens ?? 0);
+  if (!sentCount || !promptTokens) return; // nothing sent, or a provider that doesn't report input tokens
+  usageAnchors.set(messages, { last: messages[sentCount - 1], count: sentCount, promptTokens });
+}
+
+// The tool manuals ride along on every request but aren't messages — a
+// history-only estimate misses them (dozens of MCP tools can be tens of thousands of tokens).
+export const estimateToolTokens = (): number => estimateTokens(JSON.stringify(toolDefinitions()), true);
+
+export function contextTokens(messages: Msg[]): number {
+  const a = usageAnchors.get(messages);
+  if (a && messages.length >= a.count && messages[a.count - 1] === a.last) return a.promptTokens + estimateHistoryTokens(messages.slice(a.count));
+  return estimateHistoryTokens(messages) + estimateToolTokens(); // no (valid) measurement yet — estimate it all
+}
+
+// For the status bar: how close we are to AUTO-COMPACTION (not to the hard
+// limit). 100% means the next model call compacts first.
+export function contextPercent(messages: Msg[], model = CONFIG.model): number {
+  return Math.min(100, Math.round((contextTokens(messages) / compactThreshold(model)) * 100));
 }
 
 // ---- The summary prompt ---------------------------------------------------------
@@ -94,7 +149,7 @@ export async function compactHistory(
   signal: AbortSignal, // Ctrl+C must abort compaction too
   log: (line: string) => void = (s) => console.log(s), // where the two progress lines go — stdout by default; the Ink REPL routes them through its sink so they don't corrupt the live region
 ): Promise<void> {
-  const before = estimateHistoryTokens(messages); // for the log line
+  const before = contextTokens(messages); // for the log line — measured, not just estimated
   log(chalk.magenta(`📦 compacting context (~${before} tokens)...`)); // automatic behavior must be visible
   const res = await client.chat.completions.create(
     {
