@@ -192,14 +192,23 @@ export const skillListingTokens = (s: Skill): number => Math.ceil(Buffer.byteLen
 export type SkillSort = "name" | "tokens" | "source";
 export const nextSkillSort = (s: SkillSort): SkillSort => (s === "name" ? "tokens" : s === "tokens" ? "source" : "name");
 
-// The panel's list: filtered by the search box (name or description), sorted.
+// The panel's list: filtered by the search box, sorted.
+// Matching is about the NAME: any part of it ("pul" finds co_dev_pulse). The
+// description only counts for a real word — 3+ characters that start one of
+// its words ("standup", "pulse") — and those rows come after the name matches.
+// A plain substring over descriptions matched everything: a single "a" is in
+// almost every sentence.
 export function skillPanelRows(skills: Skill[], query: string, sort: SkillSort): Skill[] {
   const q = query.trim().toLowerCase();
-  const rows = skills.filter((s) => !q || s.name.toLowerCase().includes(q) || s.description.toLowerCase().includes(q));
   const byName = (a: Skill, b: Skill) => a.name.localeCompare(b.name);
-  if (sort === "tokens") return rows.sort((a, b) => skillListingTokens(b) - skillListingTokens(a) || byName(a, b));
-  if (sort === "source") return rows.sort((a, b) => skillSource(a).localeCompare(skillSource(b)) || byName(a, b));
-  return rows.sort(byName);
+  const order = (rows: Skill[]) =>
+    sort === "tokens" ? rows.sort((a, b) => skillListingTokens(b) - skillListingTokens(a) || byName(a, b))
+    : sort === "source" ? rows.sort((a, b) => skillSource(a).localeCompare(skillSource(b)) || byName(a, b))
+    : rows.sort(byName);
+  if (!q) return order([...skills]);
+  const inName = skills.filter((s) => s.name.toLowerCase().includes(q));
+  const inWords = q.length >= 3 ? skills.filter((s) => !inName.includes(s) && s.description.toLowerCase().split(/[^a-z0-9]+/).some((w) => w.startsWith(q))) : [];
+  return [...order(inName), ...order(inWords)];
 }
 
 export function findSkill(skills: Skill[], name: string): Skill | undefined {

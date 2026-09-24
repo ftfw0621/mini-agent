@@ -122,7 +122,16 @@ checkContains("invoking an unknown skill errors", String(await tool.run({ skill:
   check("off still shows in the manager", findSkill(allSkills([dir]), "greet") !== undefined);
   setSkillMode("greet", "on", false);
   check("on stores nothing (the default)", !("greet" in CONFIG.skillOverrides) && findSkill(currentSkills([dir]), "greet")?.disableModelInvocation === false);
-  check("manager search matches name or description", skillPanelRows(allSkills([dir]), "hello", "name").length === 0 && skillPanelRows(allSkills([dir]), "gree", "name")[0]?.name === "greet");
+  check("manager search matches any part of the name", skillPanelRows(allSkills([dir]), "ree", "name")[0]?.name === "greet");
+  check("a single letter never matches through the description", skillPanelRows(allSkills([dir]), "u", "name").every((x) => x.name.includes("u")));
+  check("a 3+ letter word in the description still finds it", skillPanelRows(allSkills([dir]), "gree", "name")[0]?.name === "greet" && skillPanelRows(allSkills([dir]), "deplo", "name").length >= 1);
+  {
+    const pulse = [parseSkill("---\nname: co_dev_pulse\ndescription: Generate a daily Dev pulse update. Use for standup.\n---\nb", "co_dev_pulse")];
+    check("the reported case: 'a' no longer finds co_dev_pulse", skillPanelRows(pulse, "a", "name").length === 0);
+    check("'stand' finds it through its description", skillPanelRows(pulse, "stand", "name").length === 1);
+    check("'dev' finds it through its name", skillPanelRows(pulse, "dev", "name").length === 1);
+  }
+  check("description word matches must start the word", skillPanelRows(allSkills([dir]), "reet", "name").length === 1); // only the name "greet" — no description word starts with "reet"
   check("manager sorts by name", skillPanelRows(allSkills([dir]), "", "name").map((x) => x.name).join() === "deploy,greet");
   check("listing cost is a positive token estimate", skillListingTokens(g) > 0);
   CONFIG.skillOverrides = before;
