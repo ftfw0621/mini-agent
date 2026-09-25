@@ -1,6 +1,6 @@
 {
   "name": "agent-from-zero",
-  "version": "0.35.4",
+  "version": "0.35.5",
   "type": "module",
   "bin": {
     "mini-agent": "dist/agent.js"
