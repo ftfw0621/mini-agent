@@ -83,6 +83,16 @@ export interface LoopOptions {
   output?: LoopOutput; // where screen output goes — stdout by default (readline REPL); the Ink REPL passes its own sink
 }
 
+// The tool list of the last TOP-LEVEL model call. The next-prompt suggestion
+// (suggestion.ts) resends the same tools so its request shares the main
+// conversation's prefix — and the provider's prompt cache with it.
+let lastTopLevelTools: OpenAI.ChatCompletionTool[] = [];
+export const lastRequestTools = (): OpenAI.ChatCompletionTool[] => lastTopLevelTools;
+function rememberTools(opts: LoopOptions, tools: OpenAI.ChatCompletionTool[]): OpenAI.ChatCompletionTool[] {
+  if (!opts.subAgent) lastTopLevelTools = tools;
+  return tools;
+}
+
 // Resolve the output sink for a loop: the caller's sink, or stdout (the old
 // behaviour) when none was passed. Centralised so every site reads the same way.
 function sink(opts: LoopOptions): LoopOutput {
@@ -535,7 +545,7 @@ async function streamModelCall(
       // The tool manual depends on the agent kind (Lead / teammate / sub-agent)
       // — see toolsFor(). This is also where nested spawning is prevented: a
       // teammate's manual simply omits spawn_teammate and task.
-      { model: opts.model, messages: effortMessages(opts.model, messages), ...effortParameters(opts.model), tools: toolsFor(opts), stream: true, stream_options: { include_usage: true } },
+      { model: opts.model, messages: effortMessages(opts.model, messages), ...effortParameters(opts.model), tools: rememberTools(opts, toolsFor(opts)), stream: true, stream_options: { include_usage: true } },
       { signal }, // abortable by user AND watchdog
     );
     let content = ""; // accumulated answer text

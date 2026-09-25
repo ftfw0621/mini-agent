@@ -10,6 +10,9 @@
 process.env.MINI_AGENT_REVIEW_DEBUG = "0";
 // Peer sessions register in a machine-wide directory; a suite (or a CLI it
 // spawns, which inherits this) must never show up in your real /peers list.
+// Next-prompt suggestions make an extra model call after every turn; suites that
+// count calls must not see it (the UI suite switches it on where it tests it).
+process.env.MINI_AGENT_PROMPT_SUGGESTIONS = "0";
 process.env.MINI_AGENT_SESSIONS_DIR ||= `${process.env.TMPDIR || "/tmp"}/mini-agent-test-sessions-${process.pid}`;
 
 let passCount = 0; // how many checks passed so far

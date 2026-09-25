@@ -115,6 +115,12 @@ export MINI_AGENT_MODEL=gpt-4.1-mini
 
 输入 `/mcp` 选一个服务器，会看到和 Claude Code 一样的详情（状态、登录、协议版本、URL、配置文件位置、能力、工具数）和操作：View tools、Re-authenticate、Clear authentication、Reconnect、Disable。也可以直接敲 `/mcp tools|auth|clear-auth|reconnect|disable|enable <名字>`。
 
+### 下一句预测
+
+和 Claude Code 一样，每轮对话结束后，mini-agent 会猜你下一句大概要说什么（比如 “跑一下测试”、“提交并推送”），灰色显示在空的输入框里。按 Tab（或 →）变成真正的输入，可以改，也可以直接 Enter 发送。开始打字它就消失。
+
+生成预测要多调一次模型，但请求内容和刚结束的主调用相同，只在最后加了一条指令，所以基本都能命中 DeepSeek 的前缀缓存，费用很低，也会算进 `/cost`。定时任务和其他实例发来的消息触发的回合不做预测。不想要可以在 `settings.json` 里设 `"promptSuggestions": false`，或者单次运行时设环境变量 `MINI_AGENT_PROMPT_SUGGESTIONS=0`。
+
 ### 多开实例互相通信
 
 在几个终端里各开一个 mini-agent（比如一个在后端仓库、一个在前端仓库），它们会自动互相发现，不用配置。

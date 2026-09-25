@@ -60,6 +60,7 @@ let clipboardText: string | undefined;
 const peerTurns: string[] = [];
 const app = render(<App session={session} clipboard={{ read: async () => clipboardText === undefined ? { image: png } : { text: clipboardText } }} runTurn={async (_input, h) => {
   if (typeof _input === "string" && (_input.startsWith("[Message from another mini-agent session") || _input.startsWith("[The user sent this"))) { peerTurns.push(_input); return { reason: TerminateReason.Done, finalText: "answer for you" }; } // an idle-started peer turn
+  if (_input === "Quick task") { turns++; return { reason: TerminateReason.Done, finalText: "done" }; } // a turn that simply finishes
   turns++; hooks = h;
   if (_input === null) {
     for (const message of h.followUps!.drain()) h.onFollowUp?.(message.displayText ?? message.text);
@@ -195,6 +196,24 @@ try {
   check("t cycles the sort order", frame.includes("to sort (tokens)"));
   await key("\x1b");
   check("Esc closes the manager and reports no changes", allOutput.includes("No changes") && !frame.includes("enter/space to cycle"));
+  // ---- next-prompt suggestion: a dim placeholder after a turn; Tab makes it real
+  const createBefore = client.chat.completions.create;
+  let suggestionCalls = 0;
+  (client.chat.completions as { create: unknown }).create = async (params: { tool_choice?: string }) => { if (params.tool_choice === "none" || String(JSON.stringify(params)).includes("Next-prompt suggestion")) suggestionCalls++; return { choices: [{ message: { content: "run the tests" } }] }; };
+  CONFIG.promptSuggestions = true;
+  await key("Quick task"); await key("\r"); await sleep(300);
+  check("a finished turn suggests the next message as a placeholder", suggestionCalls === 1 && frame.includes("run the tests") && frame.includes("⇥ tab"), `calls=${suggestionCalls} turns=${turns}\n${frame}`);
+  await key("\t");
+  check("Tab turns the placeholder into real input", frame.includes("❯ run the tests") && !frame.includes("⇥ tab"), frame);
+  for (let i = 0; i < "run the tests".length; i++) await key("\x7f");
+  check("once accepted, it's gone (an empty box is empty again)", !frame.includes("run the tests"));
+  await key("/auto"); await key("\r"); await key("/auto"); await key("\r"); // commands don't start turns → no new guess
+  check("commands don't ask for a guess", suggestionCalls === 1);
+  CONFIG.promptSuggestions = false;
+  await key("Quick task"); await key("\r"); await sleep(300);
+  check("turned off in settings → no extra call", suggestionCalls === 1 && !frame.includes("⇥ tab"));
+  (client.chat.completions as { create: unknown }).create = createBefore;
+
   // ---- /compact draws Claude Code's progress bar, then reports the result
   const originalCreate = client.chat.completions.create;
   let finishSummary!: () => void;

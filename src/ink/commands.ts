@@ -51,6 +51,7 @@ export const SESSION_HELP = `commands:
   exit       leave (Ctrl+C does the same)
 
 keys (during or after a turn):
+  Tab / →    accept the predicted next message (the dim placeholder after a turn); Enter sends it
   /          show command suggestions below the input (while idle)
   ↑↓ / Tab   choose / complete a suggestion; Enter selects; Esc closes
   Enter      while working, queue a follow-up for the next tool boundary

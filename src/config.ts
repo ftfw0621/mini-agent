@@ -94,6 +94,7 @@ interface SettingsFile {
   memory?: {
     autoExtract?: boolean; // after each turn, a cheap call extracts durable memories (off by default — it costs an extra call)
   };
+  promptSuggestions?: boolean; // after each turn, guess your next message as a Tab-to-accept placeholder (on by default; one cheap, mostly-cached call per turn)
 }
 
 // Read one settings file. A broken settings file is a HARD error, not a warning:
@@ -221,6 +222,10 @@ export const CONFIG = {
   memory: {
     autoExtract: projectSettings.memory?.autoExtract ?? globalSettings.memory?.autoExtract ?? false,
   },
+  // Next-prompt suggestions (Claude Code's placeholder you accept with Tab). On
+  // by default: the call reuses the main conversation's cached prefix, so it is
+  // cheap. MINI_AGENT_PROMPT_SUGGESTIONS=0 turns it off for one run.
+  promptSuggestions: process.env.MINI_AGENT_PROMPT_SUGGESTIONS === "0" ? false : (projectSettings.promptSuggestions ?? globalSettings.promptSuggestions ?? true),
 };
 
 // Persist a single key to the global settings file, preserving all other keys.

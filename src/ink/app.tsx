@@ -9,6 +9,8 @@ import { initFormState, reduceForm, renderForm, collectAnswers, type FormQuestio
 import { CONFIG, saveGlobalSetting } from "../config.js"; // session allowlist + /model save
 import { effortMenu, setEffort } from "../effort.js";
 import { useSlashCompletion } from "./completion.js";
+import { generatePromptSuggestion } from "../suggestion.js"; // the predicted next message (Claude Code's prompt suggestion)
+import { lastRequestTools } from "../loop.js"; // resend the main call's tools so the guess hits the prompt cache
 import { commandNames, commandTokenRanges, inlineCommandGhost } from "../completion.js"; // which /command tokens to paint + the mid-text ghost suggestion
 import { TerminateReason, type LoopResult, listAgentViews } from "../loop.js"; // how a turn can end
 import { compactHistory, compactThreshold, contextWindowFor } from "../context.js"; // /compact + /model info
@@ -251,6 +253,8 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
   const [detailOffset, setDetailOffset] = useState(0);
   const [live, setLive] = useState<string | null>(null); // the streaming answer
   const [input, setInput] = useState(""); // the current input buffer
+  const [suggestion, setSuggestion] = useState<string | null>(null); // the predicted next message: a dim placeholder, Tab accepts it
+  const suggestionSeq = useRef(0); // bumped by every new turn, so a late guess for an old turn is dropped
   const [talkTo, setTalkTo] = useState<PeerRecord | null>(null); // /peers → talk: the input box sends to another session instead of this agent
   const replyTo = useRef<string[]>([]); // who gets this turn's final answer (the senders of "user" peer messages)
   const [images, setImages] = useState<ImageAttachment[]>([]);
@@ -299,6 +303,8 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
   }, rows - 10, columns);
   // A "/" later in the text: no list, just the rest of the best match as dim ghost text (Tab accepts).
   const ghost = completing && cursor === input.length ? inlineCommandGhost(input, { skills: typeaheadSkills }) : null;
+  // The predicted next message, shown only in an empty box while nothing else wants attention.
+  const placeholder = suggestion && !input && !busy && !pending && !talkTo && !details && subAgentFocus === null ? suggestion : null;
 
   useEffect(() => {
     const id = setInterval(() => setTick((t) => t + 1), 1000);
@@ -330,6 +336,11 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
     clearToolCalls(); // ...and Ctrl+T THIS turn's tool calls
     const senders = replyTo.current; // taken now, so a failed turn can't leak them into the next one
     replyTo.current = [];
+    // Guess the next message only after turns YOU started — not cron, not
+    // another agent's message, not your message relayed from another window.
+    const suggestAfter = CONFIG.promptSuggestions && !senders.length && (content === null || display?.kind === "user");
+    const seq = ++suggestionSeq.current;
+    setSuggestion(null);
     setBusy(true);
     setSessionState("busy", CONFIG.model); // other sessions see "busy" in list_peers
     const controller = new AbortController();
@@ -369,6 +380,11 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
         for (const to of senders) sendPeerMessage(to, result.finalText?.trim() || `(finished: ${result.reason})`, "reply");
         if (result.reason !== TerminateReason.Done && !(result.reason === TerminateReason.UserInterrupt && followUps.size)) note(chalk.yellow(`⚠️ ${EXIT_NOTES[result.reason] ?? result.reason}`));
         saveSession(sessionId, model, messages, pendingTitle.current); // snapshot after every turn — crash-safe by construction
+        if (suggestAfter && result.reason === TerminateReason.Done) {
+          void generatePromptSuggestion(client, CONFIG.model, messages, lastRequestTools()).then((guess) => {
+            if (guess && seq === suggestionSeq.current) setSuggestion(guess); // no newer turn started meanwhile (the box shows it only while idle)
+          });
+        }
         if (CONFIG.memory.autoExtract && result.reason === TerminateReason.Done) {
           try {
             const got = await extractMemories(client, CONFIG.subAgentModel || model, messages);
@@ -942,6 +958,10 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
       }
     }
 
+    if ((key.tab || (key.rightArrow && !input)) && placeholder) { // Tab (or →) turns the predicted next message into real text; Enter then sends it
+      setInput(placeholder); setCursor(placeholder.length); setHistIdx(null); setSuggestion(null);
+      return;
+    }
     if (key.tab && ghost) { // accept the inline suggestion as "/name "
       const next = input.slice(0, ghost.start) + `/${ghost.full} `;
       setInput(next); setCursor(next.length); setHistIdx(null);
@@ -1234,9 +1254,10 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
                 <Box key={i}>
                   {i === 0 && <Text color={promptColor}>{prompt}</Text>}
                   <Text>{paint(before, base, "b")}</Text>
-                  <Text inverse color={isLit(base + cuOff) ? SKILL_COLOR : undefined}>{ghost ? ghost.suffix[0] : at}</Text>
+                  <Text inverse color={isLit(base + cuOff) ? SKILL_COLOR : undefined}>{ghost ? ghost.suffix[0] : placeholder && i === 0 ? [...placeholder][0] : at}</Text>
                   <Text>{paint(after, base + cuOff + at.length, "a")}</Text>
                   {ghost && <Text dimColor>{ghost.suffix.slice(1)}</Text>}
+                  {placeholder && i === 0 && <Text dimColor wrap="truncate-end">{[...placeholder].slice(1).join("")}<Text dimColor>{"  ⇥ tab"}</Text></Text>}
                 </Box>
               );
             }
