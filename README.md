@@ -107,13 +107,25 @@ export MINI_AGENT_MODEL=gpt-4.1-mini
 
 ### 上下文和自动压缩
 
-上下文大小用的是 API 每次返回的真实 `prompt_tokens`，再加上之后新增消息的估算值，所以基本是准的。快满时自动压缩：触发点是窗口减去给回复预留的 20k 和 13k 安全余量（约 1M 的窗口大概在 97% 左右）。状态栏的 `ctx N%` 表示离自动压缩还有多远，到 100% 时下一次调用模型前就会先压缩。也可以随时手动 `/compact`。
+上下文大小用的是 API 每次返回的真实 `prompt_tokens`，再加上之后新增消息的估算值，所以基本是准的。快满时自动压缩：触发点是窗口减去给回复预留的 20k 和 13k 安全余量（约 1M 的窗口大概在 97% 左右）。状态栏的 `ctx N%` 表示离自动压缩还有多远，到 100% 时下一次调用模型前就会先压缩。也可以随时手动 `/compact`。不管是手动还是自动，压缩时都会像 Claude Code 一样显示 `Compacting conversation…` 和进度条。
 
 ### 配置 MCP
 
 在 `~/.config/mini-agent/settings.json`（全局）或 `.mini-agent/settings.json`（项目级）的 `mcpServers` 里添加服务器，写法和 Claude Code 一样。保存后会话里自动生效，不用重启：新加的服务器会连上，删掉的会断开，改过的会重连。也可以手动运行 `/mcp reload`。服务器自己的工具有增减时（MCP 的 `tools/list_changed` 通知），工具列表也会自动更新。启动时 MCP 在后台并行连接，不会卡住输入框，哪个连上了它的工具就马上可用；有连接失败的，状态栏右下角会用红色标出是哪个（需要登录的是黄色）。
 
 输入 `/mcp` 选一个服务器，会看到和 Claude Code 一样的详情（状态、登录、协议版本、URL、配置文件位置、能力、工具数）和操作：View tools、Re-authenticate、Clear authentication、Reconnect、Disable。也可以直接敲 `/mcp tools|auth|clear-auth|reconnect|disable|enable <名字>`。
+
+### 多开实例互相通信
+
+在几个终端里各开一个 mini-agent（比如一个在后端仓库、一个在前端仓库），它们会自动互相发现，不用配置。
+
+- `/peers` 列出本机其他实例：名字、空闲/忙、目录和分支、在哪个终端（比如 `iTerm2 · ttys003`，tmux 里会显示 pane）、正在做什么。选一个之后可以：
+  - **Talk to**：输入框变成 `→ web ❯`，你打的字直接发给那个实例，它处理完会把回答发回你这个窗口。按 Esc 回到当前 agent。
+  - **Identify**：让那个实例响铃、刷一条横幅、让标签页标题闪几秒，用来确认它是哪个窗口。
+- 终端标签页标题带着实例名（`✳ web · 会话标题`），`/rename <名字>` 可以改名。
+- agent 之间也能自己沟通：模型有 `list_peers` 工具，`send_message` 可以直接发给其他实例。对方空闲时会自动开一轮处理，忙的话等当前这一轮结束再处理。另一个 agent 发来的消息不算用户的授权。为了防止两个 agent 互相回复停不下来，连续自动处理 5 轮之后会暂停，等你输入任何内容再继续。
+
+所有数据都存在 `~/.config/mini-agent/sessions/` 下，只在本机，不经过网络。
 
 ### 非交互模式
 
@@ -125,7 +137,7 @@ npx agent-from-zero -p "总结当前改动" --output-format json
 
 ## 常用命令
 
-在会话里输入 `/help` 可以看到全部命令，比较常用的有：`/model` `/effort` `/plan` `/auto` `/skills` `/mcp` `/memory` `/compact` `/diff` `/undo` `/resume` `/status` `/cost`。
+在会话里输入 `/help` 可以看到全部命令，比较常用的有：`/model` `/effort` `/plan` `/auto` `/skills` `/mcp` `/peers` `/memory` `/compact` `/diff` `/undo` `/resume` `/status` `/cost`。
 
 ## 开发
 

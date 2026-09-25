@@ -1137,7 +1137,7 @@ function injectCronMessages(messages: OpenAI.ChatCompletionMessageParam[], opts:
 // waits in the inbox for the idle processor, which has its own counter.
 function injectPeerMessages(messages: OpenAI.ChatCompletionMessageParam[], opts: LoopOptions, delivered: { count: number }): void {
   if (opts.subAgent || !currentSession() || delivered.count >= MAX_PEER_TURNS) return;
-  const got = readPeerInbox();
+  const got = readPeerInbox(["agent"]); // the user's own messages from another window wait for the idle processor, which answers them back there
   if (!got.length) return;
   delivered.count++;
   messages.push({ role: "user", content: peerMessageContent(got) });

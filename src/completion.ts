@@ -29,7 +29,7 @@ export const COMMANDS: Completion[] = [
   { value: "/team", description: "Show teammates and status" },
   { value: "/tasks", description: "Show the shared task board" },
   { value: "/cron", description: "Show scheduled jobs" },
-  { value: "/peers", description: "Show other mini-agent sessions on this machine" },
+  { value: "/peers", description: "Talk to another mini-agent session, or find its window" },
   { value: "/rename", description: "Rename this session for other sessions", children: true },
   { value: "/undo", description: "Revert the most recent file write" },
   { value: "/diff", description: "Show file changes this session" },

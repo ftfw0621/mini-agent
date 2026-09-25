@@ -1,3 +1,4 @@
+import { currentSession, setSessionInfo } from "./peers.js"; // the session name goes on the tab; the title goes to /peers
 import type OpenAI from "openai"; // the client is injected so title generation reuses the session's connection
 
 // One cheap model call that turns the user's first prompt into a short,
@@ -23,9 +24,43 @@ export function terminalTitleSequence(title: string): string {
 
 // Rename the terminal tab. Silent when stdout isn't a terminal (pipes, tests,
 // print mode) — an escape sequence in a log file is just noise.
+//
+// With peer sessions the tab also carries this session's NAME ("✳ web · Fix
+// login"): /peers lists sessions by name, and the tab is where you look for one.
+let lastTitle: string | undefined; // remembered so a rename (or the end of a flash) can redraw it
+let flashing: ReturnType<typeof setInterval> | null = null;
+export function tabTitle(title: string | undefined, name = currentSession()?.name): string {
+  const base = title ? `${TAB_PREFIX}${title}` : "mini-agent";
+  return name ? (title ? `${TAB_PREFIX}${name} · ${title}` : `mini-agent · ${name}`) : base;
+}
 export function setTerminalTitle(title: string | undefined): void {
+  lastTitle = title;
+  setSessionInfo({ title: title ?? "" }); // other sessions' /peers show it too
+  if (!process.stdout.isTTY || flashing) return;
+  process.stdout.write(terminalTitleSequence(tabTitle(title)));
+}
+export const refreshTerminalTitle = (): void => setTerminalTitle(lastTitle);
+
+// "Which window is this?" — another session asked. Ring the bell and blink the
+// tab title for a few seconds, then put the real title back.
+export function flashTerminalTitle(ms = 6000): void {
   if (!process.stdout.isTTY) return;
-  process.stdout.write(terminalTitleSequence(title ? `${TAB_PREFIX}${title}` : "mini-agent"));
+  process.stdout.write("\x07");
+  const name = currentSession()?.name ?? "mini-agent";
+  let on = false;
+  if (flashing) clearInterval(flashing);
+  const stopAt = Date.now() + ms;
+  flashing = setInterval(() => {
+    on = !on;
+    if (Date.now() >= stopAt) {
+      clearInterval(flashing!);
+      flashing = null;
+      process.stdout.write(terminalTitleSequence(tabTitle(lastTitle)));
+      return;
+    }
+    process.stdout.write(terminalTitleSequence(on ? `👋 ${name} — HERE 👋` : tabTitle(lastTitle)));
+  }, 500);
+  flashing.unref();
 }
 
 // The prompt is quoted inside <prompt> tags and the system message says so

@@ -13,4 +13,9 @@ export async function launchInk(opts: { resume?: boolean } = {}): Promise<void> 
   const session = await buildInkSession({ resume: opts.resume });
   const { waitUntilExit } = render(<App session={session} runTurn={makeRunTurn(session.client, session.messages)} />);
   await waitUntilExit(); // keep the process alive until the user quits
+  // Then leave for real. The cron poll, the settings watcher and friends keep
+  // the event loop busy, so without this the process lingers after the UI is
+  // gone — and the process.on("exit") cleanups (MCP servers, background jobs,
+  // this session's peer record) never run.
+  process.exit(0);
 }

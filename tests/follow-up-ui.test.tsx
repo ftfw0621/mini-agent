@@ -59,7 +59,7 @@ const submittedContent: unknown[] = [];
 let clipboardText: string | undefined;
 const peerTurns: string[] = [];
 const app = render(<App session={session} clipboard={{ read: async () => clipboardText === undefined ? { image: png } : { text: clipboardText } }} runTurn={async (_input, h) => {
-  if (typeof _input === "string" && _input.startsWith("[Message from another mini-agent session")) { peerTurns.push(_input); return { reason: TerminateReason.Done }; } // an idle-started peer turn
+  if (typeof _input === "string" && (_input.startsWith("[Message from another mini-agent session") || _input.startsWith("[The user sent this"))) { peerTurns.push(_input); return { reason: TerminateReason.Done, finalText: "answer for you" }; } // an idle-started peer turn
   turns++; hooks = h;
   if (_input === null) {
     for (const message of h.followUps!.drain()) h.onFollowUp?.(message.displayText ?? message.text);
@@ -219,8 +219,39 @@ try {
   check("an idle session answers a peer message on its own", peerTurns.length === 1 && peerTurns[0].includes("hello from web") && allOutput.includes("✉ message from web (/work/web)"));
   for (let i = 1; i <= MAX_PEER_TURNS; i++) { dropPeerMessage(`again ${i}`); await sleep(1300); }
   check("automatic peer turns stop after the cap", peerTurns.length === MAX_PEER_TURNS && allOutput.includes("paused after"), String(peerTurns.length));
+  // /peers: a picker of other sessions; talk to one from this input box
+  const other = { id: "0therpeer", name: "web", pid: process.pid, cwd: "/work/web", branch: "main", model: "m", startedAt: Date.now(), lastSeen: Date.now(), state: "idle", terminal: "iTerm2 · ttys042", title: "Fix login" };
+  const sessDir = process.env.MINI_AGENT_SESSIONS_DIR!;
+  fs.mkdirSync(path.join(sessDir, other.id, "inbox"), { recursive: true });
+  fs.writeFileSync(path.join(sessDir, `${other.id}.json`), JSON.stringify(other));
+  const otherInbox = () => fs.readdirSync(path.join(sessDir, other.id, "inbox")).map((f) => JSON.parse(fs.readFileSync(path.join(sessDir, other.id, "inbox", f), "utf8")) as PeerMessage);
   await key("/peers"); await key("\r");
-  check("/peers shows this session", allOutput.includes('You are session "ui"'));
+  check("/peers lists sessions with their terminal and what they're doing", frame.includes("Other mini-agent sessions") && frame.includes("iTerm2 · ttys042") && frame.includes("Fix login"), frame);
+  await key("\r"); // pick "web"
+  check("picking one offers talk / identify", frame.includes("Talk to web") && frame.includes("Identify it"));
+  await key("\x1b[B"); await key("\r"); // Identify
+  check("identify sends a ping to that session", otherInbox().some((m) => m.kind === "identify"));
+  fs.rmSync(path.join(sessDir, other.id, "inbox"), { recursive: true, force: true }); fs.mkdirSync(path.join(sessDir, other.id, "inbox"));
+  await key("/peers"); await key("\r"); await key("\r"); await key("\r"); // web → Talk
+  check("talk mode changes the prompt", frame.includes("→ web ❯"));
+  const turnsBefore = turns;
+  await key("what does GET /users return?"); await key("\r");
+  check("typed text goes to that session as the user's message, not to this agent", otherInbox().some((m) => m.kind === "user" && m.text === "what does GET /users return?") && turns === turnsBefore && allOutput.includes("→ web: what does GET /users return?"));
+  await key("\x1b");
+  check("Esc returns to this agent", !frame.includes("→ web ❯") && allOutput.includes("back to this agent"));
+  // The other side: its reply and its "which window?" ping show on screen only.
+  const me2 = currentSession()!;
+  const toMe = (kind: PeerMessage["kind"], text: string) => { const m: PeerMessage = { id: String(kind), kind, from: { id: other.id, name: "web", cwd: "/work/web", branch: "main" }, to: me2.id, text, sentAt: Date.now() }; fs.writeFileSync(path.join(sessDir, me2.id, "inbox", inboxFileName(m)), JSON.stringify(m)); };
+  await sleep(1300); // the message held by the cap is released once you typed something
+  const peerTurnsBefore = peerTurns.length;
+  toMe("reply", "GET /users returns a list"); toMe("identify", "ui"); await sleep(1300);
+  check("a reply is shown without starting a turn", allOutput.includes("web replied") && allOutput.includes("GET /users returns a list") && peerTurns.length === peerTurnsBefore);
+  check("an identify ping shows which window this is", allOutput.includes('This window is session "ui"'));
+  // A message the user typed in the other window: starts a turn even past the cap, answer goes back.
+  toMe("user", "please run the tests"); await sleep(1300);
+  check("a user message from another window runs a turn despite the cap", peerTurns.length === peerTurnsBefore + 1 && peerTurns.at(-1)!.includes("please run the tests"));
+  await sleep(200);
+  check("…and the answer is sent back to that window", otherInbox().some((m) => m.kind === "reply" && m.text === "answer for you"));
   unregisterSession();
   await key("/model"); await sleep();
   check("model options come from the active endpoint", frame.includes("/model deepseek-v4-pro") && modelLists === 1);

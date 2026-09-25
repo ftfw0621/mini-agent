@@ -10,7 +10,7 @@ import { buildSystemMessage, readProjectInstructions } from "./prompt.js"; // th
 import { forgetFilesExcept, registerExternalTool } from "./tools.js"; // file-state reset + tool registration
 import { compactHistory, compactThreshold, contextPercent, contextWindowFor } from "./context.js"; // /compact, /model info, the ctx % in the status line
 import { newSessionId, saveSession, latestSession, listSessions, loadSession, setSessionTitle } from "./session.js"; // conversation persistence (project-local) + the /resume picker
-import { generateSessionTitle, setTerminalTitle } from "./title.js"; // concise session name, generated after the first message + the terminal tab that shows it
+import { generateSessionTitle, setTerminalTitle, refreshTerminalTitle } from "./title.js"; // concise session name, generated after the first message + the terminal tab that shows it
 import { initTelemetry, emit, statsReport } from "./telemetry.js"; // local-only event log + /stats
 import { runHooks } from "./hooks.js"; // SessionStart lifecycle hook
 import { connectMcpServers, listMcpServers, MCP_SUBCOMMANDS, mcpActionsFor, mcpServerDetails, reloadMcpServers, runMcpAction, watchMcpConfig } from "./mcp.js"; // external tool servers (MCP) + /mcp
@@ -28,7 +28,7 @@ import { renderDiff } from "./diff.js"; // show what /undo put back / what /diff
 import path from "node:path"; // shorten paths for the /diff summary
 import { expandMentions } from "./mentions.js"; // @file mentions: pull referenced files into context (secret files refused)
 import { banner, framedPrompt, formatModelChoices, statusLine, sentMessage } from "./ui.js"; // welcome box, prompt, model labels, status line, sent-message echo
-import { listPeers, peerInboxPending, peerMessageContent, peersCommand, readPeerInbox, registerSession, setSessionState, unregisterSession } from "./peers.js"; // peer sessions: other mini-agent processes on this machine
+import { SCREEN_KINDS, listPeers, peerInboxPending, peerMessageContent, peersCommand, readPeerInbox, registerSession, setSessionState, unregisterSession } from "./peers.js"; // peer sessions: other mini-agent processes on this machine
 import { STDOUT_OUTPUT } from "./output.js"; // /compact draws its progress bar with the same ora spinner the loop uses
 import { gitBranch, toggleLastCollapsed, revealReasoning, clearReasoning, revealToolCalls, clearToolCalls, cleanup as tuiCleanup } from "./tui.js"; // git branch + collapsible output + collapsed reasoning (Ctrl+R) + folded tool-call trace (Ctrl+T)
 import { promptSelect, promptForm } from "./menu.js"; // arrow-key approval menu + multi-question form
@@ -316,6 +316,7 @@ async function main() {
   const me = registerSession({ cwd: process.cwd(), branch: gitBranch(), model: CONFIG.model });
   process.on("exit", unregisterSession);
   const otherSessions = listPeers().length;
+  refreshTerminalTitle(); // the tab now carries this session's name
   if (otherSessions) console.log(chalk.dim(`(peers: this session is "${me.name}"; ${otherSessions} other session${otherSessions === 1 ? "" : "s"} online — /peers)`));
 
   // ONE readline interface for the whole session — the task prompt and the
@@ -560,6 +561,7 @@ async function main() {
     const peers = peersCommand(line); // /peers, /rename <name>
     if (peers !== null) {
       console.log(chalk.dim(peers));
+      refreshTerminalTitle();
       return true;
     }
     if (line === "/status" || line.startsWith("/status ")) {
@@ -934,6 +936,11 @@ async function main() {
 
     // The readline prompt blocks on your input, so it cannot start a turn by
     // itself: peer messages that arrived while you were typing ride along now.
+    for (const m of readPeerInbox(SCREEN_KINDS)) {
+      // Replies and "which window?" pings are for you, not the model.
+      if (m.kind === "identify") { process.stdout.write("\x07"); console.log(chalk.bgMagenta.white.bold(` 👋 This window is session "${m.text}" — the "${m.from.name}" window was looking for it `)); }
+      else console.log(chalk.magenta(`↩ ${m.from.name} replied:\n`) + m.text);
+    }
     if (peerInboxPending()) {
       const got = readPeerInbox();
       if (got.length) {

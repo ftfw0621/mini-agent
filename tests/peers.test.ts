@@ -4,7 +4,7 @@ import path from "node:path"; // join paths
 import { spawn } from "node:child_process"; // a real second process, to prove pid liveness
 import type OpenAI from "openai"; // message shapes
 import { check, checkContains, finish } from "./helpers.js"; // assertions (also isolates the sessions dir)
-import { inboxFileName, currentSession, describePeers, findPeer, listPeers, peerInboxPending, peerMessageContent, peersCommand, readPeerInbox, registerSession, renameSession, sendPeerMessage, sessionsDir, setSessionState, unregisterSession, type PeerMessage, type PeerRecord } from "../src/peers.js"; // unit under test
+import { inboxFileName, peerRow, setSessionInfo, SCREEN_KINDS, currentSession, describePeers, findPeer, listPeers, peerInboxPending, peerMessageContent, peersCommand, readPeerInbox, registerSession, renameSession, sendPeerMessage, sessionsDir, setSessionState, unregisterSession, type PeerMessage, type PeerRecord } from "../src/peers.js"; // unit under test
 import { runLoop, TerminateReason } from "../src/loop.js"; // delivery + send_message end to end
 import { CONFIG } from "../src/config.js"; // hooks off for the loop run
 
@@ -13,7 +13,7 @@ const dir = sessionsDir();
 
 // Another session, faked on disk: a record + an inbox, like a real one writes.
 function fakePeer(over: Partial<PeerRecord>): PeerRecord {
-  const rec: PeerRecord = { id: Math.random().toString(16).slice(2, 10), name: "web", pid: process.pid, cwd: "/work/web", branch: "main", model: "m", startedAt: Date.now(), lastSeen: Date.now(), state: "idle", ...over };
+  const rec: PeerRecord = { id: Math.random().toString(16).slice(2, 10), name: "web", pid: process.pid, cwd: "/work/web", branch: "main", model: "m", startedAt: Date.now(), lastSeen: Date.now(), state: "idle", terminal: "iTerm2 · ttys009", ...over };
   fs.mkdirSync(path.join(dir, rec.id, "inbox"), { recursive: true });
   fs.writeFileSync(path.join(dir, `${rec.id}.json`), JSON.stringify(rec));
   return rec;
@@ -122,6 +122,26 @@ const second = seen[1] ?? [];
 const toolIdx = second.findIndex((m) => m.role === "tool");
 const peerIdx = second.findIndex((m) => m.role === "user" && String(m.content).includes("the reply from web"));
 check("a message arriving mid-turn is delivered after the tool results", toolIdx >= 0 && peerIdx > toolIdx, `${toolIdx} ${peerIdx}`);
+
+// ---- kinds: the conversation and the screen take different messages ----------
+const drop = (kind: PeerMessage["kind"], text: string) => {
+  const msg: PeerMessage = { id: text, kind, from: { id: web.id, name: "web", cwd: "/work/web", branch: null }, to: me.id, text, sentAt: Date.now() };
+  fs.writeFileSync(path.join(dir, me.id, "inbox", inboxFileName(msg)), JSON.stringify(msg));
+};
+readPeerInbox(); readPeerInbox(SCREEN_KINDS);
+drop("reply", "the answer"); drop("identify", "api"); drop("user", "from the human"); drop(undefined, "legacy agent");
+check("conversation kinds skip replies and pings", peerInboxPending() === 2 && peerInboxPending(SCREEN_KINDS) === 2);
+check("reading one kind leaves the others", readPeerInbox(["user"]).map((m) => m.text).join() === "from the human" && peerInboxPending() === 1 && peerInboxPending(SCREEN_KINDS) === 2);
+check("screen kinds come out together", readPeerInbox(SCREEN_KINDS).map((m) => m.kind).join() === "reply,identify");
+const human: PeerMessage = { id: "h", kind: "user", from: { id: web.id, name: "web", cwd: "/work/web", branch: null }, to: me.id, text: "run the tests", sentAt: 1 };
+const humanEnvelope = peerMessageContent([human]);
+check("a message typed by the user is not disclaimed as another agent's", humanEnvelope.includes("The user sent this") && !humanEnvelope.includes("not from the user"));
+check("sessions record which terminal they run in", typeof currentSession()!.terminal === "string" && currentSession()!.terminal.length > 0);
+setSessionInfo({ lastPrompt: "fix   the\nlogin bug" });
+check("last prompt is stored on one line", currentSession()!.lastPrompt === "fix the login bug");
+const row = peerRow({ ...web, cwd: path.join(os.homedir(), "work/web"), title: "Fix login" });
+check("picker row: name, state, ~path, branch, terminal, what it's doing", row.startsWith("web  ·  idle  ·  ~/work/web (main)  ·  iTerm2 · ttys009  ·  “Fix login”"), row);
+checkContains("identify by id works for send", sendPeerMessage(web.id, "web", "identify"), "Delivered");
 
 // ---- leaving ----------------------------------------------------------------
 const myId = me.id;

@@ -20,10 +20,10 @@ import { resetBoard } from "../board.js";
 import { clearReasoning, clearToolCalls, getReasoning, getToolCalls, getToolActivity, getToolCallCount, cleanup as tuiCleanup } from "../tui.js";
 import { expandMentions } from "../mentions.js"; // @file mentions → attach file contents
 import { normalizeDroppedPaths } from "../drop.js"; // drag-and-drop a file → its absolute path in the input
-import { peerInboxPending, readPeerInbox, peerMessageContent, peersCommand, setSessionState, MAX_PEER_TURNS } from "../peers.js"; // peer sessions: messages from other mini-agent windows start a turn while idle
+import { peerInboxPending, readPeerInbox, peerMessageContent, peersCommand, setSessionState, setSessionInfo, listPeers, findPeer, peerRow, sendPeerMessage, SCREEN_KINDS, MAX_PEER_TURNS, type PeerRecord } from "../peers.js"; // peer sessions: messages from other mini-agent windows start a turn while idle
 import { cronItemsPending, consumeCronQueue, cronTriggerContent } from "../cron.js"; // cron scheduler (Day s14): fire scheduled jobs autonomously while idle
 import { newSessionId, saveSession, listSessions, loadSession, setSessionTitle } from "../session.js";
-import { generateSessionTitle, setTerminalTitle } from "../title.js"; // concise session name, generated after the first message + the terminal tab that shows it
+import { generateSessionTitle, setTerminalTitle, refreshTerminalTitle, flashTerminalTitle } from "../title.js"; // concise session name, generated after the first message + the terminal tab that shows it
 import { isPlanMode, setPlanMode } from "../permissions.js";
 import { findSkill, recordSkillUsage, skillSource, skillUsageScores, userSkillMessages } from "../skills.js";
 import { SkillsPanel } from "./skills-panel.js"; // /skills: Claude Code's on / user-only / off manager
@@ -251,6 +251,8 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
   const [detailOffset, setDetailOffset] = useState(0);
   const [live, setLive] = useState<string | null>(null); // the streaming answer
   const [input, setInput] = useState(""); // the current input buffer
+  const [talkTo, setTalkTo] = useState<PeerRecord | null>(null); // /peers → talk: the input box sends to another session instead of this agent
+  const replyTo = useRef<string[]>([]); // who gets this turn's final answer (the senders of "user" peer messages)
   const [images, setImages] = useState<ImageAttachment[]>([]);
   const pasting = useRef(false);
   const imageSeq = useRef(0);
@@ -361,6 +363,10 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
     };
     runTurn(content, hooks)
       .then(async (result: LoopResult) => {
+        // A turn started by the user from another window: show them the answer there.
+        const senders = replyTo.current;
+        replyTo.current = [];
+        for (const to of senders) sendPeerMessage(to, result.finalText?.trim() || `(finished: ${result.reason})`, "reply");
         if (result.reason !== TerminateReason.Done && !(result.reason === TerminateReason.UserInterrupt && followUps.size)) note(chalk.yellow(`⚠️ ${EXIT_NOTES[result.reason] ?? result.reason}`));
         saveSession(sessionId, model, messages, pendingTitle.current); // snapshot after every turn — crash-safe by construction
         if (CONFIG.memory.autoExtract && result.reason === TerminateReason.Done) {
@@ -421,6 +427,16 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
     const id = setInterval(() => {
       const waiting = peerInboxPending();
       if (!waiting || turn.current) return;
+      const fromUser = peerInboxPending(["user"]);
+      if (fromUser) {
+        // You, typing in another window: never held by the agent-to-agent cap.
+        const got = readPeerInbox(["user"]);
+        peerTurns.current = 0;
+        peerHoldNoted.current = false;
+        replyTo.current = [...new Set(got.map((m) => m.from.id))];
+        runConversationTurn(peerMessageContent(got), { kind: "user", text: `${got.map((m) => m.text).join("\n")}   ${chalk.magenta(`(from your "${got[0].from.name}" window)`)}` });
+        return;
+      }
       if (peerTurns.current >= MAX_PEER_TURNS) {
         if (!peerHoldNoted.current) note(chalk.yellow(`✉ ${waiting} peer message${waiting > 1 ? "s" : ""} waiting — paused after ${MAX_PEER_TURNS} automatic turns in a row; send anything to continue`));
         peerHoldNoted.current = true;
@@ -436,11 +452,62 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [busy, pending]);
 
+  // Replies and "which window are you?" pings are for the SCREEN, not the model:
+  // handled even mid-turn, never starting a model call.
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (!peerInboxPending(SCREEN_KINDS)) return;
+      for (const m of readPeerInbox(SCREEN_KINDS)) {
+        if (m.kind === "identify") {
+          flashTerminalTitle();
+          note(chalk.bgMagenta.white.bold(` 👋 This window is session "${m.text}" — the "${m.from.name}" window is looking for it `));
+        } else {
+          note(chalk.magenta(`↩ ${m.from.name} replied:`));
+          pushItem({ kind: "answer", text: m.text });
+        }
+      }
+    }, 1000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // /peers: pick another session, then talk to it (the input box addresses it)
+  // or make it identify itself (bell + flashing tab) so you know which window it is.
+  const openPeers = () => {
+    const peers = listPeers();
+    if (!peers.length) return note(chalk.dim(peersCommand("/peers")!));
+    openSelect("Other mini-agent sessions — pick one", [...peers.map(peerRow), "Cancel"], (i) => {
+      const p = peers[i];
+      if (!p) return;
+      openSelect(`${p.name} · ${p.terminal}`, [`Talk to ${p.name} — type in this box, Esc to come back`, "Identify it — ring its bell and flash its tab title", "Cancel"], (j) => {
+        if (j === 0) {
+          setTalkTo(p);
+          note(chalk.magenta(`→ talking to "${p.name}" (${p.terminal}). What you type goes there; its answer comes back here. Esc returns to this agent.`));
+        } else if (j === 1) {
+          const sent = sendPeerMessage(p.id, p.name, "identify");
+          note(sent.startsWith("[error]") ? chalk.yellow(sent) : chalk.dim(`(asked "${p.name}" to flash its tab — look for 👋 ${p.name} — HERE)`));
+        }
+      }, peerRow(p));
+    });
+  };
+
   // A normal (non-command) prompt: run UserPromptSubmit hooks, expand @file
   // mentions, then start the turn. Mirrors agent.ts's submit path.
   const submitLine = async (draft: string, attachments: readonly ImageAttachment[] = [], immediate = false) => {
     peerTurns.current = 0; // a human is here: peers may start turns again
     peerHoldNoted.current = false;
+    // Talk mode: plain text goes to the chosen session, even while this agent works.
+    if (talkTo && !pending && !draft.startsWith("/")) {
+      const text = pastedTexts.expand(draft);
+      const alive = findPeer(talkTo.id);
+      if (!alive) { setTalkTo(null); return note(chalk.yellow(`"${talkTo.name}" is no longer running — back to this agent`)); }
+      const sent = sendPeerMessage(alive.id, text, "user");
+      if (sent.startsWith("[error]")) return note(chalk.yellow(sent));
+      pushItem({ kind: "user", text: `→ ${alive.name}: ${draft}` });
+      if (alive.state === "busy") note(chalk.dim(`("${alive.name}" is busy — it answers when its current turn ends)`));
+      return;
+    }
+    if (!draft.startsWith("/")) setSessionInfo({ lastPrompt: draft });
     if (!pending && turn.current && (draft.startsWith("/") || draft === "exit" || draft === "quit")) {
       note(chalk.dim("Commands are available when the agent is idle; use Esc to interrupt."));
       return;
@@ -586,8 +653,9 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
       setAutoEnabled(autoMode.enabled);
       return true;
     }
-    const peers = peersCommand(line); // /peers, /rename <name>
-    if (peers !== null) { note(chalk.dim(peers)); return true; }
+    if (line === "/peers") { openPeers(); return true; }
+    const peers = peersCommand(line); // /rename <name>
+    if (peers !== null) { note(chalk.dim(peers)); refreshTerminalTitle(); return true; }
     const info = runInfoCommand(line, { skills: liveSkills(), costMeter }); // /help /cost /memory /stats /todos /bg /team /tasks /skills /undo /diff
     if (info !== null) {
       note(info);
@@ -815,6 +883,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
     // Esc while a turn runs (and no menu is up): interrupt it — like the first
     // Ctrl+C of the readline REPL, without the force-quit escalation.
     if (key.escape && statusRequest.current) { statusRequest.current.abort(); return; }
+    if (key.escape && talkTo && !pending && !input) { setTalkTo(null); note(chalk.dim(`(back to this agent — no longer talking to "${talkTo.name}")`)); return; }
     if (key.escape && busy && !pending) {
       if (followUps.size) { interruptForFollowUp(); return; }
       const t = turn.current;
@@ -1073,10 +1142,10 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
       )}
       {/* The /skills panel owns the keyboard — hide the input box so there is only one cursor on screen. */}
       {pending?.kind !== "skills" && (
-      <Box borderStyle="round" borderColor={planMode ? "magenta" : CONFIG.bypassPermissions ? "red" : autoEnabled ? "yellow" : "cyan"} paddingX={1} marginTop={rows >= 20 ? 1 : 0} flexDirection="column" flexShrink={0}>
+      <Box borderStyle="round" borderColor={talkTo || planMode ? "magenta" : CONFIG.bypassPermissions ? "red" : autoEnabled ? "yellow" : "cyan"} paddingX={1} marginTop={rows >= 20 ? 1 : 0} flexDirection="column" flexShrink={0}>
         {(() => {
-          const prompt = "❯ ";
-          const promptColor = planMode ? "magenta" : CONFIG.bypassPermissions ? "red" : autoEnabled ? "yellow" : "cyan";
+          const prompt = talkTo ? `→ ${talkTo.name} ❯ ` : "❯ ";
+          const promptColor = talkTo ? "magenta" : planMode ? "magenta" : CONFIG.bypassPermissions ? "red" : autoEnabled ? "yellow" : "cyan";
           const cols = columns;
           const innerWidth = Math.max(10, cols - 4); // border(2) + paddingX(2)
           const promptW = displayWidth(prompt);
