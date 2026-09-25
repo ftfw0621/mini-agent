@@ -227,6 +227,9 @@ try {
   const otherInbox = () => fs.readdirSync(path.join(sessDir, other.id, "inbox")).map((f) => JSON.parse(fs.readFileSync(path.join(sessDir, other.id, "inbox", f), "utf8")) as PeerMessage);
   await key("/peers"); await key("\r");
   check("/peers lists sessions with their terminal and what they're doing", frame.includes("Other mini-agent sessions") && frame.includes("iTerm2 · ttys042") && frame.includes("Fix login"), frame);
+  const turnsAtPicker = turns;
+  await key("/peers"); await key("\r"); // typed AGAIN into the open picker
+  check("a /command typed into an open menu runs as a command, never goes to the model", turns === turnsAtPicker && !allOutput.includes("> /peers") && frame.includes("Other mini-agent sessions"), frame);
   await key("\r"); // pick "web"
   check("picking one offers talk / identify", frame.includes("Talk to web") && frame.includes("Identify it"));
   await key("\x1b[B"); await key("\r"); // Identify

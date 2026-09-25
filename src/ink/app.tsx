@@ -20,7 +20,7 @@ import { resetBoard } from "../board.js";
 import { clearReasoning, clearToolCalls, getReasoning, getToolCalls, getToolActivity, getToolCallCount, cleanup as tuiCleanup } from "../tui.js";
 import { expandMentions } from "../mentions.js"; // @file mentions → attach file contents
 import { normalizeDroppedPaths } from "../drop.js"; // drag-and-drop a file → its absolute path in the input
-import { peerInboxPending, readPeerInbox, peerMessageContent, peersCommand, setSessionState, setSessionInfo, listPeers, findPeer, peerRow, sendPeerMessage, SCREEN_KINDS, MAX_PEER_TURNS, type PeerRecord } from "../peers.js"; // peer sessions: messages from other mini-agent windows start a turn while idle
+import { currentSession, peerInboxPending, readPeerInbox, peerMessageContent, peersCommand, setSessionState, setSessionInfo, listPeers, findPeer, peerRow, sendPeerMessage, SCREEN_KINDS, MAX_PEER_TURNS, type PeerRecord } from "../peers.js"; // peer sessions: messages from other mini-agent windows start a turn while idle
 import { cronItemsPending, consumeCronQueue, cronTriggerContent } from "../cron.js"; // cron scheduler (Day s14): fire scheduled jobs autonomously while idle
 import { newSessionId, saveSession, listSessions, loadSession, setSessionTitle } from "../session.js";
 import { generateSessionTitle, setTerminalTitle, refreshTerminalTitle, flashTerminalTitle } from "../title.js"; // concise session name, generated after the first message + the terminal tab that shows it
@@ -476,7 +476,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
   const openPeers = () => {
     const peers = listPeers();
     if (!peers.length) return note(chalk.dim(peersCommand("/peers")!));
-    openSelect("Other mini-agent sessions — pick one", [...peers.map(peerRow), "Cancel"], (i) => {
+    openSelect(`Other mini-agent sessions — pick one · this one is "${currentSession()?.name ?? "?"}" (/rename <name> to change)`, [...peers.map(peerRow), "Cancel"], (i) => {
       const p = peers[i];
       if (!p) return;
       openSelect(`${p.name} · ${p.terminal}`, [`Talk to ${p.name} — type in this box, Esc to come back`, "Identify it — ring its bell and flash its tab title", "Cancel"], (j) => {
@@ -511,6 +511,18 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
     if (!pending && turn.current && (draft.startsWith("/") || draft === "exit" || draft === "quit")) {
       note(chalk.dim("Commands are available when the agent is idle; use Esc to interrupt."));
       return;
+    }
+    // A /command typed while a menu is up is a command, never a message for the
+    // model (a second "/peers" into the /peers picker used to become the
+    // conversation's first prompt). Close the menu, then run it — when idle.
+    if (pending && /^\/[\w:-]+(\s|$)/.test(draft)) {
+      if (turn.current) return note(chalk.dim("Commands are available when the agent is idle; use Esc to interrupt."));
+      setPending(null);
+      setFormState(null);
+      if (pending.kind === "form") pending.resolve(null);
+      else if (pending.kind === "select") pending.onChoose(-1);
+      if (await handleCommand(draft)) return;
+      return note(chalk.dim(`unknown command: ${draft} — try /help`));
     }
     if (!pending && (draft === "exit" || draft === "quit")) return doExit();
     if (!pending && await handleCommand(draft)) return;
