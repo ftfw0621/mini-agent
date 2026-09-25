@@ -1,4 +1,4 @@
-import { currentSession, setSessionInfo } from "./peers.js"; // the session name goes on the tab; the title goes to /peers
+import { currentSession, nameFromTitle, nameIsPinned, setSessionInfo } from "./peers.js"; // the session name goes on the tab; the title goes to /peers
 import type OpenAI from "openai"; // the client is injected so title generation reuses the session's connection
 
 // One cheap model call that turns the user's first prompt into a short,
@@ -25,16 +25,19 @@ export function terminalTitleSequence(title: string): string {
 // Rename the terminal tab. Silent when stdout isn't a terminal (pipes, tests,
 // print mode) — an escape sequence in a log file is just noise.
 //
-// With peer sessions the tab also carries this session's NAME ("✳ web · Fix
-// login"): /peers lists sessions by name, and the tab is where you look for one.
+// With peer sessions the tab must tell windows apart, and it must match what
+// /peers lists. So: the title alone ("✳ Fix login bug" — the session name is
+// derived from it), the name before there is a title ("✳ mini-agent-2"), and
+// "name · title" only when you chose the name yourself with /rename.
 let lastTitle: string | undefined; // remembered so a rename (or the end of a flash) can redraw it
 let flashing: ReturnType<typeof setInterval> | null = null;
-export function tabTitle(title: string | undefined, name = currentSession()?.name): string {
-  const base = title ? `${TAB_PREFIX}${title}` : "mini-agent";
-  return name ? (title ? `${TAB_PREFIX}${name} · ${title}` : `mini-agent · ${name}`) : base;
+export function tabTitle(title: string | undefined, name = currentSession()?.name, pinned = nameIsPinned()): string {
+  if (title) return `${TAB_PREFIX}${pinned && name ? `${name} · ` : ""}${title}`;
+  return name ? `${TAB_PREFIX}${name}` : "mini-agent";
 }
 export function setTerminalTitle(title: string | undefined): void {
   lastTitle = title;
+  nameFromTitle(title); // the session is called what it's doing (unless you named it)
   setSessionInfo({ title: title ?? "" }); // other sessions' /peers show it too
   if (!process.stdout.isTTY || flashing) return;
   process.stdout.write(terminalTitleSequence(tabTitle(title)));

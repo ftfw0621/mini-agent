@@ -3,7 +3,8 @@ import os from "node:os"; // temp location
 import path from "node:path"; // join paths
 import { spawn } from "node:child_process"; // a real second process, to prove pid liveness
 import type OpenAI from "openai"; // message shapes
-import { check, checkContains, finish } from "./helpers.js"; // assertions (also isolates the sessions dir)
+import { check, checkContains, finish } from "./helpers.js";
+import { setTerminalTitle, tabTitle } from "../src/title.js"; // the tab and the session name agree // assertions (also isolates the sessions dir)
 import { inboxFileName, peerRow, setSessionInfo, SCREEN_KINDS, currentSession, describePeers, findPeer, listPeers, peerInboxPending, peerMessageContent, peersCommand, readPeerInbox, registerSession, renameSession, sendPeerMessage, sessionsDir, setSessionState, unregisterSession, type PeerMessage, type PeerRecord } from "../src/peers.js"; // unit under test
 import { runLoop, TerminateReason } from "../src/loop.js"; // delivery + send_message end to end
 import { CONFIG } from "../src/config.js"; // hooks off for the loop run
@@ -53,12 +54,29 @@ child.kill();
 await new Promise((r) => child.once("exit", r));
 check("…and pruned after it exits", !findPeer("other-proc"));
 
+// ---- named after what it's doing ------------------------------------------------
+setTerminalTitle("Fix login bug");
+check("the title names the session", currentSession()!.name === "fix-login-bug", currentSession()!.name);
+check("the tab shows just the title", tabTitle("Fix login bug") === "✳ Fix login bug");
+check("before a title, the tab shows the name", tabTitle(undefined) === "✳ fix-login-bug");
+fakePeer({ name: "refactor-the-scheduler" });
+setTerminalTitle("Refactor the scheduler");
+check("a title-name taken by another session gets a suffix", currentSession()!.name === "refactor-the-scheduler-2", currentSession()!.name);
+setTerminalTitle("修复登录页面的样式问题");
+check("a Chinese title makes a Chinese name", currentSession()!.name === "修复登录页面的样式问题", currentSession()!.name);
+setTerminalTitle("Investigate why the nightly backfill job silently drops rows");
+check("long titles are cut at a word boundary", currentSession()!.name === "investigate-why-the-nightly", currentSession()!.name);
+check("the picker doesn't repeat a title the name already says", !peerRow({ ...currentSession()!, title: "Investigate why the nightly backfill job silently drops rows" }).includes("“"));
+
 // ---- rename -----------------------------------------------------------------
 checkContains("rename refuses a taken name", renameSession("Web"), "already taken");
 check("rename cleans the name", renameSession("  api server! ") === "api-server" && currentSession()!.name === "api-server");
 check("rename is written to disk", JSON.parse(fs.readFileSync(path.join(dir, `${me.id}.json`), "utf8")).name === "api-server");
 checkContains("/rename without a name shows usage", peersCommand("/rename")!, 'this session is "api-server"');
 checkContains("/rename via the command", peersCommand("/rename api")!, '"api"');
+setTerminalTitle("Something else entirely");
+check("a name you chose is kept when the title changes", currentSession()!.name === "api");
+check("…and the tab shows both", tabTitle("Something else entirely") === "✳ api · Something else entirely");
 check("unrelated lines are not peer commands", peersCommand("/peersx") === null && peersCommand("hello") === null);
 setSessionState("busy");
 check("state is published", JSON.parse(fs.readFileSync(path.join(dir, `${me.id}.json`), "utf8")).state === "busy");

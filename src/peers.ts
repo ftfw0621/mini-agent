@@ -111,6 +111,7 @@ function readRecord(file: string): PeerRecord | null {
 }
 
 let self: PeerRecord | null = null;
+let namedByUser = false; // /rename pins the name; otherwise it follows the session title
 let heartbeat: ReturnType<typeof setInterval> | null = null;
 
 // This process's own record, or null when it isn't registered (print mode, tests).
@@ -141,9 +142,13 @@ function removeSession(id: string): void {
   fs.rmSync(path.join(sessionsDir(), id), { recursive: true, force: true }); // the inbox dies with its owner
 }
 
-// Names are handles the model types: keep them short and shell-safe.
-function cleanName(raw: string): string {
-  return raw.trim().replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
+// Names are handles the model types: short, no spaces (any script — a Chinese
+// title makes a Chinese name).
+function cleanName(raw: string, max = 40): string {
+  const words = raw.trim().replace(/[^\p{L}\p{N}._-]+/gu, "-").replace(/^-+|-+$/g, "");
+  if (words.length <= max) return words;
+  const cut = words.slice(0, max);
+  return (cut.includes("-") ? cut.slice(0, cut.lastIndexOf("-")) : cut).replace(/-+$/, ""); // end on a word boundary
 }
 
 function uniqueName(wanted: string, taken: Set<string>): string {
@@ -193,6 +198,7 @@ export function unregisterSession(): void {
   heartbeat = null;
   if (self) removeSession(self.id);
   self = null;
+  namedByUser = false;
 }
 
 export function setSessionState(state: PeerRecord["state"], model?: string): void {
@@ -219,8 +225,22 @@ export function renameSession(wanted: string): string {
   if (clash) return `[error] "${name}" is already taken by the session in ${clash.cwd}`;
   self.name = name;
   touch();
+  namedByUser = true;
   return name;
 }
+
+// Until you /rename it, a session is named after what it's doing: the title
+// generated from its first prompt ("Fix login bug" → fix-login-bug). The
+// folder name it starts with says nothing when two windows share a repo.
+export function nameFromTitle(title: string | undefined): void {
+  if (!self || namedByUser || !title) return;
+  const base = cleanName(/[A-Za-z]/.test(title) ? title.toLowerCase() : title, 28);
+  if (!base || base === self.name) return;
+  const taken = new Set(liveRecords().filter((r) => r.id !== self!.id).map((r) => r.name.toLowerCase()));
+  self.name = uniqueName(base, taken);
+  touch();
+}
+export const nameIsPinned = (): boolean => namedByUser;
 
 // Other live sessions (never this one), oldest first.
 export function listPeers(): PeerRecord[] {
@@ -327,7 +347,8 @@ export function peerRow(p: PeerRecord): string {
   let cwd = p.cwd.startsWith(home) ? `~${p.cwd.slice(home.length)}` : p.cwd;
   const parts = cwd.split("/");
   if (cwd.length > 32 && parts.length > 3) cwd = `…/${parts.slice(-2).join("/")}`; // one row per session: the tail is what tells repos apart
-  const doing = (p.title || p.lastPrompt || "").slice(0, 40);
+  const titleIsName = !!p.title && cleanName(p.title.toLowerCase(), 28) === p.name.replace(/-\d+$/, ""); // the name already says it
+  const doing = (titleIsName ? "" : p.title || p.lastPrompt || "").slice(0, 40);
   return `${p.name}  ·  ${p.terminal}  ·  ${p.state}  ·  ${cwd}${p.branch ? ` (${p.branch})` : ""}${doing ? `  ·  “${doing}”` : ""}`;
 }
 
