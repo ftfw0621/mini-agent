@@ -2,6 +2,8 @@ import { effortMessages } from "./effort.js";
 import fs from "node:fs"; // re-reading files from disk during recovery
 import OpenAI from "openai"; // API types + client type
 import chalk from "chalk"; // status lines
+import { compactingText } from "./ui.js"; // the progress bar
+import type { LoopOutput } from "./output.js"; // where the bar is drawn
 import { CONFIG } from "./config.js"; // the resolved context window (env > settings files > default)
 import { recentFiles, forgetFilesExcept, toolDefinitions } from "./tools.js"; // session file state (what was read/edited, and when) + the tool manuals we send
 
@@ -139,6 +141,23 @@ export function recoverFileState(): string | null {
   return `[Recovered file state after compaction — most recently used files, re-read fresh from disk:]\n\n${blocks.join("\n\n")}`;
 }
 
+// ---- Compaction progress ----------------------------------------------------------
+// A summary call takes tens of seconds, and a frozen screen reads as a hang. We
+// cannot know the true progress (nobody knows the summary's length in advance),
+// so we estimate it from two signals and never let it go backwards:
+//   - time: before the first token (the model reading a huge prompt, or
+//     thinking) the bar creeps toward 15%, so it visibly moves;
+//   - output: streamed tokens against an expected summary size. The curve is
+//     asymptotic and capped at 95% — only the finished summary says 100%.
+export function expectedSummaryTokens(historyTokens: number): number {
+  return Math.max(800, Math.min(4000, Math.round(historyTokens * 0.05))); // the 6-section summary grows with the history, within bounds
+}
+export function compactProgress(elapsedMs: number, outTokens: number, expected: number): number {
+  const waiting = 15 * (1 - Math.exp(-elapsedMs / 10_000));
+  const writing = 95 * (1 - Math.exp(-(outTokens / expected) * 1.6));
+  return Math.min(95, Math.max(waiting, writing));
+}
+
 // ---- Compaction itself -----------------------------------------------------------
 // Replace the whole history with a structured summary + recovered file state.
 // Throws on failure — the loop decides what a failure means.
@@ -147,21 +166,47 @@ export async function compactHistory(
   client: OpenAI, // the same client the loop uses
   model: string, // the same model summarizes its own conversation
   signal: AbortSignal, // Ctrl+C must abort compaction too
-  log: (line: string) => void = (s) => console.log(s), // where the two progress lines go — stdout by default; the Ink REPL routes them through its sink so they don't corrupt the live region
+  log: (line: string) => void = (s) => console.log(s), // where the result line goes — stdout by default; the Ink REPL routes it through its sink so it doesn't corrupt the live region
+  output?: Pick<LoopOutput, "spinner">, // draws the progress bar; without one (quiet callers) a start line is logged instead
 ): Promise<void> {
   const before = contextTokens(messages); // for the log line — measured, not just estimated
-  log(chalk.magenta(`📦 compacting context (~${before} tokens)...`)); // automatic behavior must be visible
-  const res = await client.chat.completions.create(
-    {
-      model, // same model — no need for a fancier one to summarize
-      messages: [...effortMessages(model, messages), { role: "user", content: SUMMARY_PROMPT }], // full history + the summary instruction
-      // Deliberately NO `tools` parameter: with no tools declared, the API
-      // cannot accept a tool call — that is the hard guarantee. The CRITICAL
-      // lines in the prompt are the soft second layer of the same defense.
-    },
-    { signal }, // still abortable by Ctrl+C
-  );
-  const summary = res.choices[0].message.content ?? ""; // the structured summary text
+  const spin = output?.spinner(compactingText(0));
+  if (!spin) log(chalk.magenta(`📦 compacting context (~${before} tokens)...`)); // automatic behavior must be visible
+  const expected = expectedSummaryTokens(before);
+  const started = Date.now();
+  let outChars = 0; // content + reasoning streamed so far (~4 chars a token)
+  let shown = 0; // the bar only moves forward
+  const paint = () => {
+    shown = Math.max(shown, compactProgress(Date.now() - started, outChars / 4, expected));
+    spin?.set(compactingText(shown));
+  };
+  const timer = spin ? setInterval(paint, 200) : null; // time alone moves the bar while no token arrives
+  let summary = "";
+  try {
+    // Streamed only so the bar has something to measure; the result is the same text.
+    const res = (await client.chat.completions.create(
+      {
+        model, // same model — no need for a fancier one to summarize
+        messages: [...effortMessages(model, messages), { role: "user", content: SUMMARY_PROMPT }], // full history + the summary instruction
+        stream: true,
+        // Deliberately NO `tools` parameter: with no tools declared, the API
+        // cannot accept a tool call — that is the hard guarantee. The CRITICAL
+        // lines in the prompt are the soft second layer of the same defense.
+      },
+      { signal }, // still abortable by Ctrl+C
+    )) as unknown as AsyncIterable<OpenAI.ChatCompletionChunk> | OpenAI.ChatCompletion;
+    if ("choices" in res) summary = res.choices[0]?.message.content ?? ""; // a provider (or test double) that ignored stream: true
+    else {
+      for await (const chunk of res) {
+        const delta = chunk.choices[0]?.delta as { content?: string | null; reasoning_content?: string | null } | undefined;
+        summary += delta?.content ?? "";
+        outChars += (delta?.content?.length ?? 0) + (delta?.reasoning_content?.length ?? 0); // thinking is work too
+      }
+    }
+  } finally {
+    if (timer) clearInterval(timer);
+    spin?.stop();
+  }
   if (!summary.trim()) throw new Error("compaction returned an empty summary"); // empty summary = failed compaction
   // The constitution survives compaction: keep the leading system message and
   // drop everything else. Losing the system prompt would silently change the

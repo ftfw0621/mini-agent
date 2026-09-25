@@ -2,7 +2,9 @@ import fs from "node:fs"; // fixture files
 import os from "node:os"; // temp directory
 import path from "node:path"; // path joining
 import type OpenAI from "openai"; // message shapes
-import { estimateTokens, estimateHistoryTokens, recoverFileState, contextWindowFor, compactThreshold, recordContextUsage, contextTokens, contextPercent, estimateToolTokens } from "../src/context.js"; // units under test
+import { estimateTokens, estimateHistoryTokens, recoverFileState, contextWindowFor, compactThreshold, recordContextUsage, contextTokens, contextPercent, estimateToolTokens, compactHistory, compactProgress, expectedSummaryTokens } from "../src/context.js"; // units under test
+import { compactingText, progressBar } from "../src/ui.js"; // the compaction progress bar
+import { stripVTControlCharacters } from "node:util"; // plain text of the bar
 import { CONFIG } from "../src/config.js"; // windows per model
 import { runLoop, TerminateReason } from "../src/loop.js"; // proactive compaction end to end
 import { dispatch, forgetFilesExcept } from "../src/tools.js"; // to drive the file read-state
@@ -84,8 +86,8 @@ checkContains("re-read unlocks editing", await dispatch("edit_file", JSON.string
   CONFIG.hooks = {};
   const calls: string[] = [];
   let streamRound = 0;
-  const client = { chat: { completions: { create: async (params: { stream?: boolean; messages: OpenAI.ChatCompletionMessageParam[] }) => {
-    if (!params.stream) { calls.push("compact"); return { choices: [{ message: { content: "1. summary of the work so far" } }] }; } // compactHistory's call
+  const client = { chat: { completions: { create: async (params: { tools?: unknown; messages: OpenAI.ChatCompletionMessageParam[] }) => {
+    if (!params.tools) { calls.push("compact"); return (async function* () { yield { choices: [{ delta: { content: "1. summary of " } }] }; yield { choices: [{ delta: { content: "the work so far" } }] }; })(); } // compactHistory's call — the only one without tools, streamed
     const r = streamRound++;
     calls.push(`model:${params.messages.length}`);
     return (async function* () {
@@ -100,6 +102,37 @@ checkContains("re-read unlocks editing", await dispatch("edit_file", JSON.string
   check("loop finishes", result.reason === TerminateReason.Done);
   check("real usage above the threshold compacts before the next call", calls[0].startsWith("model:") && calls[1] === "compact" && calls[2]?.startsWith("model:"), calls.join(","));
   check("history after compaction is the summary", history.some((m) => m.role === "user" && String(m.content).includes("summary of the work so far")));
+
+  // ---- the progress bar -------------------------------------------------------------
+  check("progress creeps with time before any token", compactProgress(5_000, 0, 1000) > 0 && compactProgress(60_000, 0, 1000) <= 15);
+  check("progress grows with streamed tokens", compactProgress(1_000, 500, 1000) < compactProgress(1_000, 1000, 1000));
+  check("progress never claims done before the summary is", compactProgress(1e9, 1e9, 1000) === 95);
+  check("expected summary size is bounded", expectedSummaryTokens(0) === 800 && expectedSummaryTokens(10_000_000) === 4000);
+  const plainBar = stripVTControlCharacters(progressBar(8, 40));
+  check("bar has fixed width and a percent", plainBar === "▰▰▰" + "▱".repeat(37) + " 8%", plainBar);
+  check("bar clamps", stripVTControlCharacters(progressBar(250, 10)) === "▰".repeat(10) + " 100%");
+  check("compacting text: verb line, then the bar", stripVTControlCharacters(compactingText(0, 80)).startsWith("Compacting conversation…\n▱"));
+
+  // compactHistory drives a spinner from 0% and stops it; the start line moves into the bar.
+  const seen: string[] = [];
+  let stopped = false;
+  const logged: string[] = [];
+  const spinOut = { spinner: (t: string) => { seen.push(t); return { set: (x: string) => seen.push(x), stop: () => { stopped = true; }, spinning: true }; } };
+  const slowClient = { chat: { completions: { create: async () => (async function* () {
+    await new Promise((r) => setTimeout(r, 450)); // long enough for the 200ms repaint
+    yield { choices: [{ delta: { content: "the summary" } }] };
+  })() } } };
+  const h2: OpenAI.ChatCompletionMessageParam[] = [{ role: "system", content: "sys" }, { role: "user", content: "hi" }];
+  await compactHistory(h2, slowClient as never, "big", new AbortController().signal, (l) => logged.push(l), spinOut as never);
+  check("bar starts at 0%", stripVTControlCharacters(seen[0]).endsWith(" 0%"), seen[0]);
+  check("bar repaints while waiting", seen.length > 1);
+  check("bar is stopped when done", stopped);
+  check("no start line when a bar is drawn; the result line stays", logged.length === 1 && logged[0].includes("compacted:"), logged.join("|"));
+  check("streamed summary becomes the history", String(h2[1].content).includes("the summary"));
+  const legacy = { chat: { completions: { create: async () => ({ choices: [{ message: { content: "plain summary" } }] }) } } };
+  const h3: OpenAI.ChatCompletionMessageParam[] = [{ role: "system", content: "sys" }, { role: "user", content: "hi" }];
+  await compactHistory(h3, legacy as never, "big", new AbortController().signal, () => {});
+  check("a non-streamed reply still works", String(h3[1].content).includes("plain summary"));
 
   CONFIG.contextWindow = before.window;
   CONFIG.contextWindows = before.windows;

@@ -28,6 +28,7 @@ import { renderDiff } from "./diff.js"; // show what /undo put back / what /diff
 import path from "node:path"; // shorten paths for the /diff summary
 import { expandMentions } from "./mentions.js"; // @file mentions: pull referenced files into context (secret files refused)
 import { banner, framedPrompt, formatModelChoices, statusLine, sentMessage } from "./ui.js"; // welcome box, prompt, model labels, status line, sent-message echo
+import { STDOUT_OUTPUT } from "./output.js"; // /compact draws its progress bar with the same ora spinner the loop uses
 import { gitBranch, toggleLastCollapsed, revealReasoning, clearReasoning, revealToolCalls, clearToolCalls, cleanup as tuiCleanup } from "./tui.js"; // git branch + collapsible output + collapsed reasoning (Ctrl+R) + folded tool-call trace (Ctrl+T)
 import { promptSelect, promptForm } from "./menu.js"; // arrow-key approval menu + multi-question form
 import { editLine } from "./editor.js"; // our own line editor (keeps the status footer pinned even when input wraps)
@@ -818,7 +819,7 @@ async function main() {
           return true;
         }
         try {
-          await compactHistory(messages, client, CONFIG.model, new AbortController().signal); // same machinery as automatic compaction
+          await compactHistory(messages, client, CONFIG.model, new AbortController().signal, undefined, STDOUT_OUTPUT); // same machinery (and progress bar) as automatic compaction
         } catch (err) {
           console.log(chalk.yellow(`compaction failed: ${(err as Error).message}`)); // report, don't crash
         }

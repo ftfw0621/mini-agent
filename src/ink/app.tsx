@@ -3,7 +3,7 @@ import { statusCommand } from "../status.js";
 import React, { useState, useEffect, useRef } from "react";
 import { Box, Text, Static, useInput, useApp } from "ink";
 import chalk from "chalk";
-import { formatElapsed, renderMenu, MENU_HINT, formatModelChoices } from "../ui.js"; // status format + the SAME pure menu renderer the readline REPL uses
+import { COMPACTING_VERB, formatElapsed, renderMenu, MENU_HINT, formatModelChoices } from "../ui.js"; // status format + the SAME pure menu renderer the readline REPL uses
 import { renderMarkdown } from "../markdown.js"; // model speaks markdown → ANSI, same as the non-Ink REPL
 import { initFormState, reduceForm, renderForm, collectAnswers, type FormQuestion, type FormState, type FormAnswer } from "../form.js"; // the ask_user form: pure state machine + renderer
 import { CONFIG, saveGlobalSetting } from "../config.js"; // session allowlist + /model save
@@ -70,6 +70,7 @@ const SPINNER_FRAMES = ["·", "✢", "✶", "✻", "✽", "✻", "✶", "✢"];
 const SPINNER_COLOR = "#D77757"; // Claude Code's orange
 const SKILL_COLOR = "#B1B9F9"; // Claude Code's lavender for a recognised /skill in the input
 const SHIMMER_PEAK = "#FFD2BD"; // the highlight that sweeps across the verb
+const COMPACT_PEAK = "#E4E8FF"; // the same sweep over the lavender "Compacting conversation…"
 const SHIMMER_TICK_MS = 100; // one animation clock for glyph + shimmer → one repaint per tick
 const SHIMMER_RADIUS = 3; // how many cells the highlight fades over on each side
 
@@ -102,10 +103,10 @@ function useTick(): number {
 
 // The glyph lives in a fixed two-cell box: whatever the frame, the text after it
 // starts in the same column.
-function Glyph({ tick }: { tick: number }) {
+function Glyph({ tick, color = SPINNER_COLOR }: { tick: number; color?: string }) {
   return (
     <Box width={2} flexShrink={0}>
-      <Text color={SPINNER_COLOR}>{SPINNER_FRAMES[Math.floor(tick / 2) % SPINNER_FRAMES.length]}</Text>
+      <Text color={color}>{SPINNER_FRAMES[Math.floor(tick / 2) % SPINNER_FRAMES.length]}</Text>
     </Box>
   );
 }
@@ -123,10 +124,10 @@ function mix(a: string, b: string, t: number): string {
 // The light sweep: each character is coloured by its distance from a moving
 // highlight. Only COLOUR changes between frames — never a character, never a
 // width — so the line shimmers without a single cell moving.
-export function shimmer(text: string, pos: number): string {
+export function shimmer(text: string, pos: number, base = SPINNER_COLOR, peak = SHIMMER_PEAK): string {
   return [...text].map((c, i) => {
     const glow = Math.max(0, 1 - Math.abs(i - pos) / SHIMMER_RADIUS);
-    return chalk.hex(mix(SPINNER_COLOR, SHIMMER_PEAK, glow))(c);
+    return chalk.hex(mix(base, peak, glow))(c);
   }).join("");
 }
 
@@ -135,15 +136,20 @@ export function shimmer(text: string, pos: number): string {
 // between sweeps (the highlight travels past the end) keeps it calm.
 function SpinnerLine({ text }: { text: string }) {
   const tick = useTick();
-  const plain = stripVTControlCharacters(text);
+  const [head, ...below] = text.split("\n"); // a status may carry extra lines (the compaction progress bar)
+  const plain = stripVTControlCharacters(head);
   const cut = plain.indexOf("…");
-  const verb = cut >= 0 && text.startsWith(plain.slice(0, cut + 1)) ? plain.slice(0, cut + 1) : ""; // shimmer only an unstyled verb
+  const verb = cut >= 0 && head.startsWith(plain.slice(0, cut + 1)) ? plain.slice(0, cut + 1) : ""; // shimmer only an unstyled verb
   const period = verb.length + SHIMMER_RADIUS * 2 + 8;
   const pos = (tick % period) - SHIMMER_RADIUS;
+  const [base, peak] = verb === COMPACTING_VERB ? [SKILL_COLOR, COMPACT_PEAK] : [SPINNER_COLOR, SHIMMER_PEAK]; // Claude Code draws compaction in lavender
   return (
-    <Box>
-      <Glyph tick={tick} />
-      <Text color={SPINNER_COLOR} wrap="truncate-end">{verb ? shimmer(verb, pos) : ""}{text.slice(verb.length)}</Text>
+    <Box flexDirection="column">
+      <Box>
+        <Glyph tick={tick} color={base} />
+        <Text color={base} wrap="truncate-end">{verb ? shimmer(verb, pos, base, peak) : ""}{head.slice(verb.length)}</Text>
+      </Box>
+      {below.map((line, i) => <Text key={i} wrap="truncate-end">{"  "}{line}</Text>)}
     </Box>
   );
 }
@@ -656,7 +662,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
         }
         setBusy(true);
         try {
-          await compactHistory(messages, client, CONFIG.model, new AbortController().signal, note);
+          await compactHistory(messages, client, CONFIG.model, new AbortController().signal, note, sink); // the same progress bar as automatic compaction
         } catch (err) {
           note(chalk.yellow(`compaction failed: ${(err as Error).message}`));
         } finally {

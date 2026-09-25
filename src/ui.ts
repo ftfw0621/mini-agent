@@ -125,6 +125,22 @@ export function spinnerText(word: string, elapsedSec: number, subAgent: boolean,
   return `${head}… ${chalk.dim(`(${bits.join(" · ")})`)}`;
 }
 
+// The compaction progress bar, Claude Code's look:
+//   Compacting conversation…
+//   ▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ 8%
+// The two lines travel as ONE status text (a spinner carries one string); the
+// Ink spinner draws the part after the newline under the verb, ora prints it as
+// a second line. ▰/▱ are single-width everywhere, so the bar never jitters.
+export function progressBar(pct: number, width = 40): string {
+  const p = Math.max(0, Math.min(100, Math.floor(pct)));
+  const filled = Math.round((p / 100) * width);
+  return chalk.white("▰".repeat(filled)) + chalk.dim("▱".repeat(width - filled)) + chalk.dim(` ${p}%`);
+}
+export const COMPACTING_VERB = "Compacting conversation…";
+export function compactingText(pct: number, columns = process.stdout.columns || 80): string {
+  return `${COMPACTING_VERB}\n${progressBar(pct, Math.max(10, Math.min(40, columns - 10)))}`;
+}
+
 // The persistent status line — model, project, branch, context use, spend, time.
 // Pure (dir + branch passed in) so it's testable without a filesystem or git.
 export function statusLine(model: string, dir: string, branch: string | null, ctxPct: number, costUsd: number, elapsedMs: number): string {

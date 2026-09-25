@@ -192,6 +192,19 @@ try {
   check("t cycles the sort order", frame.includes("to sort (tokens)"));
   await key("\x1b");
   check("Esc closes the manager and reports no changes", allOutput.includes("No changes") && !frame.includes("enter/space to cycle"));
+  // ---- /compact draws Claude Code's progress bar, then reports the result
+  const originalCreate = client.chat.completions.create;
+  let finishSummary!: () => void;
+  (client.chat.completions as { create: unknown }).create = async () => (async function* () {
+    await new Promise<void>((r) => { finishSummary = r; });
+    yield { choices: [{ delta: { content: "summary" } }] };
+  })();
+  (session.messages as unknown[]).push({ role: "system", content: "test" }, { role: "user", content: "a long talk" });
+  await key("/compact"); await key("\r"); await sleep(300);
+  check("/compact shows the progress bar under the verb", frame.includes("Compacting conversation…") && /\n\s*▰*▱+ \d+%/.test(frame), frame);
+  finishSummary(); await sleep();
+  check("the bar goes away and the result is reported", !frame.includes("Compacting conversation…") && allOutput.includes("compacted:"));
+  (client.chat.completions as { create: unknown }).create = originalCreate;
   await key("/model"); await sleep();
   check("model options come from the active endpoint", frame.includes("/model deepseek-v4-pro") && modelLists === 1);
   await key(" "); await key("\x7f");
