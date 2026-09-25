@@ -28,6 +28,7 @@ import { renderDiff } from "./diff.js"; // show what /undo put back / what /diff
 import path from "node:path"; // shorten paths for the /diff summary
 import { expandMentions } from "./mentions.js"; // @file mentions: pull referenced files into context (secret files refused)
 import { banner, framedPrompt, formatModelChoices, statusLine, sentMessage } from "./ui.js"; // welcome box, prompt, model labels, status line, sent-message echo
+import { listPeers, peerInboxPending, peerMessageContent, peersCommand, readPeerInbox, registerSession, setSessionState, unregisterSession } from "./peers.js"; // peer sessions: other mini-agent processes on this machine
 import { STDOUT_OUTPUT } from "./output.js"; // /compact draws its progress bar with the same ora spinner the loop uses
 import { gitBranch, toggleLastCollapsed, revealReasoning, clearReasoning, revealToolCalls, clearToolCalls, cleanup as tuiCleanup } from "./tui.js"; // git branch + collapsible output + collapsed reasoning (Ctrl+R) + folded tool-call trace (Ctrl+T)
 import { promptSelect, promptForm } from "./menu.js"; // arrow-key approval menu + multi-question form
@@ -112,6 +113,8 @@ const SESSION_HELP = `commands:
   /team      list the agent team (spawn_teammate): each teammate's role, status, and pending inbox
   /tasks     show the shared task board (create_task/claim_task): each task's status, owner, and dependencies
   /cron      list scheduled cron jobs (schedule_cron) and their expressions
+  /peers     list other mini-agent sessions on this machine (the agent can message them with send_message)
+  /rename <name>  rename this session — the name other sessions use to reach it
   /undo      revert the most recent file write (write_file / edit_file) this session
   /diff      show every file changed this session, as a diff from where it started
   /resume    list recent sessions in this project and continue one of them
@@ -307,6 +310,13 @@ async function main() {
   // ---- Interactive session (REPL) -------------------------------------------------
   // The welcome box: who am I, which model and host am I on, and the basics.
   console.log(banner(pkg.version, CONFIG.model, new URL(CONFIG.baseURL).host));
+
+  // Peer sessions: join the machine-wide registry (interactive sessions only —
+  // a one-shot -p run is gone before anyone could answer it).
+  const me = registerSession({ cwd: process.cwd(), branch: gitBranch(), model: CONFIG.model });
+  process.on("exit", unregisterSession);
+  const otherSessions = listPeers().length;
+  if (otherSessions) console.log(chalk.dim(`(peers: this session is "${me.name}"; ${otherSessions} other session${otherSessions === 1 ? "" : "s"} online — /peers)`));
 
   // ONE readline interface for the whole session — the task prompt and the
   // permission prompts share it. Two interfaces on one stdin fight each other.
@@ -547,6 +557,11 @@ async function main() {
 
   // Handle a /slash command. Returns true if the line was a command.
   const handleCommand = async (line: string): Promise<boolean> => {
+    const peers = peersCommand(line); // /peers, /rename <name>
+    if (peers !== null) {
+      console.log(chalk.dim(peers));
+      return true;
+    }
     if (line === "/status" || line.startsWith("/status ")) {
       console.log(await statusCommand(line, costMeter));
       return true;
@@ -917,6 +932,16 @@ async function main() {
       }
     }
 
+    // The readline prompt blocks on your input, so it cannot start a turn by
+    // itself: peer messages that arrived while you were typing ride along now.
+    if (peerInboxPending()) {
+      const got = readPeerInbox();
+      if (got.length) {
+        messages.push({ role: "user", content: peerMessageContent(got) });
+        console.log(chalk.magenta(`✉ ${got.length} message${got.length > 1 ? "s" : ""} from ${[...new Set(got.map((m) => m.from.name))].join(", ")}`));
+      }
+    }
+    setSessionState("busy", CONFIG.model);
     messages.push({ role: "user", content: augmented + injected }); // the new turn (with any attached files + hook context) joins the shared history
     autoMode.recordRequest(line); // original human text, before file/hook attachments
     clearReasoning(); // Ctrl+R should reveal THIS turn's thinking, not the previous answer's
@@ -940,6 +965,7 @@ async function main() {
       canPrompt: !!process.stdin.isTTY,
     });
     running = false; // back at the prompt — Ctrl+C means "exit" again
+    setSessionState("idle"); // other sessions see this one as free again
     saveSession(sessionId, CONFIG.model, messages, pendingTitle); // snapshot after every turn — crash-safe by construction
 
     // Auto-extract memories (opt-in: settings.memory.autoExtract). A cheap pass

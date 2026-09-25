@@ -6,6 +6,7 @@ import { buildSystemMessage, readProjectInstructions } from "../prompt.js";
 import { contextPercent } from "../context.js";
 import { initCostMeter, DEFAULT_PRICING, type CostMeter } from "../cost.js";
 import { gitBranch } from "../tui.js";
+import { listPeers, registerSession, unregisterSession } from "../peers.js"; // peer sessions: other mini-agent processes on this machine
 import { newSessionId, latestSession } from "../session.js";
 import { initTelemetry, emit } from "../telemetry.js";
 import { runHooks } from "../hooks.js";
@@ -124,6 +125,13 @@ export async function buildInkSession(opts: { resume?: boolean } = {}): Promise<
 
   const dir = path.basename(process.cwd());
   const branch = gitBranch();
+
+  // Peer sessions: join the machine-wide registry so other mini-agent windows
+  // can find and message this one (and this one them).
+  const me = registerSession({ cwd: process.cwd(), branch, model: CONFIG.model });
+  process.on("exit", unregisterSession);
+  const others = listPeers().length;
+  if (others) notices.push(`(peers: this session is "${me.name}"; ${others} other session${others === 1 ? "" : "s"} online — /peers)`);
 
   const getStatus = (): StatusData => ({
     ctxPct: contextPercent(messages), // % of the way to auto-compaction

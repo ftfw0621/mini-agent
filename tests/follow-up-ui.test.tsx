@@ -17,6 +17,7 @@ import { TerminateReason } from "../src/loop.js";
 import { clearToolCalls, recordToolCall, recordToolResult } from "../src/tui.js";
 import { parseSkill } from "../src/skills.js";
 import { check, finish } from "./helpers.js";
+import { inboxFileName, currentSession, registerSession, unregisterSession, MAX_PEER_TURNS, type PeerMessage } from "../src/peers.js";
 
 const sleep = (ms = 100) => new Promise((resolve) => setTimeout(resolve, ms));
 const cwd = process.cwd();
@@ -56,7 +57,9 @@ let answers: unknown;
 const submitted: string[] = [];
 const submittedContent: unknown[] = [];
 let clipboardText: string | undefined;
+const peerTurns: string[] = [];
 const app = render(<App session={session} clipboard={{ read: async () => clipboardText === undefined ? { image: png } : { text: clipboardText } }} runTurn={async (_input, h) => {
+  if (typeof _input === "string" && _input.startsWith("[Message from another mini-agent session")) { peerTurns.push(_input); return { reason: TerminateReason.Done }; } // an idle-started peer turn
   turns++; hooks = h;
   if (_input === null) {
     for (const message of h.followUps!.drain()) h.onFollowUp?.(message.displayText ?? message.text);
@@ -205,6 +208,20 @@ try {
   finishSummary(); await sleep();
   check("the bar goes away and the result is reported", !frame.includes("Compacting conversation…") && allOutput.includes("compacted:"));
   (client.chat.completions as { create: unknown }).create = originalCreate;
+  // ---- peer sessions: a message while idle starts a turn; a streak is capped
+  registerSession({ cwd: "/work/ui", branch: null, model: "test" });
+  const dropPeerMessage = (text: string) => {
+    const me = currentSession()!;
+    const msg: PeerMessage = { id: text, from: { id: "p", name: "web", cwd: "/work/web", branch: null }, to: me.id, text, sentAt: Date.now() };
+    fs.writeFileSync(path.join(process.env.MINI_AGENT_SESSIONS_DIR!, me.id, "inbox", inboxFileName(msg)), JSON.stringify(msg));
+  };
+  dropPeerMessage("hello from web"); await sleep(1300);
+  check("an idle session answers a peer message on its own", peerTurns.length === 1 && peerTurns[0].includes("hello from web") && allOutput.includes("✉ message from web (/work/web)"));
+  for (let i = 1; i <= MAX_PEER_TURNS; i++) { dropPeerMessage(`again ${i}`); await sleep(1300); }
+  check("automatic peer turns stop after the cap", peerTurns.length === MAX_PEER_TURNS && allOutput.includes("paused after"), String(peerTurns.length));
+  await key("/peers"); await key("\r");
+  check("/peers shows this session", allOutput.includes('You are session "ui"'));
+  unregisterSession();
   await key("/model"); await sleep();
   check("model options come from the active endpoint", frame.includes("/model deepseek-v4-pro") && modelLists === 1);
   await key(" "); await key("\x7f");

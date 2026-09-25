@@ -8,6 +8,7 @@ import { checkPermission } from "./permissions.js"; // the allow/ask/deny gate
 import { previewChange } from "./diff.js"; // show the diff before a write so approval is informed
 import { contextTokens, compactHistory, compactThreshold, recordContextUsage, MAX_COMPACTIONS_PER_QUERY, MAX_COMPACT_FAILURES } from "./context.js"; // context management
 import { SUB_AGENT_PROMPT, TEAMMATE_PROMPT } from "./prompt.js"; // the sub-agent + teammate constitutions
+import { currentSession, describePeers, peerMessageContent, readPeerInbox, sendPeerMessage, MAX_PEER_TURNS } from "./peers.js"; // peer sessions: other mini-agent processes on this machine
 import { LEAD, MAX_TEAMMATES, sendMessage, sendProtocol, readInbox, inboxCount, registerTeammate, finishTeammate, teammateExists, teammateCount, createRequest, resolveResponse, setTeammateState, anyTeammateBusy, runningTeammates, markShutdown, shutdownRequestId, resetTeam, listTeammateViews } from "./team.js"; // agent teams (Day 38) + team protocols (Day 39): mailboxes, registry, request/response contracts
 import { createTask, listTasks, claimTask, completeTask, claimNextAvailable, boardSummary, resetBoard } from "./board.js"; // the shared task board (Day 40): autonomous work claiming
 import { emit } from "./telemetry.js"; // local-only event log (no-op unless the CLI armed it)
@@ -177,11 +178,11 @@ const sendMessageTool: OpenAI.ChatCompletionTool = {
   type: "function",
   function: {
     name: "send_message",
-    description: `Send a message to another agent on the team (a teammate by name, or "lead"). The message lands in their inbox and they see it on their next round. Use it to share findings, hand off work, ask a specific question, or report progress to the lead. Returns once delivered; it does NOT wait for a reply — keep working, and their response will arrive in your inbox.`,
+    description: `Send a message to another agent: a teammate by name, "lead", or (from the top-level agent) another mini-agent session running on this machine, by the name list_peers shows. The message lands in their inbox and they see it on their next round. Use it to share findings, hand off work, ask a specific question, or report progress. Returns once delivered; it does NOT wait for a reply — keep working, and their response will arrive as a new message.`,
     parameters: {
       type: "object",
       properties: {
-        to: { type: "string", description: 'Recipient agent name, or "lead" for the coordinator' },
+        to: { type: "string", description: 'Recipient: a teammate name, "lead", or a peer session name' },
         content: { type: "string", description: "The message text" },
       },
       required: ["to", "content"],
@@ -274,6 +275,17 @@ const createTaskTool: OpenAI.ChatCompletionTool = {
     },
   },
 };
+// list_peers: who else is running mini-agent on this machine (other terminals,
+// other repos). Peers are separate processes, unlike teammates; message one
+// with send_message. Only the top-level agent sees them.
+const listPeersTool: OpenAI.ChatCompletionTool = {
+  type: "function",
+  function: {
+    name: "list_peers",
+    description: `List the other mini-agent sessions running on this machine: name, idle/busy, working directory, branch, model. Use it when the user asks you to coordinate with, ask, or tell "the other session/agent/window" something — then message it with send_message (to = its name). Also tells you your own session name.`,
+    parameters: { type: "object", properties: {}, required: [] },
+  },
+};
 const listTasksTool: OpenAI.ChatCompletionTool = {
   type: "function",
   function: {
@@ -331,7 +343,7 @@ function toolsFor(opts: LoopOptions): OpenAI.ChatCompletionTool[] {
   }
   // The Lead can do everything: orchestration, the protocols, and authoring +
   // watching the board (it lays out tasks; teammates pull from it).
-  return [...builtins, taskTool, askUserTool, spawnTeammateTool, sendMessageTool, requestShutdownTool, requestPlanTool, reviewPlanTool, createTaskTool, listTasksTool];
+  return [...builtins, taskTool, askUserTool, spawnTeammateTool, sendMessageTool, requestShutdownTool, requestPlanTool, reviewPlanTool, createTaskTool, listTasksTool, ...(currentSession() ? [listPeersTool] : [])];
 }
 
 // ---- sub-agent registry (async task delegation) -------------------------------
@@ -630,7 +642,7 @@ async function runOneCall(call: AssembledCall, opts: LoopOptions): Promise<{ id:
   try {
     const refusal = await authorizeCall(call, opts);
     const content = refusal ?? await runWithHooks(call, opts);
-    if (!/^\[(?:permission|hook|error|follow-up)\]/.test(content) && !["task", "spawn_teammate", "send_message", "ask_user"].includes(call.name)) opts.reviewBudget?.executed();
+    if (!/^\[(?:permission|hook|error|follow-up)\]/.test(content) && !["task", "spawn_teammate", "send_message", "list_peers", "ask_user"].includes(call.name)) opts.reviewBudget?.executed();
     if (trace) recordToolResult(trace, content);
     opts.progress?.append(`result: ${content}\n`);
     if (call.name === "todo_write" && !opts.quiet && !content.startsWith("[error]")) {
@@ -792,6 +804,7 @@ async function execute(call: AssembledCall, opts: LoopOptions): Promise<string> 
   // The task board tools (Day 40) — claim/complete need the caller's identity.
   if (call.name === "create_task") return runCreateTask(call, opts);
   if (call.name === "list_tasks") return runListTasks(call, opts);
+  if (call.name === "list_peers") return opts.subAgent ? "[error] Only the top-level agent can see other sessions." : describePeers();
   if (call.name === "claim_task") return runClaimTask(call, opts);
   if (call.name === "complete_task") return runCompleteTask(call, opts);
 
@@ -827,6 +840,8 @@ async function runSendMessage(call: AssembledCall, opts: LoopOptions): Promise<s
   // A teammate can only reach the lead or another teammate; the lead can reach
   // any teammate. We don't hard-check the recipient exists (it may be spawning) —
   // an undeliverable message just sits in a file no one reads, which is harmless.
+  // Not on the team? From the top level it may be another mini-agent session.
+  if (to !== LEAD && !teammateExists(to) && !opts.subAgent && currentSession()) return sendPeerMessage(to, content);
   sendMessage(from, to, content);
   return `Message delivered to ${to}'s inbox.`;
 }
@@ -1115,6 +1130,20 @@ function injectCronMessages(messages: OpenAI.ChatCompletionMessageParam[], opts:
   return count > 0;
 }
 
+// Peer sessions: deliver messages from other mini-agent processes that arrived
+// mid-turn, right after a round's tool results (never at the "model wants to
+// stop" point — that would let two agents keep ONE turn alive forever by
+// messaging each other). A per-query cap is the second fuse; whatever is left
+// waits in the inbox for the idle processor, which has its own counter.
+function injectPeerMessages(messages: OpenAI.ChatCompletionMessageParam[], opts: LoopOptions, delivered: { count: number }): void {
+  if (opts.subAgent || !currentSession() || delivered.count >= MAX_PEER_TURNS) return;
+  const got = readPeerInbox();
+  if (!got.length) return;
+  delivered.count++;
+  messages.push({ role: "user", content: peerMessageContent(got) });
+  if (!opts.quiet) sink(opts).note(chalk.magenta(`✉ ${[...new Set(got.map((m) => m.from.name))].join(", ")}: ${got.length} message${got.length > 1 ? "s" : ""} received`));
+}
+
 function injectBackgroundNotifications(messages: OpenAI.ChatCompletionMessageParam[], opts: LoopOptions): boolean {
   if (opts.subAgent) return false; // notifications belong to the top-level conversation
   const note = pendingNotifications(); // "" unless a task finished since we last checked
@@ -1281,6 +1310,7 @@ export async function runLoop(
   // The loop's mutable state: budgets and counters, rewritten every iteration.
   const attempts = { total: 0, rateLimited: 0, consecutive: 0 };
   const compaction = { count: 0, failures: 0 }; // compaction score card for this query
+  const peerDeliveries = { count: 0 }; // mid-turn peer deliveries this query (a fuse against two agents chatting forever)
   let lastText: string | null = null; // most recent assistant text — what we return if a round cap (teammates) stops us mid-flight
 
   for (let round = 1; ; round++) {
@@ -1457,6 +1487,9 @@ export async function runLoop(
       // Cron (Day s14): deliver any triggered scheduled jobs right after this
       // round's results so the model sees them on the next round.
       injectCronMessages(messages, opts);
+
+      // Peer sessions: messages from other mini-agent processes, same spot.
+      injectPeerMessages(messages, opts, peerDeliveries);
 
       // Background tasks (Day 37): if a job the model started has finished, slip
       // its <task_notification> in here, right after this round's tool results —

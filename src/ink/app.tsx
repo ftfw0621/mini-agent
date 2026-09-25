@@ -20,6 +20,7 @@ import { resetBoard } from "../board.js";
 import { clearReasoning, clearToolCalls, getReasoning, getToolCalls, getToolActivity, getToolCallCount, cleanup as tuiCleanup } from "../tui.js";
 import { expandMentions } from "../mentions.js"; // @file mentions → attach file contents
 import { normalizeDroppedPaths } from "../drop.js"; // drag-and-drop a file → its absolute path in the input
+import { peerInboxPending, readPeerInbox, peerMessageContent, peersCommand, setSessionState, MAX_PEER_TURNS } from "../peers.js"; // peer sessions: messages from other mini-agent windows start a turn while idle
 import { cronItemsPending, consumeCronQueue, cronTriggerContent } from "../cron.js"; // cron scheduler (Day s14): fire scheduled jobs autonomously while idle
 import { newSessionId, saveSession, listSessions, loadSession, setSessionTitle } from "../session.js";
 import { generateSessionTitle, setTerminalTitle } from "../title.js"; // concise session name, generated after the first message + the terminal tab that shows it
@@ -326,6 +327,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
     clearReasoning(); // Ctrl+R should reveal THIS turn's thinking
     clearToolCalls(); // ...and Ctrl+T THIS turn's tool calls
     setBusy(true);
+    setSessionState("busy", CONFIG.model); // other sessions see "busy" in list_peers
     const controller = new AbortController();
     const tstate = { controller, interrupted: false };
     turn.current = tstate; // expose it so Esc can interrupt this turn
@@ -373,6 +375,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
       .catch((e: unknown) => note(chalk.red(`[error] ${(e as Error).message}`)))
       .finally(() => {
         turn.current = null;
+        setSessionState("idle");
         setBusy(false);
         setStatus(null);
         setLive(null);
@@ -406,9 +409,38 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [busy, pending]);
 
+  // The PEER idle processor: another mini-agent session messaged this one while
+  // it sat at the prompt. Like cron, start a turn so the agent answers on its
+  // own. Two agents answering each other could run forever (and bill for every
+  // hop), so after MAX_PEER_TURNS auto-started turns with no human input in
+  // between, messages wait in the inbox until you type something.
+  const peerTurns = useRef(0);
+  const peerHoldNoted = useRef(false);
+  useEffect(() => {
+    if (busy || pending || followUps.size) return; // human follow-ups take priority
+    const id = setInterval(() => {
+      const waiting = peerInboxPending();
+      if (!waiting || turn.current) return;
+      if (peerTurns.current >= MAX_PEER_TURNS) {
+        if (!peerHoldNoted.current) note(chalk.yellow(`✉ ${waiting} peer message${waiting > 1 ? "s" : ""} waiting — paused after ${MAX_PEER_TURNS} automatic turns in a row; send anything to continue`));
+        peerHoldNoted.current = true;
+        return;
+      }
+      const got = readPeerInbox();
+      if (!got.length) return;
+      peerTurns.current++;
+      const from = [...new Set(got.map((m) => `${m.from.name} (${m.from.cwd})`))].join(", ");
+      runConversationTurn(peerMessageContent(got), { kind: "note", text: chalk.magenta(`✉ message from ${from}`) });
+    }, 1000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [busy, pending]);
+
   // A normal (non-command) prompt: run UserPromptSubmit hooks, expand @file
   // mentions, then start the turn. Mirrors agent.ts's submit path.
   const submitLine = async (draft: string, attachments: readonly ImageAttachment[] = [], immediate = false) => {
+    peerTurns.current = 0; // a human is here: peers may start turns again
+    peerHoldNoted.current = false;
     if (!pending && turn.current && (draft.startsWith("/") || draft === "exit" || draft === "quit")) {
       note(chalk.dim("Commands are available when the agent is idle; use Esc to interrupt."));
       return;
@@ -554,6 +586,8 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
       setAutoEnabled(autoMode.enabled);
       return true;
     }
+    const peers = peersCommand(line); // /peers, /rename <name>
+    if (peers !== null) { note(chalk.dim(peers)); return true; }
     const info = runInfoCommand(line, { skills: liveSkills(), costMeter }); // /help /cost /memory /stats /todos /bg /team /tasks /skills /undo /diff
     if (info !== null) {
       note(info);

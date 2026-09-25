@@ -409,6 +409,7 @@ function planSafe(toolName: string, verdict: Verdict): boolean {
     case "task": // the sub-agent's own calls hit this same gate, still in plan mode
     case "spawn_teammate": // a teammate's own calls hit this same gate (plan mode still blocks their writes)
     case "send_message": // coordination only — changes nothing on disk
+    case "list_peers": // who else is running — read-only
     case "request_shutdown": // team protocol (Day 39): coordination, no side effects
     case "request_plan":
     case "review_plan":
@@ -508,6 +509,9 @@ function basePermission(toolName: string, argsJson: string, auto: boolean): Verd
       // Dropping a message in another agent's mailbox has no filesystem effect on
       // the user's project — it is pure team coordination.
       return { decision: "allow", reason: "team coordination, no side effects", summary: "send_message" };
+    case "list_peers":
+      // Reading the local session registry — observes, changes nothing.
+      return { decision: "allow", reason: "lists local sessions, read-only", summary: "list_peers" };
     case "request_shutdown":
     case "request_plan":
     case "review_plan":

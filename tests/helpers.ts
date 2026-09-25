@@ -8,6 +8,9 @@
 // mocked reviews to the real .mini-agent/review-debug.jsonl. The flag is read
 // per call, so suites that test tracing set "1" themselves inside a temp dir.
 process.env.MINI_AGENT_REVIEW_DEBUG = "0";
+// Peer sessions register in a machine-wide directory; a suite (or a CLI it
+// spawns, which inherits this) must never show up in your real /peers list.
+process.env.MINI_AGENT_SESSIONS_DIR ||= `${process.env.TMPDIR || "/tmp"}/mini-agent-test-sessions-${process.pid}`;
 
 let passCount = 0; // how many checks passed so far
 let failCount = 0; // how many failed

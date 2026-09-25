@@ -29,6 +29,8 @@ export const COMMANDS: Completion[] = [
   { value: "/team", description: "Show teammates and status" },
   { value: "/tasks", description: "Show the shared task board" },
   { value: "/cron", description: "Show scheduled jobs" },
+  { value: "/peers", description: "Show other mini-agent sessions on this machine" },
+  { value: "/rename", description: "Rename this session for other sessions", children: true },
   { value: "/undo", description: "Revert the most recent file write" },
   { value: "/diff", description: "Show file changes this session" },
   { value: "/resume", description: "Choose a previous session" },
