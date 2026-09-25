@@ -253,6 +253,7 @@ try {
   await sleep(200);
   check("…and the answer is sent back to that window", otherInbox().some((m) => m.kind === "reply" && m.text === "answer for you"));
   unregisterSession();
+  fs.rmSync(sessDir, { recursive: true, force: true }); // helpers.ts put it in the temp dir; leave nothing behind
   await key("/model"); await sleep();
   check("model options come from the active endpoint", frame.includes("/model deepseek-v4-pro") && modelLists === 1);
   await key(" "); await key("\x7f");

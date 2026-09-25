@@ -140,7 +140,9 @@ check("sessions record which terminal they run in", typeof currentSession()!.ter
 setSessionInfo({ lastPrompt: "fix   the\nlogin bug" });
 check("last prompt is stored on one line", currentSession()!.lastPrompt === "fix the login bug");
 const row = peerRow({ ...web, cwd: path.join(os.homedir(), "work/web"), title: "Fix login" });
-check("picker row: name, state, ~path, branch, terminal, what it's doing", row.startsWith("web  ·  idle  ·  ~/work/web (main)  ·  iTerm2 · ttys009  ·  “Fix login”"), row);
+check("picker row: name, terminal, state, ~path, branch, what it's doing", row === "web  ·  iTerm2 · ttys009  ·  idle  ·  ~/work/web (main)  ·  “Fix login”", row);
+const longRow = peerRow({ ...web, cwd: "/private/tmp/some/very/deep/scratchpad/proj" });
+check("a long path keeps only its tail", longRow.includes("…/scratchpad/proj") && !longRow.includes("/private"), longRow);
 checkContains("identify by id works for send", sendPeerMessage(web.id, "web", "identify"), "Delivered");
 
 // ---- leaving ----------------------------------------------------------------

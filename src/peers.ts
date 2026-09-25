@@ -324,9 +324,11 @@ export function describePeers(): string {
 // and what it's doing.
 export function peerRow(p: PeerRecord): string {
   const home = os.homedir();
-  const cwd = p.cwd.startsWith(home) ? `~${p.cwd.slice(home.length)}` : p.cwd;
-  const doing = p.title || p.lastPrompt;
-  return `${p.name}  ·  ${p.state}  ·  ${cwd}${p.branch ? ` (${p.branch})` : ""}  ·  ${p.terminal}${doing ? `  ·  “${doing}”` : ""}`;
+  let cwd = p.cwd.startsWith(home) ? `~${p.cwd.slice(home.length)}` : p.cwd;
+  const parts = cwd.split("/");
+  if (cwd.length > 32 && parts.length > 3) cwd = `…/${parts.slice(-2).join("/")}`; // one row per session: the tail is what tells repos apart
+  const doing = (p.title || p.lastPrompt || "").slice(0, 40);
+  return `${p.name}  ·  ${p.terminal}  ·  ${p.state}  ·  ${cwd}${p.branch ? ` (${p.branch})` : ""}${doing ? `  ·  “${doing}”` : ""}`;
 }
 
 // /peers and /rename <name>, shared by both REPLs. Returns the text to show, or

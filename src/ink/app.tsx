@@ -328,6 +328,8 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
     if (display) pushItem(display);
     clearReasoning(); // Ctrl+R should reveal THIS turn's thinking
     clearToolCalls(); // ...and Ctrl+T THIS turn's tool calls
+    const senders = replyTo.current; // taken now, so a failed turn can't leak them into the next one
+    replyTo.current = [];
     setBusy(true);
     setSessionState("busy", CONFIG.model); // other sessions see "busy" in list_peers
     const controller = new AbortController();
@@ -364,8 +366,6 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
     runTurn(content, hooks)
       .then(async (result: LoopResult) => {
         // A turn started by the user from another window: show them the answer there.
-        const senders = replyTo.current;
-        replyTo.current = [];
         for (const to of senders) sendPeerMessage(to, result.finalText?.trim() || `(finished: ${result.reason})`, "reply");
         if (result.reason !== TerminateReason.Done && !(result.reason === TerminateReason.UserInterrupt && followUps.size)) note(chalk.yellow(`⚠️ ${EXIT_NOTES[result.reason] ?? result.reason}`));
         saveSession(sessionId, model, messages, pendingTitle.current); // snapshot after every turn — crash-safe by construction
