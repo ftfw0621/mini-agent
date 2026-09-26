@@ -83,6 +83,7 @@ export interface LoopOptions {
   progress?: AgentProgress; // per-worker activity, tokens and bounded transcript
   output?: LoopOutput; // where screen output goes — stdout by default (readline REPL); the Ink REPL passes its own sink
   transcript?: readonly OpenAI.ChatCompletionMessageParam[]; // the top-level conversation, set by runLoop — the goal verifier reads its recent tool results
+  onMessage?: (message: OpenAI.ChatCompletionMessageParam) => void; // observe each assistant turn / tool result as it enters history (print mode's stream-json)
 }
 
 // The tool list of the last TOP-LEVEL model call. The next-prompt suggestion
@@ -93,6 +94,16 @@ export const lastRequestTools = (): OpenAI.ChatCompletionTool[] => lastTopLevelT
 function rememberTools(opts: LoopOptions, tools: OpenAI.ChatCompletionTool[]): OpenAI.ChatCompletionTool[] {
   if (!opts.subAgent) lastTopLevelTools = tools;
   return tools;
+}
+
+// Append a model turn or tool result to history AND tell the observer (stream-json).
+// Only these two kinds are streamed: injected user notes are the agent's own
+// plumbing, and compaction rewrites the array wholesale (context.ts) — tapping
+// messages.push itself would replay the entire history mid-stream. Sub-agents
+// inherit opts by spread, so they are filtered here: their turns are not ours.
+function record(messages: OpenAI.ChatCompletionMessageParam[], opts: LoopOptions, message: OpenAI.ChatCompletionMessageParam): void {
+  messages.push(message);
+  if (!opts.subAgent && !opts.teammate) opts.onMessage?.(message);
 }
 
 // Resolve the output sink for a loop: the caller's sink, or stdout (the old
@@ -340,7 +351,7 @@ const completeTaskTool: OpenAI.ChatCompletionTool = {
 //     the human), and none of the planning/background extras.
 //   - Plain sub-agent (task): all built-ins except todo_write (unchanged).
 const TEAMMATE_TOOLS = new Set(["read_file", "write_file", "edit_file", "search", "run_bash"]); // the teammate's focused kit
-function toolsFor(opts: LoopOptions): OpenAI.ChatCompletionTool[] {
+function toolsFor(opts: Pick<LoopOptions, "subAgent" | "teammate">): OpenAI.ChatCompletionTool[] {
   const builtins = toolDefinitions();
   if (opts.teammate) {
     // A teammate works the board: it can add tasks it discovers, see the board,
@@ -357,6 +368,11 @@ function toolsFor(opts: LoopOptions): OpenAI.ChatCompletionTool[] {
   // watching the board (it lays out tasks; teammates pull from it). update_goal
   // (Day 41) appears only once the user has set a /goal — no goal, nothing to end.
   return [...builtins, taskTool, askUserTool, spawnTeammateTool, sendMessageTool, requestShutdownTool, requestPlanTool, reviewPlanTool, createTaskTool, listTasksTool, ...(currentSession() ? [listPeersTool] : []), ...(getGoal() ? [updateGoalTool] : [])];
+}
+
+// The names the top-level agent would be offered right now — stream-json's init line.
+export function topLevelToolNames(): string[] {
+  return toolsFor({}).flatMap((t) => (t.type === "function" ? [t.function.name] : []));
 }
 
 // ---- sub-agent registry (async task delegation) -------------------------------
@@ -1418,7 +1434,7 @@ export async function runLoop(
       // early and looks like success. Check the flag explicitly, and keep the
       // partial text in history (clearly marked) so the next turn makes sense.
       if (opts.isInterrupted()) {
-        if (out.content) messages.push({ role: "assistant", content: out.content + "\n[interrupted by user]" }); // text only — partial tool calls must NOT go in (they would need paired results)
+        if (out.content) record(messages, opts, { role: "assistant", content: out.content + "\n[interrupted by user]" }); // text only — partial tool calls must NOT go in (they would need paired results)
         return { reason: TerminateReason.UserInterrupt };
       }
 
@@ -1426,7 +1442,7 @@ export async function runLoop(
 
       // Rebuild the assistant message from the assembled stream and add it to
       // history — tool results must stay paired with their calls.
-      messages.push({
+      record(messages, opts, {
         role: "assistant", // the model's turn
         content: out.content || null, // null when the turn was tool calls only
         ...(out.reasoning !== undefined ? { reasoning_content: out.reasoning } : {}),
@@ -1482,7 +1498,7 @@ export async function runLoop(
         if (opts.followUps?.size && !opts.isInterrupted()) {
           // Resolve every outstanding tool ID BEFORE adding a user message.
           // Unstarted actions came from the old intent and must be replanned.
-          for (const call of out.toolCalls.slice(i)) messages.push({ role: "tool", tool_call_id: call.id, content: "[follow-up] Not executed: new user input arrived. Reconsider this action using the latest instructions." });
+          for (const call of out.toolCalls.slice(i)) record(messages, opts, { role: "tool", tool_call_id: call.id, content: "[follow-up] Not executed: new user input arrived. Reconsider this action using the latest instructions." });
           receiveFollowUps();
           break;
         }
@@ -1491,12 +1507,12 @@ export async function runLoop(
         if (batch.length) {
           // Run the whole read-only batch at once, preserving result order.
           const results = await Promise.all(batch.map((c) => runOneCall(c, { ...opts, autoHistory: reviewHistory(messages, opts.autoHistory) })));
-          for (const r of results) messages.push({ role: "tool", tool_call_id: r.id, content: r.content });
+          for (const r of results) record(messages, opts, { role: "tool", tool_call_id: r.id, content: r.content });
           continue; // back to the top — the next call is non-read-only
         }
         // A single non-read-only call: gate, maybe ask, execute — all serial.
         const r = await runOneCall(out.toolCalls[i++], { ...opts, autoHistory: reviewHistory(messages, opts.autoHistory) });
-        messages.push({ role: "tool", tool_call_id: r.id, content: r.content });
+        record(messages, opts, { role: "tool", tool_call_id: r.id, content: r.content });
       }
 
       // A launched skill's body arrives as its own user message, after ALL of

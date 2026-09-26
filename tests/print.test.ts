@@ -76,6 +76,22 @@ try {
   const tool = await run(["-p", "Inspect the project"], "", "tool");
   check("print never prompts or bypasses approval", tool.code === 0 && fs.existsSync(path.join(tool.dir, "blocked.txt")) && tool.stderr.includes("declined (no prompt available)"));
   check("intermediate assistant text stays out of stdout", tool.stdout === "**Final answer**\nSecond line\n" && tool.requests.length === 2);
+  const stream = await run(["-p", "Inspect the project", "--output-format", "stream-json", "--verbose"], "", "tool");
+  const lines = stream.stdout.trimEnd().split("\n");
+  let events: Record<string, any>[] = [];
+  try { events = lines.map((line) => JSON.parse(line)); } catch { /* checked below */ }
+  check("stream-json: every stdout line is one JSON event (Claude's --verbose accepted)", stream.code === 0 && events.length === lines.length && events.length > 0, stream.stdout);
+  check("stream-json: first event is system/init with tools and session", events[0]?.type === "system" && events[0]?.subtype === "init" && events[0]?.tools.includes("run_bash") && events[0]?.session_id);
+  const toolUse = events.flatMap((e) => e.type === "assistant" ? e.message.content : []).find((b: any) => b.type === "tool_use");
+  check("stream-json: tool call becomes a tool_use block with parsed input", toolUse?.name === "run_bash" && toolUse?.input.command === "rm -f blocked.txt");
+  const toolResult = events.flatMap((e) => e.type === "user" ? e.message.content : []).find((b: any) => b.type === "tool_result");
+  check("stream-json: declined call becomes an is_error tool_result paired by id", toolResult?.tool_use_id === toolUse?.id && toolResult?.is_error === true);
+  check("stream-json: intermediate and final text are assistant text blocks", events.filter((e) => e.type === "assistant" && e.message.content[0].type === "text").map((e) => e.message.content[0].text).join("|") === "Intermediate narration|**Final answer**\nSecond line");
+  const last = events.at(-1);
+  check("stream-json: last event is a success result with Anthropic-style usage", last?.type === "result" && last.subtype === "success" && !last.is_error && last.result === "**Final answer**\nSecond line" && last.num_turns === 2 && last.usage.input_tokens === 80 && last.usage.cache_read_input_tokens === 120 && events.every((e) => e.session_id === last.session_id && e.uuid));
+  const streamFailed = await run(["-p", "hello", "--output-format=stream-json"], "", "error");
+  const failedLast = JSON.parse(streamFailed.stdout.trimEnd().split("\n").at(-1) ?? "{}");
+  check("stream-json: API failure ends with an error result and exit 1", streamFailed.code === 1 && failedLast.type === "result" && failedLast.subtype === "error_during_execution" && failedLast.is_error === true);
   for (const flags of [["--permission-mode=bypassPermissions", "--auto"], ["--dangerously-skip-permissions"]]) {
     const bypass = await run(["exec", "Perform fixture action", ...flags], "", "tool", { autoMode: { enabled: true }, judge: { enabled: true } });
     check(`explicit bypass executes without approval or reviewer: ${flags[0]}`, bypass.code === 0 && !fs.existsSync(path.join(bypass.dir, "blocked.txt")) && bypass.requests.length === 2 && !bypass.stderr.includes("declined"));

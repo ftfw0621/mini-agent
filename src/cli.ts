@@ -14,7 +14,7 @@ export interface CliOptions {
   resume: boolean;
   help: boolean;
   version: boolean;
-  outputFormat: "text" | "json";
+  outputFormat: "text" | "json" | "stream-json";
 }
 
 // -p is a mode, not a boundary after which flags turn into task text. Node's
@@ -35,6 +35,7 @@ export function parseCli(args: string[]): CliOptions {
       help: { type: "boolean", short: "h" },
       version: { type: "boolean", short: "v" },
       "output-format": { type: "string" },
+      verbose: { type: "boolean" }, // accepted for Claude compatibility: its stream-json requires --verbose; ours always streams
     } });
   } catch (error) { throw new CliUsageError((error as Error).message); }
   const { values, positionals } = parsed;
@@ -46,7 +47,7 @@ export function parseCli(args: string[]): CliOptions {
   // Match Claude's precedence: the explicit skip flag wins over a mode flag.
   const permissionMode = values["dangerously-skip-permissions"] ? "bypassPermissions" : requestedMode;
   const outputFormat = values["output-format"] ?? "text";
-  if (outputFormat !== "text" && outputFormat !== "json") throw new CliUsageError("--output-format must be text or json");
+  if (outputFormat !== "text" && outputFormat !== "json" && outputFormat !== "stream-json") throw new CliUsageError("--output-format must be text, json, or stream-json");
   for (const flag of ["model", "effort", "prompt"]) {
     if (typeof values[flag] === "string" && !values[flag].trim()) throw new CliUsageError(`--${flag} cannot be empty`);
   }

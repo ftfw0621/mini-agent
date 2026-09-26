@@ -5,7 +5,7 @@ import chalk from "chalk"; // terminal colors
 import readline from "node:readline/promises"; // promise-based terminal input
 import { createRequire } from "node:module"; // to read package.json for --version
 import { CONFIG, requireApiKey, saveGlobalSetting, PROJECT_SETTINGS_PATH, GLOBAL_SETTINGS_PATH } from "./config.js"; // provider-agnostic settings (.env loaded there)
-import { runLoop, TerminateReason, MAX_RETRIES, type LoopResult, killAllSubAgents } from "./loop.js"; // the state machine
+import { runLoop, TerminateReason, MAX_RETRIES, type LoopResult, killAllSubAgents, topLevelToolNames } from "./loop.js"; // the state machine
 import { buildSystemMessage, readProjectInstructions } from "./prompt.js"; // the constitution + optional AGENT.md project memory
 import { forgetFilesExcept, registerExternalTool } from "./tools.js"; // file-state reset + tool registration
 import { compactHistory, compactThreshold, contextPercent, contextWindowFor } from "./context.js"; // /compact, /model info, the ctx % in the status line
@@ -18,7 +18,7 @@ import { Judge } from "./judge.js"; // optional LLM permission classifier
 import { AutoMode } from "./auto.js";
 import { effortMenu, setEffort, selectedEffort } from "./effort.js";
 import { parseCli, applyCliOptions, readPrintPrompt, CliUsageError } from "./cli.js";
-import { reservePrintOutput, formatPrintResult } from "./print.js";
+import { reservePrintOutput, formatPrintResult, streamJsonInit, streamJsonMessage } from "./print.js";
 import { FollowUpQueue } from "./follow-up.js";
 import { reviewDebugCommand } from "./auto-debug.js";
 import { isPlanMode, setPlanMode } from "./permissions.js"; // plan mode: research-only until the user approves a plan
@@ -62,7 +62,7 @@ Usage:
   --effort <level>           supported effort for this model, or default
   --permission-mode <mode>  default | auto | bypassPermissions (this run only)
   --dangerously-skip-permissions  alias for --permission-mode bypassPermissions
-  --output-format text|json  final answer or a JSON result (print mode only)
+  --output-format text|json|stream-json  final answer, a JSON result, or Claude-style NDJSON events (print mode only)
   mini-agent --auto          review tool actions automatically (Jev or your current vendor)
   mini-agent -v | --version  print the version
   mini-agent -h | --help     this text
@@ -284,7 +284,19 @@ async function main() {
     });
     messages.push({ role: "user", content: printTask }); // the single task
     autoMode.recordRequest(printTask);
+    // stream-json: an init line now (MCP is connected, so statuses are real),
+    // then every assistant turn / tool result as it enters history.
+    const streaming = cli.outputFormat === "stream-json";
+    const startedAt = Date.now();
+    let numTurns = 0;
+    if (streaming) printOutput!.write(streamJsonInit({ sessionId, model: CONFIG.model, tools: topLevelToolNames(),
+      mcpServers: listMcpServers().map((s) => ({ name: s.name, status: s.status })),
+      permissionMode: CONFIG.bypassPermissions ? "bypassPermissions" : CONFIG.autoMode.enabled ? "auto" : "default" }));
     const result = await runLoop(messages, {
+      onMessage: streaming ? (m) => {
+        if (m.role === "assistant") numTurns++;
+        printOutput!.write(streamJsonMessage(sessionId, CONFIG.model, m));
+      } : undefined,
       client,
       model: CONFIG.model,
       quiet: true, // final result only; no spinner, reasoning or intermediate prose
@@ -308,6 +320,7 @@ async function main() {
     emit("agent_session_end"); // close the books
     printOutput!.write(formatPrintResult(cli.outputFormat, {
       sessionId, model: CONFIG.model, effort: selectedEffort(CONFIG.model), result, usage: costMeter.snapshot(),
+      durationMs: Date.now() - startedAt, numTurns,
     }));
     if (result.reason !== TerminateReason.Done) {
       console.error(chalk.yellow(EXIT_NOTES[result.reason])); // human note on stderr

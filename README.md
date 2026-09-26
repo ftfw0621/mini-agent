@@ -153,7 +153,10 @@ export MINI_AGENT_MODEL=gpt-4.1-mini
 npx agent-from-zero -p "总结当前改动"
 cat error.log | npx agent-from-zero -p "分析这份日志"
 npx agent-from-zero -p "总结当前改动" --output-format json
+npx agent-from-zero -p "修一下这个 bug" --output-format stream-json
 ```
+
+`stream-json` 和 `claude -p --output-format stream-json` 同一格式：每行一个 JSON 事件，依次是 `system/init`、`assistant`（text / thinking / tool_use 块）、`user`（tool_result）、最后一行 `result`。为了兼容 Claude 的脚本，`--verbose` 也能传，不影响输出。
 
 ## 常用命令
 
