@@ -26,6 +26,7 @@ import { todoNag, getTodos, renderTodos } from "./todos.js"; // the agent's plan
 import { currentSkills, skillBodyMessages, skillListingReminder, syncSkillTool } from "./skills.js"; // skill listing reminders + launched skill bodies
 import { pendingNotifications } from "./background.js"; // background tasks (Day 37): surface finished jobs as a turn
 import { consumeCronQueue, cronItemsPending, cronTriggerContent, startCronScheduler, loadDurableJobs } from "./cron.js"; // cron scheduler (Day s14): scheduled, recurring work
+import { getGoal, updateGoalTool, runUpdateGoal, countGoalToolCall } from "./goal.js"; // /goal (Day 41): the model ends a durable goal with update_goal
 
 export const MAX_RETRIES = 10; // total failed API calls per query, across all rounds
 export const MAX_RATE_LIMIT_RETRIES = 3; // 429s get their own, much smaller budget
@@ -81,6 +82,7 @@ export interface LoopOptions {
   askUser?: (questions: { question: string; options: string[] }[]) => Promise<{ question: string; answer: string }[] | null>; // present a multi-question form (Day 30); null if cancelled/non-interactive
   progress?: AgentProgress; // per-worker activity, tokens and bounded transcript
   output?: LoopOutput; // where screen output goes — stdout by default (readline REPL); the Ink REPL passes its own sink
+  transcript?: readonly OpenAI.ChatCompletionMessageParam[]; // the top-level conversation, set by runLoop — the goal verifier reads its recent tool results
 }
 
 // The tool list of the last TOP-LEVEL model call. The next-prompt suggestion
@@ -352,8 +354,9 @@ function toolsFor(opts: LoopOptions): OpenAI.ChatCompletionTool[] {
     return builtins.filter((t) => !(t.type === "function" && t.function.name === "todo_write"));
   }
   // The Lead can do everything: orchestration, the protocols, and authoring +
-  // watching the board (it lays out tasks; teammates pull from it).
-  return [...builtins, taskTool, askUserTool, spawnTeammateTool, sendMessageTool, requestShutdownTool, requestPlanTool, reviewPlanTool, createTaskTool, listTasksTool, ...(currentSession() ? [listPeersTool] : [])];
+  // watching the board (it lays out tasks; teammates pull from it). update_goal
+  // (Day 41) appears only once the user has set a /goal — no goal, nothing to end.
+  return [...builtins, taskTool, askUserTool, spawnTeammateTool, sendMessageTool, requestShutdownTool, requestPlanTool, reviewPlanTool, createTaskTool, listTasksTool, ...(currentSession() ? [listPeersTool] : []), ...(getGoal() ? [updateGoalTool] : [])];
 }
 
 // ---- sub-agent registry (async task delegation) -------------------------------
@@ -649,6 +652,7 @@ async function runOneCall(call: AssembledCall, opts: LoopOptions): Promise<{ id:
   const spinner = !opts.quiet && !opts.subAgent ? sink(opts).spinner(status()) : null;
   const timer = spinner ? setInterval(() => spinner.set(status()), 1000) : undefined;
   emit("agent_tool_call", { tool: call.name });
+  if (!opts.subAgent) countGoalToolCall(); // a goal turn with zero tool calls pauses the goal (Day 41)
   try {
     const refusal = await authorizeCall(call, opts);
     const content = refusal ?? await runWithHooks(call, opts);
@@ -817,6 +821,12 @@ async function execute(call: AssembledCall, opts: LoopOptions): Promise<string> 
   if (call.name === "list_peers") return opts.subAgent ? "[error] Only the top-level agent can see other sessions." : describePeers();
   if (call.name === "claim_task") return runClaimTask(call, opts);
   if (call.name === "complete_task") return runCompleteTask(call, opts);
+  // /goal (Day 41): loop-level because the verifier is a model call (needs the
+  // client) and reads the conversation. The goal is the user's — top-level only.
+  if (call.name === "update_goal") {
+    if (opts.subAgent || !opts.transcript) return "[error] Only the top-level agent can end the goal.";
+    return runUpdateGoal(call.args, { client: opts.client, model: subAgentModelFor(opts), signal: opts.signal, transcript: opts.transcript, note: (line) => { if (!opts.quiet) sink(opts).note(chalk.cyan(`  ${line}`)); } });
+  }
 
   if (call.name !== "task") return dispatch(call.name, call.args, opts.signal); // ordinary tools go through the registry (signal lets Ctrl+C kill run_bash)
   if (opts.subAgent) return "[error] Sub-agents cannot spawn sub-agents. Do the work yourself."; // one level of delegation only
@@ -1287,7 +1297,7 @@ export async function runLoop(
 ): Promise<LoopResult> {
   // Children inherit this snapshot. Later human turns cannot silently grant
   // broader authorization to already-running background work.
-  opts = { ...opts, reviewBudget: opts.reviewBudget ?? new AutoReviewBudget(), autoRequests: opts.autoRequests ?? opts.autoMode?.snapshot(), followUps: opts.subAgent ? undefined : opts.followUps };
+  opts = { ...opts, reviewBudget: opts.reviewBudget ?? new AutoReviewBudget(), autoRequests: opts.autoRequests ?? opts.autoMode?.snapshot(), followUps: opts.subAgent ? undefined : opts.followUps, transcript: opts.subAgent ? undefined : messages };
   const recordHumanInput = (text: string): void => {
     opts.autoMode?.recordRequest(text);
     opts.autoRequests = [...(opts.autoRequests ?? []), text];

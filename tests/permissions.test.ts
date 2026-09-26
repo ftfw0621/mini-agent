@@ -70,6 +70,8 @@ expectVerdict("create_task allowed", "create_task", { subject: "write tests" }, 
 expectVerdict("list_tasks allowed", "list_tasks", {}, "allow");
 expectVerdict("claim_task allowed", "claim_task", { task_id: "task_1" }, "allow");
 expectVerdict("complete_task allowed", "complete_task", { task_id: "task_1" }, "allow");
+// update_goal (Day 41) — ends the user's /goal; runs only the user's own --check.
+expectVerdict("update_goal allowed", "update_goal", { status: "complete", report: "npm test passed" }, "allow");
 
 // ---- background tasks (Day 37) ------------------------------------------------------------------
 // Backgrounding changes WHEN output returns, never WHAT runs — so run_bash_background

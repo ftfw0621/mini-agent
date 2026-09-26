@@ -19,6 +19,7 @@ import { clearUndo } from "../undo.js";
 import { clearTodos } from "../todos.js";
 import { resetTeam } from "../team.js";
 import { resetBoard } from "../board.js";
+import { goalCommand, getGoal, restoreGoal, clearGoal, startGoalTurn, settleGoalTurn } from "../goal.js"; // /goal (Day 41): keep starting turns until the goal is verified done
 import { clearReasoning, clearToolCalls, getReasoning, getToolCalls, getToolActivity, getToolCallCount, cleanup as tuiCleanup } from "../tui.js";
 import { expandMentions } from "../mentions.js"; // @file mentions → attach file contents
 import { normalizeDroppedPaths } from "../drop.js"; // drag-and-drop a file → its absolute path in the input
@@ -328,7 +329,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
   // as the prompt (a user highlight bar, or a note for /skill); the loop appends
   // `content` to `messages` itself. The permission menu + ask_user form raise a
   // `pending` prompt that returns a promise the loop awaits.
-  const runConversationTurn = (content: string | readonly string[] | null, display?: Item, attachments: readonly ImageAttachment[] = []) => {
+  const runConversationTurn = (content: string | readonly string[] | null, display?: Item, attachments: readonly ImageAttachment[] = [], goalTurn = false) => {
     setDetails(null);
     setDetailOffset(0);
     if (display) pushItem(display);
@@ -379,13 +380,15 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
         // A turn started by the user from another window: show them the answer there.
         for (const to of senders) sendPeerMessage(to, result.finalText?.trim() || `(finished: ${result.reason})`, "reply");
         if (result.reason !== TerminateReason.Done && !(result.reason === TerminateReason.UserInterrupt && followUps.size)) note(chalk.yellow(`⚠️ ${EXIT_NOTES[result.reason] ?? result.reason}`));
-        saveSession(sessionId, model, messages, pendingTitle.current); // snapshot after every turn — crash-safe by construction
+        const goalNote = settleGoalTurn(result.reason, goalTurn, result.reason === TerminateReason.UserInterrupt && followUps.size > 0); // Day 41: pause on Esc / failure / no progress
+        if (goalNote) note(chalk.yellow(goalNote));
+        saveSession(sessionId, model, messages, pendingTitle.current); // snapshot after every turn — crash-safe by construction (the goal's state rides along)
         if (suggestAfter && result.reason === TerminateReason.Done) {
           void generatePromptSuggestion(client, CONFIG.model, messages, lastRequestTools()).then((guess) => {
             if (guess && seq === suggestionSeq.current) setSuggestion(guess); // no newer turn started meanwhile (the box shows it only while idle)
           });
         }
-        if (CONFIG.memory.autoExtract && result.reason === TerminateReason.Done) {
+        if (CONFIG.memory.autoExtract && result.reason === TerminateReason.Done && !goalTurn) { // not after every automatic goal turn — that would bill an extraction per continuation
           try {
             const got = await extractMemories(client, CONFIG.subAgentModel || model, messages);
             if (got.length) note(chalk.dim(`(remembered ${got.length}: ${got.map((g) => g.fact.slice(0, 50)).join("; ")})`));
@@ -394,7 +397,11 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
           }
         }
       })
-      .catch((e: unknown) => note(chalk.red(`[error] ${(e as Error).message}`)))
+      .catch((e: unknown) => {
+        note(chalk.red(`[error] ${(e as Error).message}`));
+        const goalNote = settleGoalTurn("error", goalTurn); // a crashed goal turn pauses the goal instead of retrying forever
+        if (goalNote) note(chalk.yellow(goalNote));
+      })
       .finally(() => {
         turn.current = null;
         setSessionState("idle");
@@ -430,6 +437,25 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [busy, pending]);
+
+  // The GOAL idle processor (Day 41): while a /goal is active and the REPL is
+  // idle — no turn, no menu, no queued message — start the next goal turn. This
+  // is the whole "keep going" mechanism: the model can stop as often as it
+  // likes, but it is sent straight back until update_goal ends the goal, or
+  // settleGoalTurn pauses it (Esc, a failed turn, no progress). Plan mode never
+  // continues: plan-only work can't move a goal forward.
+  useEffect(() => {
+    if (busy || pending || followUps.size || planMode) return; // human input first; plan mode is read-only
+    const id = setInterval(() => {
+      if (turn.current || followUps.size) return;
+      const content = startGoalTurn();
+      if (!content) return;
+      const goal = getGoal()!;
+      runConversationTurn(content, { kind: "note", text: chalk.cyan(`◎ goal · turn ${goal.continuations}: ${goal.objective.slice(0, 70)}`) }, [], true); // a note, not a user bar — you didn't type it
+    }, 500);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [busy, pending, planMode]);
 
   // The PEER idle processor: another mini-agent session messaged this one while
   // it sat at the prompt. Like cron, start a turn so the agent answers on its
@@ -755,9 +781,17 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
       return true;
     }
 
+    if (line === "/goal" || line.startsWith("/goal ")) {
+      const { message, request } = goalCommand(line.slice(5));
+      if (request) autoMode.recordRequest(request); // the /goal you typed is the authorization; automatic goal turns never are
+      note(chalk.cyan(message)); // setting or resuming a goal: the idle processor starts the turn
+      return true;
+    }
+
     switch (line) {
       case "/clear":
         autoMode.clearRequests();
+        clearGoal(); // the goal belonged to the old conversation
         messages.length = 0; // mutate in place — same array ref the loop holds
         messages.push({ role: "system", content: systemMessage });
         forgetFilesExcept([]);
@@ -824,6 +858,13 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
           resetTeam();
           resetBoard();
           note(chalk.dim(`(resumed ${chosen.id} — ${chosen.messages.length} messages; files must be re-read before editing)`));
+          // Unlike the todos and the board, the goal comes BACK with its session (Day 41).
+          restoreGoal(chosen.goal);
+          const goal = getGoal();
+          if (goal?.status === "active") {
+            autoMode.recordRequest(`/goal ${goal.objective}`);
+            note(chalk.cyan(`◎ resumed an ACTIVE goal — the agent continues it now (Esc pauses): ${goal.objective.slice(0, 80)}`));
+          } else if (goal) note(chalk.dim(`(◎ goal restored [${goal.status}] — /goal to see it, /goal resume to continue)`));
         });
         return true;
       }

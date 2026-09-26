@@ -40,6 +40,7 @@ export const SESSION_HELP = `commands:
   /bg        list background tasks this session (run_bash_background) and their status
   /team      list the agent team (spawn_teammate): each teammate's role, status, and pending inbox
   /tasks     show the shared task board (create_task/claim_task): each task's status, owner, and dependencies
+  /goal <objective> [--check <cmd>]  keep working, turn after turn, until the goal is verified done (/goal alone shows it; pause | resume | clear)
   /cron      list scheduled cron jobs (schedule_cron) and their expressions
   /peers     pick another mini-agent session on this machine: talk to it from this box (Esc to come back), or make it flash its tab so you know which window it is
   /rename <name>  rename this session — the name other sessions use to reach it

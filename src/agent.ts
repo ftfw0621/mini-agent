@@ -41,6 +41,7 @@ import { launchInk } from "./ink/launch.js"; // the Ink REPL — the default fro
 import { listBackground, hasRunningBackground, killAllBackground } from "./background.js"; // background tasks: /bg view + kill-on-exit (Day 37)
 import { listTeam, resetTeam } from "./team.js"; // agent teams: /team view + reset on clear/resume (Day 38)
 import { boardSummary, resetBoard } from "./board.js"; // task board: /tasks view + reset on clear/resume (Day 40)
+import { goalCommand, getGoal, restoreGoal, clearGoal, startGoalTurn, settleGoalTurn } from "./goal.js"; // /goal (Day 41): keep working until the goal is verified done
 import { loadDurableJobs, startCronScheduler, stopCronScheduler, listJobs } from "./cron.js"; // cron scheduler (Day s14)
 
 // package.json sits one level above both src/ (dev) and dist/ (built) — same path either way.
@@ -112,6 +113,7 @@ const SESSION_HELP = `commands:
   /bg        list background tasks this session (run_bash_background) and their status
   /team      list the agent team (spawn_teammate): each teammate's role, status, and pending inbox
   /tasks     show the shared task board (create_task/claim_task): each task's status, owner, and dependencies
+  /goal <objective> [--check <cmd>]  keep working, turn after turn, until the goal is verified done (/goal alone shows it; pause | resume | clear)
   /cron      list scheduled cron jobs (schedule_cron) and their expressions
   /peers     list other mini-agent sessions on this machine (the agent can message them with send_message)
   /rename <name>  rename this session — the name other sessions use to reach it
@@ -193,6 +195,7 @@ async function main() {
       sessionId = prev.id; // keep appending to the same session file
       initialTitle = prev.title;
       console.log(chalk.dim(`(resumed session ${prev.id} — ${prev.messages.length} messages; files must be re-read before editing)`));
+      if (printTask === null) restoreGoal(prev.goal); // Day 41: the goal comes back with its session (print mode doesn't run goals)
     } else {
       console.log(chalk.dim("(no previous session here — starting fresh)")); // resume with nothing to resume is not an error
     }
@@ -226,6 +229,13 @@ async function main() {
   // The optional LLM permission judge, built once if a settings file enabled it.
   const judge = CONFIG.judge.enabled && !CONFIG.bypassPermissions ? new Judge(client, CONFIG.judge.model || CONFIG.model) : undefined;
   const autoMode = new AutoMode(client, { projectInstructions });
+  // A restored ACTIVE goal (Day 41) starts running before the first prompt —
+  // say so loudly. Its /goal line was a genuine human request: auto mode re-learns it.
+  const restoredGoal = getGoal();
+  if (restoredGoal?.status === "active") {
+    autoMode.recordRequest(`/goal ${restoredGoal.objective}`);
+    console.log(chalk.cyan(`(◎ resumed an ACTIVE goal — the agent continues it now; Esc pauses: ${restoredGoal.objective.slice(0, 80)})`));
+  } else if (restoredGoal) console.log(chalk.dim(`(◎ goal restored [${restoredGoal.status}] — /goal to see it, /goal resume to continue)`));
   for (const notice of autoMode.startupNotices()) console.log(chalk.dim(notice));
   if (judge) console.log(chalk.dim(`(permission judge on — ${autoMode.backend})`));
 
@@ -568,6 +578,12 @@ async function main() {
       console.log(await statusCommand(line, costMeter));
       return true;
     }
+    if (line === "/goal" || line.startsWith("/goal ")) {
+      const { message, request } = goalCommand(line.slice(5));
+      if (request) autoMode.recordRequest(request); // the /goal you typed is the authorization; automatic goal turns never are
+      console.log(chalk.cyan(message)); // setting or resuming: the goal turns start before the next prompt
+      return true;
+    }
     if (line.startsWith("/skills ")) line = `/skill ${line.slice(8).trim()}`;
     if (line === "/effort" || line.startsWith("/effort ")) {
       const target = CONFIG.model;
@@ -652,6 +668,7 @@ async function main() {
         return true;
       case "/clear":
         autoMode.clearRequests();
+        clearGoal(); // the goal belonged to the old conversation (Day 41)
         messages = [{ role: "system", content: systemMessage }]; // drop everything but the constitution
         forgetFilesExcept([]); // the file read-state belongs to the conversation — clear it too
         clearUndo(); // a fresh conversation should not undo the previous one's writes
@@ -798,6 +815,13 @@ async function main() {
         resetTeam(); // a resumed conversation starts with no live team
         resetBoard(); // ...and an empty task board (Day 40)
         console.log(chalk.dim(`(resumed ${chosen.id} — ${chosen.messages.length} messages; files must be re-read before editing)`));
+        // Unlike the todos and the board, the goal comes BACK with its session (Day 41).
+        restoreGoal(chosen.goal);
+        const goal = getGoal();
+        if (goal?.status === "active") {
+          autoMode.recordRequest(`/goal ${goal.objective}`);
+          console.log(chalk.cyan(`◎ resumed an ACTIVE goal — the agent continues it now (Esc pauses): ${goal.objective.slice(0, 80)}`));
+        } else if (goal) console.log(chalk.dim(`(◎ goal restored [${goal.status}] — /goal to see it, /goal resume to continue)`));
         return true;
       }
       case "/diff": {
@@ -876,7 +900,43 @@ async function main() {
     });
   }
 
+  // /goal (Day 41): the readline prompt blocks on your input, so it can't poll
+  // like the Ink REPL's idle processor. Instead, goal turns run HERE, before each
+  // prompt, one after another until the goal stops being active — verified
+  // complete, blocked, or paused by Esc / a failed turn / no progress. Plan mode
+  // never continues a goal: plan-only work can't move it forward.
+  const runGoalTurns = async (): Promise<void> => {
+    for (let content = isPlanMode() ? null : startGoalTurn(); content; content = isPlanMode() ? null : startGoalTurn()) {
+      console.log(chalk.cyan(`\n◎ goal · turn ${getGoal()!.continuations}: ${getGoal()!.objective.slice(0, 70)}`));
+      messages.push({ role: "user", content }); // the goal turn (restates the objective — it survives compaction)
+      clearReasoning();
+      clearToolCalls();
+      running = true;
+      interrupted = false;
+      controller = new AbortController();
+      setSessionState("busy", CONFIG.model);
+      let reason = "error";
+      try {
+        const result = await runLoop(messages, {
+          client, model: CONFIG.model, signal: controller.signal, isInterrupted: () => interrupted, confirm, askUser, followUps,
+          onFollowUp: (text) => console.log(sentMessage(text)), subAgentModel: CONFIG.subAgentModel, judge, autoMode, canPrompt: !!process.stdin.isTTY,
+        });
+        reason = result.reason;
+        if (result.reason !== TerminateReason.Done) console.log(chalk.yellow(`\n⚠️ ${EXIT_NOTES[result.reason]}`));
+      } catch (err) {
+        console.log(chalk.red(`[error] ${(err as Error).message}`));
+      } finally {
+        running = false;
+        setSessionState("idle");
+      }
+      const goalNote = settleGoalTurn(reason, true);
+      if (goalNote) console.log(chalk.yellow(goalNote));
+      saveSession(sessionId, CONFIG.model, messages, pendingTitle); // the goal's progress is saved turn by turn
+    }
+  };
+
   while (true) {
+    await runGoalTurns(); // an active /goal keeps going before you're asked for input
     // The input area: a blank line for breathing room, the "❯" you type on, then
     // a single status line (model · 📁 dir · 🌿 branch · ctx% · $ · time) pinned
     // BELOW the input. We dropped the old top/bottom horizontal rules — two bare
@@ -973,6 +1033,8 @@ async function main() {
     });
     running = false; // back at the prompt — Ctrl+C means "exit" again
     setSessionState("idle"); // other sessions see this one as free again
+    const goalNote = settleGoalTurn(result.reason, false); // Day 41: Esc on your own turn pauses an active goal too
+    if (goalNote) console.log(chalk.yellow(goalNote));
     saveSession(sessionId, CONFIG.model, messages, pendingTitle); // snapshot after every turn — crash-safe by construction
 
     // Auto-extract memories (opt-in: settings.memory.autoExtract). A cheap pass

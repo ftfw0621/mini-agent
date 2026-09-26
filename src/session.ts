@@ -1,6 +1,7 @@
 import fs from "node:fs"; // session files live on disk
 import path from "node:path"; // path joining
 import type OpenAI from "openai"; // message types
+import { getGoal, type Goal } from "./goal.js"; // the /goal rides along in the session file (Day 41)
 
 // Sessions are project-local: .mini-agent/sessions/<id>.json under the cwd.
 // Project-local (not global) because a conversation is about a codebase —
@@ -18,6 +19,7 @@ interface SessionFile {
   model: string; // which model the session ran on (informational)
   messages: OpenAI.ChatCompletionMessageParam[]; // the conversation, WITHOUT the system message
   title?: string; // optional concise title (generated after the first message); falls back to the first prompt
+  goal?: Goal; // the /goal at save time (Day 41) — so --resume keeps working toward it
 }
 
 // A fresh, filename-safe session id derived from the wall clock.
@@ -41,6 +43,7 @@ export function saveSession(id: string, model: string, messages: OpenAI.ChatComp
     model, // informational — resume does not force the same model
     title: title ?? existing?.title, // a generated title sticks across saves
     messages: messages.filter((m) => m.role !== "system"), // the constitution is rebuilt fresh on resume (AGENT.md may have changed)
+    goal: getGoal() ?? undefined, // the live goal, snapshotted with the conversation it belongs to
   };
   const tmp = `${file}.tmp`; // write next to the destination (same filesystem → rename is atomic)
   fs.writeFileSync(tmp, JSON.stringify(data)); // the new snapshot
@@ -107,6 +110,7 @@ export function sessionTitle(messages: OpenAI.ChatCompletionMessageParam[]): str
   const firstUser = messages.find((m) => m.role === "user");
   let text = typeof firstUser?.content === "string" ? firstUser.content : "";
   text = text.split("\n\n[Referenced files")[0]; // drop the @file attachment the REPL appended (Day 26)
+  text = text.match(/^\[goal\][^\n]*\nObjective: ([^\n]*)/)?.[1] ?? text; // a session started with /goal is named after its objective (Day 41)
   const line = text.replace(/\s+/g, " ").trim(); // flatten to one line
   return line || "(no prompt)";
 }

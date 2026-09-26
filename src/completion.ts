@@ -28,6 +28,7 @@ export const COMMANDS: Completion[] = [
   { value: "/bg", description: "Show background tasks" },
   { value: "/team", description: "Show teammates and status" },
   { value: "/tasks", description: "Show the shared task board" },
+  { value: "/goal", description: "Keep working until a goal is verified done", children: true },
   { value: "/cron", description: "Show scheduled jobs" },
   { value: "/peers", description: "Talk to another mini-agent session, or find its window" },
   { value: "/rename", description: "Rename this session for other sessions", children: true },

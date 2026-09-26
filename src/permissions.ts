@@ -526,6 +526,10 @@ function basePermission(toolName: string, argsJson: string, auto: boolean): Verd
       // Task board (Day 40) — bookkeeping on the internal board, not the user's
       // project. The actual work a claimed task drives still passes this gate.
       return { decision: "allow", reason: "task board, no project side effects", summary: toolName };
+    case "update_goal":
+      // /goal (Day 41) — ends the user's goal. Bookkeeping; the only command it
+      // runs is the user's own /goal --check, which the model cannot change.
+      return { decision: "allow", reason: "goal bookkeeping, runs only the user's own --check", summary: toolName };
     case "ask_user":
       // Asking the user a question has no side effects — it's the safest thing
       // the model can do. Never gate it behind an approval prompt.

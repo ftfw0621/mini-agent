@@ -8,6 +8,7 @@ import { initCostMeter, DEFAULT_PRICING, type CostMeter } from "../cost.js";
 import { gitBranch } from "../tui.js";
 import { listPeers, registerSession, unregisterSession } from "../peers.js"; // peer sessions: other mini-agent processes on this machine
 import { newSessionId, latestSession } from "../session.js";
+import { getGoal, restoreGoal } from "../goal.js"; // /goal (Day 41): a resumed session keeps working toward its goal
 import { initTelemetry, emit } from "../telemetry.js";
 import { runHooks } from "../hooks.js";
 import { connectMcpServers, watchMcpConfig } from "../mcp.js";
@@ -74,6 +75,7 @@ export async function buildInkSession(opts: { resume?: boolean } = {}): Promise<
       sessionId = prev.id; // keep appending to the same file
       initialTitle = prev.title;
       notices.push(`(resumed session ${prev.id} — ${prev.messages.length} messages; files must be re-read before editing)`);
+      restoreGoal(prev.goal);
     } else {
       notices.push("(no previous session here — starting fresh)");
     }
@@ -101,6 +103,14 @@ export async function buildInkSession(opts: { resume?: boolean } = {}): Promise<
   const judge = CONFIG.judge.enabled && !CONFIG.bypassPermissions ? new Judge(client, CONFIG.judge.model || CONFIG.model) : undefined;
   const autoMode = new AutoMode(client, { projectInstructions });
   notices.push(...autoMode.startupNotices());
+  // A restored ACTIVE goal starts running as soon as the prompt is up — no
+  // keystroke — so say so loudly. Its /goal line was a genuine human request,
+  // so auto mode re-learns it (a paused goal is re-learned on /goal resume).
+  const goal = getGoal();
+  if (goal?.status === "active") {
+    autoMode.recordRequest(`/goal ${goal.objective}`);
+    notices.push(`(◎ resumed an ACTIVE goal — the agent continues it now; Esc pauses: ${goal.objective.slice(0, 80)})`);
+  } else if (goal) notices.push(`(◎ goal restored [${goal.status}] — /goal to see it, /goal resume to continue)`);
   if (judge) notices.push(`(permission judge on — ${autoMode.backend})`);
 
   // The remember tool flows through the same permission gate as any tool.

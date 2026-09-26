@@ -133,6 +133,20 @@ export MINI_AGENT_MODEL=gpt-4.1-mini
 
 所有数据都存在 `~/.config/mini-agent/sessions/` 下，只在本机，不经过网络。
 
+### 目标模式 /goal
+
+普通对话里，模型觉得做完了就停。`/goal` 把"做完没有"的判断从模型手里拿走：只要目标还没验证完成，模型每次停下，mini-agent 都会自动开下一轮让它接着干。
+
+```
+/goal 让 npm test 全部通过 --check "npm test"
+```
+
+- 模型只能用 `update_goal` 工具结束目标：`blocked` 表示需要你介入，`complete` 表示宣布完成。宣布完成要过两关：先跑你写的 `--check` 命令，退出码必须是 0，这条命令模型改不了；再由一次独立的模型调用对照最近的工具输出核对它的说法，拿不准就算没完成。
+- 不设费用上限，靠"有没有进展"兜底：一轮目标回合里一个工具都没调，立刻暂停；连续 3 轮工作区毫无变化，也暂停。按 Esc 同样会暂停。
+- 你随时可以插话，你的消息永远优先，处理完目标再继续。plan 模式下不会自动续跑。
+- `/goal` 查看状态，`/goal pause`、`/goal resume`、`/goal clear` 管理生命周期。
+- 目标存在会话文件里，`--resume` 或 `/resume` 回来以后，没做完的目标会接着跑。
+
 ### 非交互模式
 
 ```bash
@@ -143,7 +157,7 @@ npx agent-from-zero -p "总结当前改动" --output-format json
 
 ## 常用命令
 
-在会话里输入 `/help` 可以看到全部命令，比较常用的有：`/model` `/effort` `/plan` `/auto` `/skills` `/mcp` `/peers` `/memory` `/compact` `/diff` `/undo` `/resume` `/status` `/cost`。
+在会话里输入 `/help` 可以看到全部命令，比较常用的有：`/goal` `/model` `/effort` `/plan` `/auto` `/skills` `/mcp` `/peers` `/memory` `/compact` `/diff` `/undo` `/resume` `/status` `/cost`。
 
 ## 开发
 
