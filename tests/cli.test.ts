@@ -48,4 +48,16 @@ try {
   CONFIG.model = original.model; CONFIG.baseURL = original.url; CONFIG.autoMode.enabled = original.auto;
   CONFIG.bypassPermissions = original.bypass;
 }
+check("--session-id is parsed", parseCli(["--session-id", "0f3a-b.c_d"]).sessionId === "0f3a-b.c_d");
+for (const bad of ["../escape", "a/b", "..", "has space"]) {
+  let rejected = false;
+  try { parseCli(["--session-id", bad]); } catch (error) { rejected = error instanceof CliUsageError; }
+  check(`--session-id rejects a path-like id: ${bad}`, rejected);
+}
+{
+  let rejected = false;
+  try { parseCli(["--session-id", "x", "--resume"]); } catch (error) { rejected = error instanceof CliUsageError; }
+  check("--session-id and --resume together are rejected", rejected);
+}
+
 finish();

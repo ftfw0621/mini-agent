@@ -7,10 +7,10 @@ import { contextPercent } from "../context.js";
 import { initCostMeter, DEFAULT_PRICING, type CostMeter } from "../cost.js";
 import { gitBranch } from "../tui.js";
 import { listPeers, registerSession, unregisterSession } from "../peers.js"; // peer sessions: other mini-agent processes on this machine
-import { newSessionId, latestSession } from "../session.js";
+import { newSessionId, latestSession, loadSession, sessionPath } from "../session.js";
 import { getGoal, restoreGoal } from "../goal.js"; // /goal (Day 41): a resumed session keeps working toward its goal
 import { initTelemetry, emit } from "../telemetry.js";
-import { runHooks } from "../hooks.js";
+import { runHooks, setHookContext } from "../hooks.js";
 import { connectMcpServers, watchMcpConfig } from "../mcp.js";
 import { Judge } from "../judge.js";
 import { AutoMode } from "../auto.js";
@@ -55,7 +55,7 @@ export interface InkSession {
 
 // Build the session. `resume` mirrors `-r/--resume`: fold the most recent
 // conversation in this directory into the fresh constitution.
-export async function buildInkSession(opts: { resume?: boolean } = {}): Promise<InkSession> {
+export async function buildInkSession(opts: { resume?: boolean; sessionId?: string } = {}): Promise<InkSession> {
   requireApiKey();
   const client = new OpenAI({ baseURL: CONFIG.baseURL, apiKey: CONFIG.apiKey, maxRetries: 0 });
 
@@ -68,7 +68,19 @@ export async function buildInkSession(opts: { resume?: boolean } = {}): Promise<
   let initialTitle: string | undefined; // only a resumed session has one already
   const startedAt = Date.now();
 
-  if (opts.resume) {
+  // --session-id: an id chosen by whoever started us (an orchestrator picks it
+  // up front so it knows the session before the first turn). Resume it if it
+  // exists, otherwise it names the new session.
+  if (opts.sessionId) {
+    const prev = loadSession(opts.sessionId);
+    sessionId = opts.sessionId;
+    if (prev) {
+      messages.push(...prev.messages);
+      initialTitle = prev.title;
+      notices.push(`(resumed session ${prev.id} — ${prev.messages.length} messages; files must be re-read before editing)`);
+      restoreGoal(prev.goal);
+    }
+  } else if (opts.resume) {
     const prev = latestSession();
     if (prev) {
       messages.push(...prev.messages);
@@ -82,6 +94,7 @@ export async function buildInkSession(opts: { resume?: boolean } = {}): Promise<
   }
 
   initTelemetry(sessionId);
+  setHookContext({ session_id: sessionId, transcript_path: sessionPath(sessionId) });
   emit("agent_session_start", { mode: "repl" });
 
   // MCP servers connect in the BACKGROUND, like Claude Code: the prompt is

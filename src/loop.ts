@@ -12,7 +12,7 @@ import { currentSession, describePeers, peerMessageContent, readPeerInbox, sendP
 import { LEAD, MAX_TEAMMATES, sendMessage, sendProtocol, readInbox, inboxCount, registerTeammate, finishTeammate, teammateExists, teammateCount, createRequest, resolveResponse, setTeammateState, anyTeammateBusy, runningTeammates, markShutdown, shutdownRequestId, resetTeam, listTeammateViews } from "./team.js"; // agent teams (Day 38) + team protocols (Day 39): mailboxes, registry, request/response contracts
 import { createTask, listTasks, claimTask, completeTask, claimNextAvailable, boardSummary, resetBoard } from "./board.js"; // the shared task board (Day 40): autonomous work claiming
 import { emit } from "./telemetry.js"; // local-only event log (no-op unless the CLI armed it)
-import { runHooks } from "./hooks.js"; // user lifecycle hooks (PreToolUse / PostToolUse / Stop)
+import { runHooks, runPermissionHooks } from "./hooks.js"; // user lifecycle hooks (PreToolUse / PostToolUse / Stop / PermissionRequest)
 import type { Judge } from "./judge.js"; // optional LLM permission classifier
 import { reviewHistory, type ReviewHistory } from "./auto-context.js";
 import { AgentProgress, type AgentView } from "./agent-progress.js";
@@ -749,6 +749,25 @@ async function authorizeCall(call: AssembledCall, opts: LoopOptions): Promise<st
       }
     }
     if (opts.signal.aborted || opts.isInterrupted()) return "[permission] Interrupted before execution.";
+    // Before the human is asked, a PermissionRequest hook may decide (this is
+    // how an orchestrator approves on the human's behalf). A deny is always
+    // honoured. An allow is not when a rule says a human must decide: then the
+    // question still goes to the human. Sub-agents skip hooks, as everywhere.
+    if (!autoAllowed && !opts.subAgent) {
+      const decision = await runPermissionHooks({ tool: call.name, args: call.args, reason: v.reason, summary: v.summary });
+      if (opts.signal.aborted || opts.isInterrupted()) return "[permission] Interrupted before execution.";
+      if (decision?.behavior === "deny") {
+        emit("agent_tool_declined", { tool: call.name });
+        if (!opts.quiet) sink(opts).note(mark.declined);
+        return `[permission] Action not approved: ${decision.message}. Ask the user how to proceed, or choose a safer alternative.`;
+      }
+      if (decision?.behavior === "allow" && !v.requiresHuman) {
+        autoAllowed = true;
+        if (!opts.quiet) recordToolDetail(call.id, "Approved by a PermissionRequest hook");
+      } else {
+        await runHooks("Notification", { notification_type: "permission_prompt", message: `approval needed: ${call.name}`, tool: call.name, args: call.args });
+      }
+    }
     // An unattended callback may contain the old blanket auto-approve policy.
     // Auto mode never uses that policy as a fallback when Jev did not approve.
     // A diff is needed when the human is deciding; automatic edits stay in
@@ -1460,7 +1479,7 @@ export async function runLoop(
         // runs the tests, blocks while they fail, and the agent keeps fixing.
         // Sub-agents are exempt — Stop hooks are the human's project policy.
         if (!opts.subAgent) {
-          const stop = await runHooks("Stop", { finalText: out.content }); // give hooks the last word
+          const stop = await runHooks("Stop", { finalText: out.content, last_assistant_message: out.content, stop_hook_active: false }); // give hooks the last word
           if (stop.block) {
             emit("agent_hook_block", { event: "Stop" }); // the agent was sent back to work
             if (!opts.quiet) sink(opts).note(chalk.yellow(`\n↩ Stop hook: not done yet — ${stop.feedback.slice(0, 120)}`)); // show why

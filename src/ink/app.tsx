@@ -25,14 +25,14 @@ import { expandMentions } from "../mentions.js"; // @file mentions → attach fi
 import { normalizeDroppedPaths } from "../drop.js"; // drag-and-drop a file → its absolute path in the input
 import { currentSession, peerInboxPending, readPeerInbox, peerMessageContent, peersCommand, setSessionState, setSessionInfo, listPeers, findPeer, peerRow, sendPeerMessage, SCREEN_KINDS, MAX_PEER_TURNS, type PeerRecord } from "../peers.js"; // peer sessions: messages from other mini-agent windows start a turn while idle
 import { cronItemsPending, consumeCronQueue, cronTriggerContent } from "../cron.js"; // cron scheduler (Day s14): fire scheduled jobs autonomously while idle
-import { newSessionId, saveSession, listSessions, loadSession, setSessionTitle } from "../session.js";
+import { newSessionId, saveSession, listSessions, loadSession, setSessionTitle, sessionPath } from "../session.js";
 import { generateSessionTitle, setTerminalTitle, refreshTerminalTitle, flashTerminalTitle } from "../title.js"; // concise session name, generated after the first message + the terminal tab that shows it
 import { isPlanMode, setPlanMode } from "../permissions.js";
 import { findSkill, recordSkillUsage, skillSource, skillUsageScores, userSkillMessages } from "../skills.js";
 import { SkillsPanel } from "./skills-panel.js"; // /skills: Claude Code's on / user-only / off manager
 import { extractMemories } from "../memory.js";
 import { displayWidth } from "../editor.js"; // display-width measurement (CJK-aware)
-import { runHooks } from "../hooks.js";
+import { runHooks, setHookContext, beginTurn } from "../hooks.js";
 import { emit } from "../telemetry.js";
 import { reviewDebugCommand } from "../auto-debug.js";
 import type { ClipboardSource } from "../clipboard.js";
@@ -270,6 +270,8 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
   const [menuSel, setMenuSel] = useState(0); // the select menu's cursor
   const [formState, setFormState] = useState<FormState | null>(null); // the ask_user form's state
   const [sessionId, setSessionId] = useState(session.initialSessionId); // changes on /clear, /resume
+  useEffect(() => setHookContext({ session_id: sessionId, transcript_path: sessionPath(sessionId) }), [sessionId]); // hooks always name the current session
+  const turnIdReady = useRef(false); // a submitted prompt already started this turn's id (before its UserPromptSubmit hook)
   const [planMode, setPlan] = useState(isPlanMode()); // mirrored into the prompt frame
   const [autoEnabled, setAutoEnabled] = useState(autoMode.enabled);
   const [histIdx, setHistIdx] = useState<number | null>(null); // ↑/↓ recall position (null = editing a fresh line)
@@ -341,6 +343,9 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
     // another agent's message, not your message relayed from another window.
     const suggestAfter = CONFIG.promptSuggestions && !senders.length && (content === null || display?.kind === "user");
     const seq = ++suggestionSeq.current;
+    if (!turnIdReady.current) beginTurn(); // cron, goal and peer turns get their id here
+    turnIdReady.current = false;
+    let ending = { reason: "error", text: "" }; // what the TurnEnd hook reports
     setSuggestion(null);
     setBusy(true);
     setSessionState("busy", CONFIG.model); // other sessions see "busy" in list_peers
@@ -378,6 +383,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
     runTurn(content, hooks)
       .then(async (result: LoopResult) => {
         // A turn started by the user from another window: show them the answer there.
+        ending = { reason: result.reason, text: result.finalText ?? "" };
         for (const to of senders) sendPeerMessage(to, result.finalText?.trim() || `(finished: ${result.reason})`, "reply");
         if (result.reason !== TerminateReason.Done && !(result.reason === TerminateReason.UserInterrupt && followUps.size)) note(chalk.yellow(`⚠️ ${EXIT_NOTES[result.reason] ?? result.reason}`));
         const goalNote = settleGoalTurn(result.reason, goalTurn, result.reason === TerminateReason.UserInterrupt && followUps.size > 0); // Day 41: pause on Esc / failure / no progress
@@ -408,6 +414,10 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
         setBusy(false);
         setStatus(null);
         setLive(null);
+        // The one signal that fires at the end of EVERY turn, after the session
+        // is saved: Stop does not fire on an interrupt or an error, and fires
+        // before the save. An orchestrator reads this as "idle, transcript current".
+        void runHooks("TurnEnd", { reason: ending.reason, last_assistant_message: ending.text });
       });
   };
 
@@ -569,7 +579,15 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
     if (!pending && (draft === "exit" || draft === "quit")) return doExit();
     if (!pending && await handleCommand(draft)) return;
     const text = pastedTexts.expand(draft);
+    // A prompt typed while a turn runs is a follow-up that belongs to that turn;
+    // only a prompt that starts a turn gets a new turn id.
+    const startsTurn = !pending && !turn.current && !followUps.size;
+    if (startsTurn) {
+      beginTurn();
+      turnIdReady.current = true;
+    }
     const hook = await runHooks("UserPromptSubmit", { prompt: text });
+    if (hook.block) turnIdReady.current = false;
     if (hook.block) return note(chalk.yellow(`(prompt blocked by a UserPromptSubmit hook: ${hook.feedback.slice(0, 150)})`));
     const injected = hook.stdout ? `\n\n[context added by a UserPromptSubmit hook]\n${hook.stdout}` : "";
     const { augmented, mentions } = expandMentions(text);
@@ -1073,6 +1091,22 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
       setCursor(0); // Home — jump to the start of the line
     } else if (key.ctrl && char === "e") {
       setCursor(input.length); // End — jump to the end of the line
+    } else if ((key.ctrl && char === "u") || /^\x15+$/.test(char)) {
+      // ctrl+u deletes from the caret back to the start of its line, like a
+      // shell; at the start of a line it joins the line to the one above, so
+      // repeated presses clear a multi-line draft. Several presses can arrive
+      // as one chunk when a program types them.
+      let next = input;
+      let at = cursor;
+      for (let presses = key.ctrl ? 1 : char.length; presses > 0 && at > 0; presses--) {
+        const lineStart = next.lastIndexOf("\n", at - 1) + 1;
+        const from = lineStart === at ? at - 1 : lineStart;
+        next = next.slice(0, from) + next.slice(at);
+        at = from;
+      }
+      setInput(next);
+      setCursor(at);
+      setHistIdx(null);
     } else if (key.upArrow) {
       // ↑ recall an earlier prompt (newest-first), like a shell; caret to its end.
       if (!history.length) return;

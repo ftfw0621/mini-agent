@@ -22,6 +22,17 @@ interface SessionFile {
   goal?: Goal; // the /goal at save time (Day 41) — so --resume keeps working toward it
 }
 
+// Where a session's file lives — absolute, so it can be handed to hooks.
+export function sessionPath(id: string): string {
+  return path.join(sessionsDir(), `${id}.json`);
+}
+
+// A session id becomes a file name, so one chosen from outside (--session-id)
+// must not be able to name a path.
+export function isValidSessionId(id: string): boolean {
+  return /^[A-Za-z0-9._-]+$/.test(id) && id !== "." && id !== "..";
+}
+
 // A fresh, filename-safe session id derived from the wall clock.
 export function newSessionId(): string {
   return new Date().toISOString().replace(/[:.]/g, "-"); // 2026-06-12T10-30-00-000Z

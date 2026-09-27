@@ -113,6 +113,12 @@ function readSettings(p: string): SettingsFile {
 
 const globalSettings = readSettings(GLOBAL_SETTINGS_PATH); // the user's defaults
 const projectSettings = readSettings(PROJECT_SETTINGS_PATH); // this project's rules
+// A third, per-process layer of HOOKS only: MINI_AGENT_HOOKS_FILE points at a
+// settings-shaped file ({"hooks": {...}}) whose hooks join the other two. It
+// lets a program that launches the agent (an orchestrator such as orca) watch
+// and steer this one process without editing the user's settings. Only hooks
+// are read from it — it cannot loosen permissions.
+const processHooks = process.env.MINI_AGENT_HOOKS_FILE ? readSettings(process.env.MINI_AGENT_HOOKS_FILE).hooks : undefined;
 
 // Re-read ONLY the mcpServers map from both layers, mid-session (the MCP hot
 // reload in mcp.ts). Unlike startup, a file that won't parse is NOT fatal here:
@@ -193,7 +199,7 @@ export const CONFIG = {
   // a generic union so adding a new event needs no edit here.
   hooks: ((): Record<string, HookDef[]> => {
     const merged: Record<string, HookDef[]> = {};
-    for (const src of [globalSettings.hooks, projectSettings.hooks]) {
+    for (const src of [globalSettings.hooks, projectSettings.hooks, processHooks]) {
       for (const [event, defs] of Object.entries(src ?? {})) merged[event] = [...(merged[event] ?? []), ...(defs ?? [])];
     }
     return merged;

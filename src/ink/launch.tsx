@@ -9,8 +9,8 @@ import { App } from "./app.js"; // the Ink REPL
 // optional resume); App renders it and runs the loop. Exported so BOTH the
 // `npm run ink` entry (main.tsx) and agent.ts (the default `mini-agent` entry,
 // once it hands interactive sessions to Ink) can start it.
-export async function launchInk(opts: { resume?: boolean } = {}): Promise<void> {
-  const session = await buildInkSession({ resume: opts.resume });
+export async function launchInk(opts: { resume?: boolean; sessionId?: string } = {}): Promise<void> {
+  const session = await buildInkSession(opts);
   const { waitUntilExit } = render(<App session={session} runTurn={makeRunTurn(session.client, session.messages)} />);
   await waitUntilExit(); // keep the process alive until the user quits
   // Then leave for real. The cron poll, the settings watcher and friends keep

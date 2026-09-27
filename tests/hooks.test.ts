@@ -1,4 +1,4 @@
-import { runHooks, type HookEvent } from "../src/hooks.js"; // the unit under test
+import { runHooks, runPermissionHooks, setHookContext, beginTurn, type HookEvent } from "../src/hooks.js"; // the unit under test
 import { CONFIG } from "../src/config.js"; // mutated to inject hooks (the test seam)
 import { check, finish } from "./helpers.js"; // assertions
 
@@ -68,5 +68,38 @@ check("SubagentStart runs (observational)", !sub.block && sub.stdout.includes("n
 const tEnd = Date.now();
 const slowEnd = await withHooks("SessionEnd", [{ command: "sleep 5" }]); // no explicit timeoutMs → uses the SessionEnd default (1.5s)
 check("SessionEnd is killed at ~1.5s, not 10s", Date.now() - tEnd < 2500 && !slowEnd.block, `${Date.now() - tEnd}ms`);
+
+// ---- every payload names the session, transcript, cwd and turn (Claude Code's field names) ---
+setHookContext({ session_id: "s-123", transcript_path: "/tmp/s-123.json" });
+const turnId = beginTurn();
+const named = await withHooks("PreToolUse", [{ command: "cat 1>&2; exit 2" }], { tool: "run_bash", args: '{"command":"ls"}' });
+const namedPayload = JSON.parse(named.feedback) as Record<string, unknown>;
+check("payload carries session_id and transcript_path", namedPayload.session_id === "s-123" && namedPayload.transcript_path === "/tmp/s-123.json", named.feedback);
+check("payload carries the turn's prompt_id", namedPayload.prompt_id === turnId, named.feedback);
+check("payload carries hook_event_name and cwd", namedPayload.hook_event_name === "PreToolUse" && namedPayload.cwd === process.cwd(), named.feedback);
+check("tool fields also come in Claude's names, input parsed", namedPayload.tool_name === "run_bash" && (namedPayload.tool_input as { command?: string }).command === "ls", named.feedback);
+check("this agent's own field names are kept", namedPayload.tool === "run_bash" && namedPayload.args === '{"command":"ls"}', named.feedback);
+check("a new turn gets a new id", beginTurn() !== turnId);
+
+// ---- PermissionRequest: a hook may decide an approval; anything else is NO decision ---------
+async function decide(defs: { command: string; timeoutMs?: number }[]) {
+  CONFIG.hooks.PermissionRequest = defs;
+  const decision = await runPermissionHooks({ tool: "run_bash", args: '{"command":"rm -rf build"}' });
+  CONFIG.hooks.PermissionRequest = [];
+  return decision;
+}
+const allowJson = `echo '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'`;
+const denyJson = `echo '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"not here"}}}'`;
+check("no PermissionRequest hook → no decision", (await decide([])) === null);
+check("allow output → allow", (await decide([{ command: allowJson }]))?.behavior === "allow");
+const denied = await decide([{ command: denyJson }]);
+check("deny output → deny with its message", denied?.behavior === "deny" && denied.message === "not here", JSON.stringify(denied));
+const exit2 = await decide([{ command: "echo stop 1>&2; exit 2" }]);
+check("exit 2 → deny with stderr", exit2?.behavior === "deny" && exit2.message === "stop", JSON.stringify(exit2));
+check("no output → no decision, never an allow", (await decide([{ command: "true" }])) === null);
+check("stdout that is not a decision → no decision", (await decide([{ command: "echo hello" }])) === null);
+check("a crashing hook → no decision", (await decide([{ command: "exit 7" }])) === null);
+check("a timed-out hook → no decision", (await decide([{ command: `sleep 5; ${allowJson}`, timeoutMs: 300 }])) === null);
+check("a deny from any hook wins over an allow", (await decide([{ command: allowJson }, { command: denyJson }]))?.behavior === "deny");
 
 finish();

@@ -158,6 +158,19 @@ npx agent-from-zero -p "修一下这个 bug" --output-format stream-json
 
 `stream-json` 和 `claude -p --output-format stream-json` 同一格式：每行一个 JSON 事件，依次是 `system/init`、`assistant`（text / thinking / tool_use 块）、`user`（tool_result）、最后一行 `result`。为了兼容 Claude 的脚本，`--verbose` 也能传，不影响输出。
 
+### 让别的程序来驱动交互会话
+
+编排器（比如 orca）可以把交互式的 mini-agent 放在终端里跑，用 hooks 看它的状态、替你审批：
+
+- `MINI_AGENT_HOOKS_FILE=<文件>`：再加一层 hooks，格式和 settings.json 里的 `hooks` 一样，只对这一个进程生效，不改你的设置文件，也放宽不了权限。
+- `--session-id <id>`：这个 id 的会话存在就接着聊，不存在就用它开新会话。
+- 每个 hook 的输入都带 Claude Code 同名的字段：`session_id`、`transcript_path`（会话文件的绝对路径）、`cwd`、`hook_event_name`、这一轮的 `prompt_id`，工具事件另有 `tool_name`、`tool_input`。原来的字段照旧。
+- `PermissionRequest`：一次工具调用要问你之前先问 hook。输出 `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}` 就放行，`"behavior":"deny"` 加 `message` 或者退出码 2 就拒绝；没输出、超时、出错都算没决定，照常问你。规则要求必须由人决定的调用，hook 只能拒绝，放行还得你点。
+- `Notification`：审批菜单弹出来时触发，`notification_type` 是 `permission_prompt`。
+- `TurnEnd`：每一轮结束、会话存盘之后触发，被 Esc 打断或出错也会触发，带 `reason` 和 `last_assistant_message`。`Stop` 在存盘之前触发，打断时不触发，要知道"这一轮真的完了"就看 `TurnEnd`。
+
+输入框里 `Ctrl+U` 删除光标前的这一行，行首再按会并到上一行，连按可以清空多行草稿。
+
 ## 常用命令
 
 在会话里输入 `/help` 可以看到全部命令，比较常用的有：`/goal` `/model` `/effort` `/plan` `/auto` `/skills` `/mcp` `/peers` `/memory` `/compact` `/diff` `/undo` `/resume` `/status` `/cost`。

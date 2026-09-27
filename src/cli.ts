@@ -1,6 +1,7 @@
 import { parseArgs } from "node:util";
 import { CONFIG } from "./config.js";
 import { effortMenu, setEffort } from "./effort.js";
+import { isValidSessionId } from "./session.js"; // --session-id becomes a file name
 
 export class CliUsageError extends Error {}
 
@@ -12,6 +13,7 @@ export interface CliOptions {
   auto: boolean;
   permissionMode?: "default" | "auto" | "bypassPermissions";
   resume: boolean;
+  sessionId?: string; // continue this session if its file exists, else start one with this id
   help: boolean;
   version: boolean;
   outputFormat: "text" | "json" | "stream-json";
@@ -32,6 +34,7 @@ export function parseCli(args: string[]): CliOptions {
       "permission-mode": { type: "string" },
       "dangerously-skip-permissions": { type: "boolean" },
       resume: { type: "boolean", short: "r" },
+      "session-id": { type: "string" },
       help: { type: "boolean", short: "h" },
       version: { type: "boolean", short: "v" },
       "output-format": { type: "string" },
@@ -52,11 +55,14 @@ export function parseCli(args: string[]): CliOptions {
     if (typeof values[flag] === "string" && !values[flag].trim()) throw new CliUsageError(`--${flag} cannot be empty`);
   }
   if (values.prompt !== undefined && positionals.length) throw new CliUsageError("Use either a positional prompt or --prompt, not both");
+  const sessionId = typeof values["session-id"] === "string" ? values["session-id"] : undefined;
+  if (sessionId !== undefined && !isValidSessionId(sessionId)) throw new CliUsageError("--session-id may only contain letters, digits, '.', '_' and '-'");
+  if (sessionId !== undefined && values.resume) throw new CliUsageError("Use either --resume or --session-id, not both");
   const prompt = typeof values.prompt === "string" ? values.prompt : positionals.join(" ");
   if (!print && (prompt || values["output-format"] !== undefined)) throw new CliUsageError("Use -p / --print or exec with a prompt or --output-format");
   return { print, prompt, outputFormat, permissionMode, model: typeof values.model === "string" ? values.model : undefined,
     effort: typeof values.effort === "string" ? values.effort : undefined, auto: values.auto === true,
-    resume: values.resume === true, help: values.help === true, version: values.version === true };
+    resume: values.resume === true, sessionId, help: values.help === true, version: values.version === true };
 }
 
 // CLI overrides live only in this process; never save them to user settings.

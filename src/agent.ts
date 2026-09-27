@@ -54,6 +54,7 @@ const USAGE = `mini-agent ${pkg.version} — a Claude Code-style CLI agent (any 
 Usage:
   mini-agent                 interactive session (REPL)
   mini-agent -r | --resume   continue the most recent session in this directory
+  mini-agent --session-id <id>  continue that session, or start a new one with that id
   mini-agent -p "<task>"     one-shot: run a single task, print the result, exit
   mini-agent exec "<task>"   alias for non-interactive print mode
   cat file | mini-agent -p "<task>"  append piped text to the prompt
@@ -162,7 +163,7 @@ async function main() {
   // MINI_AGENT_NO_INK=1 to use the readline REPL below instead (a simpler
   // reference front-end, and an escape hatch for terminals Ink misbehaves in).
   if (printTask === null && process.env.MINI_AGENT_NO_INK !== "1") {
-    await launchInk({ resume: cli.resume });
+    await launchInk({ resume: cli.resume, sessionId: cli.sessionId });
     return;
   }
 
