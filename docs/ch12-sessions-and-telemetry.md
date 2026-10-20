@@ -33,7 +33,7 @@ full log: .mini-agent/telemetry.jsonl (local only — nothing leaves this machin
 
 ### 第 1 步:快照,不是日志
 
-每轮结束把整个对话写进 `.mini-agent/sessions/<id>.json`。注意是**全量快照**,不是 append-only 日志——因为历史不是只增的,**压缩会重写它**(Ch6)。append 一个被压缩过的历史,你会存下自相矛盾的东西。快照是唯一始终正确的表示。
+每轮结束把整个对话写进 `~/.config/mini-agent/projects/<cwd-slug>/sessions/<id>.json`（`<cwd-slug>` 是当前目录拍平，比如 `/Users/me/proj` → `-Users-me-proj`）。注意是**全量快照**,不是 append-only 日志——因为历史不是只增的,**压缩会重写它**(Ch6)。append 一个被压缩过的历史,你会存下自相矛盾的东西。快照是唯一始终正确的表示。
 
 ```ts
 const tmp = `${file}.tmp`;
@@ -51,7 +51,7 @@ messages: messages.filter((m) => m.role !== "system"), // 丢掉宪法
 
 **系统消息不存**。resume 时重新 `buildSystemMessage()` 生成——因为 AGENT.md 可能在两次会话之间改了,存旧的宪法等于把过期规则带回来。这呼应 Ch6 压缩时「保住 system 消息」的另一面:system 消息永远是当下重建的,不是历史的一部分。
 
-会话是**项目级**的(存在 cwd 下),不是全局的:一段对话是关于一个代码库的,在项目 B 里 resume 项目 A 的重构毫无意义。
+会话是**项目级**的(按 cwd 分桶),不是全局的:一段对话是关于一个代码库的,在项目 B 里 resume 项目 A 的重构毫无意义。桶放在 home 下(`~/.config/mini-agent/projects/<cwd-slug>/`),和 Claude Code 的 `~/.claude/projects/` 一个路子——这样仓库里不会多出一个未跟踪目录,配置和 skill 仍然项目级(`.mini-agent/`)。
 
 ### 第 3 步:resume 的两个诚实
 

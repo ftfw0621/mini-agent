@@ -2,13 +2,19 @@ import fs from "node:fs"; // session files live on disk
 import path from "node:path"; // path joining
 import type OpenAI from "openai"; // message types
 import { getGoal, type Goal } from "./goal.js"; // the /goal rides along in the session file (Day 41)
+import { migrateLegacyState, projectSessionsDir } from "./state.js"; // one bucket per cwd, kept out of the checkout
 
-// Sessions are project-local: .mini-agent/sessions/<id>.json under the cwd.
-// Project-local (not global) because a conversation is about a codebase —
-// resuming a refactor of project A from inside project B makes no sense.
+// Sessions are per-project but not per-repo: <home>/mini-agent/projects/<slug>/sessions,
+// where <slug> is the cwd flattened. Same reasoning as the old in-repo layout (a
+// conversation is about a codebase, so resuming project A from inside project B
+// would be wrong) without leaving an untracked directory in every checkout.
 // Resolved lazily (a function, not a const) so it always reflects the current
-// working directory — and so tests can chdir into a scratch dir.
-const sessionsDir = () => path.resolve(".mini-agent", "sessions");
+// working directory, and so tests can chdir into a scratch dir. The first touch
+// migrates any ./.mini-agent/sessions left by an older build.
+const sessionsDir = () => {
+  migrateLegacyState();
+  return projectSessionsDir();
+};
 const KEEP_SESSIONS = 20; // how many session files survive pruning
 
 // What one session file contains.

@@ -131,7 +131,7 @@ export MINI_AGENT_MODEL=gpt-4.1-mini
 - 实例名跟着它在做的事走：发出第一条消息后会生成会话标题（比如 “Fix login bug”），实例名随之变成 `fix-login-bug`，标签页标题就是 `✳ Fix login bug`，和 `/peers` 里看到的一致。还没有标题时用目录名。`/rename <名字>` 可以手动指定名字，指定后标签页显示 `✳ 名字 · 标题`，之后不会再跟着标题变。
 - agent 之间也能自己沟通：模型有 `list_peers` 工具，`send_message` 可以直接发给其他实例。对方空闲时会自动开一轮处理；忙的话，在它当前这一步工具调用结束后插进对话。你在 Talk 模式里打的字则会等对方这一轮结束再处理，因为回答要发回给你。另一个 agent 发来的消息不算用户的授权。为了防止两个 agent 互相回复停不下来，连续自动处理 5 轮之后会暂停，等你输入任何内容再继续。
 
-所有数据都存在 `~/.config/mini-agent/sessions/` 下，只在本机，不经过网络。
+peer 实例的数据存在 `~/.config/mini-agent/sessions/` 下，只在本机，不经过网络。会话快照和长期记忆按 cwd 分桶存在 `~/.config/mini-agent/projects/<cwd-slug>/` 下，不会在代码仓库里留下目录。
 
 ### 目标模式 /goal
 

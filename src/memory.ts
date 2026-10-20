@@ -2,6 +2,7 @@ import fs from "node:fs"; // memory lives in a file on disk
 import path from "node:path"; // path joining
 import type OpenAI from "openai"; // types only — the extraction call uses the caller's client
 import type { Tool } from "./tools.js"; // the remember tool is a normal tool
+import { migrateLegacyState, projectMemoryPath } from "./state.js"; // one bucket per cwd, kept out of the checkout
 
 // Long-term memory: facts the agent should carry ACROSS sessions, not just
 // within one conversation. Session persistence (Day 12) restores "what we were
@@ -16,7 +17,15 @@ import type { Tool } from "./tools.js"; // the remember tool is a normal tool
 // assistant: 90% the model gets right isn't worth saving, the 10% it got wrong
 // and was corrected on is gold). Every fact is TYPED so the model can tell "this
 // is who the user is" from "this is a correction" from "this is a project fact".
-export const MEMORY_PATH = path.resolve(".mini-agent", "MEMORY.md");
+// The file lives in the cwd's home bucket (state.ts), not inside the checkout,
+// so a repo never carries agent memory in git status. Resolved per call so a
+// chdir (tests, --cd) is honoured, and so the first call can migrate an older
+// build's ./.mini-agent/MEMORY.md. Still one Markdown file, human-readable and
+// human-editable: not a vector database, not embeddings.
+export function memoryPath(): string {
+  migrateLegacyState();
+  return projectMemoryPath();
+}
 
 // The four memory types (handbook §17). feedback is the most valuable.
 export const MEMORY_TYPES = ["user", "feedback", "project", "reference"] as const;
@@ -51,7 +60,7 @@ function parseEntry(text: string): MemoryEntry {
 export function readMemoryTyped(): MemoryEntry[] {
   try {
     return fs
-      .readFileSync(MEMORY_PATH, "utf8")
+      .readFileSync(memoryPath(), "utf8")
       .split("\n")
       .filter((l) => l.startsWith("- "))
       .map((l) => parseEntry(l.slice(2).trim()))
@@ -101,8 +110,9 @@ export function addFact(fact: string, type: MemoryType = "project"): string {
     entries.shift(); // still too big — drop the oldest until it fits
     body = entries.map((e) => `- [${e.type}] ${e.fact}`).join("\n");
   }
-  fs.mkdirSync(path.dirname(MEMORY_PATH), { recursive: true });
-  fs.writeFileSync(MEMORY_PATH, HEADER + body + "\n", "utf8");
+  const file = memoryPath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, HEADER + body + "\n", "utf8");
   return `Remembered (${t}). (${entries.length} fact${entries.length === 1 ? "" : "s"} stored.)`;
 }
 

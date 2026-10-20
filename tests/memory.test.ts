@@ -3,12 +3,13 @@ import os from "node:os"; // run in a temp cwd so we don't touch the real .mini-
 import path from "node:path"; // path joining
 import { check, checkContains, finish } from "./helpers.js"; // assertions
 
-// memory.ts writes to ./.mini-agent/MEMORY.md relative to cwd, so run the whole
-// suite inside a throwaway directory. (MEMORY_PATH is resolved at import time,
-// so we chdir BEFORE importing memory.ts — done via a dynamic import below.)
+// memory.ts writes to the cwd's home bucket (state.ts), so run the whole suite
+// inside a throwaway directory with the bucket root redirected there. (memoryPath
+// resolves per call, so the chdir is honoured; the env var keeps ~/.config clean.)
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ma-test-mem-"));
+process.env.MINI_AGENT_PROJECTS_DIR = path.join(dir, "projects");
 process.chdir(dir);
-const { rememberTool, readMemory, readMemoryTyped, memoryContext, addFact, parseExtractedMemories, extractMemories, MEMORY_PATH } = await import("../src/memory.js");
+const { rememberTool, readMemory, readMemoryTyped, memoryContext, addFact, parseExtractedMemories, extractMemories, memoryPath } = await import("../src/memory.js");
 
 // ---- empty state ----------------------------------------------------------------------
 check("no memory file → no facts", readMemory().length === 0);
@@ -17,7 +18,7 @@ check("no memory → empty context block", memoryContext() === "");
 // ---- the remember tool persists a fact -------------------------------------------------
 const r1 = await rememberTool.run({ fact: "the build command is npm run build" });
 checkContains("remember confirms", r1, "Remembered");
-check("fact is on disk", fs.readFileSync(MEMORY_PATH, "utf8").includes("the build command is npm run build"));
+check("fact is on disk", fs.readFileSync(memoryPath(), "utf8").includes("the build command is npm run build"));
 check("readMemory sees it", readMemory().includes("the build command is npm run build"));
 
 // ---- it survives a 'reload' (fresh read from disk) ------------------------------------
@@ -40,15 +41,15 @@ check("oldest dropped (fact 0 gone)", !facts.includes("fact number 0"));
 check("newest kept (fact 49 present)", facts.includes("fact number 49"));
 
 // ---- self-healing: a hand-edited huge file is shrunk on next write --------------------
-fs.writeFileSync(MEMORY_PATH, "# header\n" + Array.from({ length: 500 }, (_, i) => `- bloat line ${i}`).join("\n") + "\n");
+fs.writeFileSync(memoryPath(), "# header\n" + Array.from({ length: 500 }, (_, i) => `- bloat line ${i}`).join("\n") + "\n");
 check("hand-edited file is over the cap before a write", readMemory().length > 40);
 await rememberTool.run({ fact: "a fresh fact after bloat" });
 check("next write heals the count cap", readMemory().length <= 40, String(readMemory().length));
-check("byte cap enforced", Buffer.byteLength(fs.readFileSync(MEMORY_PATH, "utf8"), "utf8") <= 12200);
+check("byte cap enforced", Buffer.byteLength(fs.readFileSync(memoryPath(), "utf8"), "utf8") <= 12200);
 check("the fresh fact made it in", readMemory().includes("a fresh fact after bloat"));
 
 // ---- typed memories (Day 34) ----------------------------------------------------------
-fs.rmSync(MEMORY_PATH, { force: true }); // clean slate
+fs.rmSync(memoryPath(), { force: true }); // clean slate
 addFact("the user prefers spaces over tabs", "user");
 addFact("always run pants fmt before committing", "feedback");
 addFact("the build command is pnpm build", "project");
@@ -63,7 +64,7 @@ addFact("the build command is pnpm build", "project");
   checkContains("context includes the user fact", ctx, "prefers spaces over tabs");
 }
 // a bare (legacy) line parses as "project"
-fs.writeFileSync(MEMORY_PATH, "# h\n- a legacy untyped fact\n");
+fs.writeFileSync(memoryPath(), "# h\n- a legacy untyped fact\n");
 check("legacy untyped line → project type", readMemoryTyped()[0].type === "project");
 check("an unknown type tag falls back to project", (addFact("x", "bogus" as never), readMemoryTyped().find((e) => e.fact === "x")?.type) === "project");
 
@@ -76,7 +77,7 @@ check("non-array → empty", parseExtractedMemories("not json at all").length ==
 check("empty array → empty", parseExtractedMemories("[]").length === 0);
 
 // ---- extractMemories end-to-end with a fake client ------------------------------------
-fs.rmSync(MEMORY_PATH, { force: true });
+fs.rmSync(memoryPath(), { force: true });
 const fakeClient = {
   chat: { completions: { create: async () => ({ choices: [{ message: { content: '[{"type":"feedback","fact":"the user corrected the import order"}]' } }] }) } },
 } as never;

@@ -27,7 +27,7 @@ $ mini-agent
 
 ### 第 1 步:就是一个 Markdown 文件
 
-长期记忆存在 `.mini-agent/MEMORY.md`,项目级、**人类可读可改**:
+长期记忆存在 `~/.config/mini-agent/projects/<cwd-slug>/MEMORY.md`,按 cwd 分桶、**人类可读可改**(不在代码仓库里):
 
 ```
 # mini-agent long-term memory

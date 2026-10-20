@@ -34,7 +34,7 @@ import { gitBranch, toggleLastCollapsed, revealReasoning, clearReasoning, reveal
 import { promptSelect, promptForm } from "./menu.js"; // arrow-key approval menu + multi-question form
 import { editLine } from "./editor.js"; // our own line editor (keeps the status footer pinned even when input wraps)
 import { normalizeDroppedPaths } from "./drop.js"; // drag-and-drop: a dropped file's path → a clean absolute path in the input
-import { rememberTool, readMemory, readMemoryTyped, extractMemories, MEMORY_PATH } from "./memory.js"; // long-term project memory + auto-extract
+import { rememberTool, readMemory, readMemoryTyped, extractMemories, memoryPath } from "./memory.js"; // long-term project memory + auto-extract
 import { allSkills, currentSkills, findSkill, recordSkillUsage, skillLocked, skillMode, userSkillMessages } from "./skills.js"; // Markdown-as-plugin skills
 import { initCostMeter, DEFAULT_PRICING } from "./cost.js"; // token & cost accounting for /cost
 import { launchInk } from "./ink/launch.js"; // the Ink REPL — the default front-end for interactive sessions
@@ -183,7 +183,8 @@ async function main() {
   let messages: OpenAI.ChatCompletionMessageParam[] = [{ role: "system", content: systemMessage }]; // the whole conversation lives here, across turns
 
   // ---- Session persistence ---------------------------------------------------------
-  // Every conversation is snapshotted to .mini-agent/sessions/ after each turn;
+  // Every conversation is snapshotted to the project's home bucket
+  // (~/.config/mini-agent/projects/<slug>/sessions) after each turn;
   // -r / --resume picks up the most recent one. The system message is NOT
   // restored from disk — it is rebuilt fresh, because AGENT.md may have changed.
   let sessionId = newSessionId(); // this session's identity (and file name)
@@ -762,7 +763,7 @@ async function main() {
         console.log(
           chalk.dim(
             entries.length
-              ? `long-term memory (${MEMORY_PATH}):\n${entries.map((e) => `  [${e.type}] ${e.fact}`).join("\n")}`
+              ? `long-term memory (${memoryPath()}):\n${entries.map((e) => `  [${e.type}] ${e.fact}`).join("\n")}`
               : `(no long-term memory yet — the model saves facts with the remember tool${CONFIG.memory.autoExtract ? "" : "; turn on settings.memory.autoExtract to capture them automatically"})`,
           ),
         );

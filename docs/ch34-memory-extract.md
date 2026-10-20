@@ -19,7 +19,7 @@ Day 17 的记忆有个软肋:它**全靠模型记得调 `remember`**——而模
 
 ```
 ❯ /memory
-long-term memory (.mini-agent/MEMORY.md):
+long-term memory (~/.config/mini-agent/projects/<cwd-slug>/MEMORY.md):
   [user] the user is a backend engineer who prefers Java + Spring
   [feedback] always import classes, never use fully-qualified names
   [project] the build command is pants build

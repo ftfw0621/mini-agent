@@ -2,7 +2,7 @@ import chalk from "chalk";
 import path from "node:path";
 import { CONFIG } from "../config.js";
 import { statsReport } from "../telemetry.js";
-import { readMemoryTyped, MEMORY_PATH } from "../memory.js";
+import { readMemoryTyped, memoryPath } from "../memory.js";
 import { getTodos, renderTodos } from "../todos.js";
 import { listBackground } from "../background.js";
 import { listTeam } from "../team.js";
@@ -98,7 +98,7 @@ export function runInfoCommand(line: string, ctx: { skills: Skill[]; costMeter: 
       const entries = readMemoryTyped();
       return chalk.dim(
         entries.length
-          ? `long-term memory (${MEMORY_PATH}):\n${entries.map((e) => `  [${e.type}] ${e.fact}`).join("\n")}`
+          ? `long-term memory (${memoryPath()}):\n${entries.map((e) => `  [${e.type}] ${e.fact}`).join("\n")}`
           : `(no long-term memory yet — the model saves facts with the remember tool${CONFIG.memory.autoExtract ? "" : "; turn on settings.memory.autoExtract to capture them automatically"})`,
       );
     }

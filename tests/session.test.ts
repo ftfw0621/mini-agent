@@ -4,10 +4,11 @@ import path from "node:path"; // join paths
 import { saveSession, loadSession, listSessions, latestSession, sessionTitle } from "../src/session.js"; // unit under test
 import { check, checkContains, finish } from "./helpers.js"; // assertions
 
-// Sessions are written under the cwd's .mini-agent/sessions — chdir into a
-// scratch dir so the test never pollutes the repo. (sessionsDir resolves the
-// path lazily, so this works.)
+// Sessions are written under the cwd's home bucket (state.ts). Point the bucket
+// root at the scratch dir so the test never touches the real ~/.config, then
+// chdir in so the bucket is keyed to a throwaway project.
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "mini-agent-sessions-"));
+process.env.MINI_AGENT_PROJECTS_DIR = path.join(tmp, "projects");
 process.chdir(tmp);
 
 // ---- sessionTitle: the pickable one-liner -----------------------------------------------

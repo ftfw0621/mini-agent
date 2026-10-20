@@ -14,6 +14,10 @@ process.env.MINI_AGENT_REVIEW_DEBUG = "0";
 // count calls must not see it (the UI suite switches it on where it tests it).
 process.env.MINI_AGENT_PROMPT_SUGGESTIONS = "0";
 process.env.MINI_AGENT_SESSIONS_DIR ||= `${process.env.TMPDIR || "/tmp"}/mini-agent-test-sessions-${process.pid}`;
+// Session snapshots and long-term memory are bucketed by cwd under the home
+// directory; without this, every suite that saves a session would litter the
+// developer's real ~/.config. Buckets go to a per-suite temp root instead.
+process.env.MINI_AGENT_PROJECTS_DIR ||= `${process.env.TMPDIR || "/tmp"}/mini-agent-test-projects-${process.pid}`;
 
 let passCount = 0; // how many checks passed so far
 let failCount = 0; // how many failed
