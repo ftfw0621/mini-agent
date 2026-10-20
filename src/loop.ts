@@ -785,7 +785,13 @@ async function authorizeCall(call: AssembledCall, opts: LoopOptions): Promise<st
       decision: ok ? "approved" : opts.canPrompt === false ? "unattended" : "declined", ...(reviewId ? { reviewId } : {}) });
     if (!ok) emit("agent_tool_declined", { tool: call.name, ...(reviewId ? { reviewId } : {}) }); // the human said no — that is signal
     if (!ok && !opts.quiet) sink(opts).note(mark.declined); // make the refusal visible
-    if (!ok) return `[permission] Action not approved${reviewReason ? `: ${reviewReason}` : ". The user declined this action"}. Ask the user how to proceed, or choose a safer alternative.`;
+    if (!ok) {
+      // Say what actually happened. An unattended worker was never declined by
+      // anyone — saying so teaches the model to rephrase and retry against a
+      // refusal that never existed.
+      if (opts.canPrompt === false) return `[permission] Nobody is reachable to approve this here${reviewReason ? `: ${reviewReason}` : "."} Not executed. Report it in your result and continue with what the rules allow; do not retry the same effect through another tool, wrapper or worker.`;
+      return `[permission] Action not approved${reviewReason ? `: ${reviewReason}` : ". The user declined this action"}. Ask the user how to proceed, or choose a safer alternative.`;
+    }
   }
   if (opts.reviewBudget?.exhausted) return "[permission] Review limit reached; not executed. Wait for human direction.";
   return opts.signal.aborted || opts.isInterrupted() ? "[permission] Interrupted before execution." : null;
