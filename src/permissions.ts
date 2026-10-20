@@ -3,6 +3,7 @@ import fs from "node:fs"; // resolve symlinks before auto mode grants file acces
 import os from "node:os"; // `cd ~` in the recoverable-shell analyzer
 import { execFileSync } from "node:child_process"; // ask git whether a deletion target is disposable
 import { CONFIG } from "./config.js"; // user-configured allow/deny rules from settings files
+import { emit } from "./telemetry.js"; // a bypassed approval leaves an audit row, not silence
 
 // Three verdicts, checked in strict order. The invariant that holds the whole
 // system together: DENY ALWAYS WINS. No flag, no auto-approve mode, no clever
@@ -358,6 +359,18 @@ export function recoverableShell(command: string): { readOnly: boolean; reason: 
   return readOnly ? { readOnly, reason: "read-only command" } : { readOnly, reason: "recoverable: git can undo it, or it only removes gitignored or temp files" };
 }
 
+// ---- The user's prod guard (permissions.ask) ----------------------------------
+// Text that always needs a human: a prod context, a deployment verb, a prod
+// path. Checked BEFORE auto review and BEFORE the bypass rewrite, so neither
+// can approve it. Case-insensitive substring, on the whole command or the path.
+function guardHit(text: string): string | null {
+  const haystack = text.toLowerCase();
+  for (const rule of CONFIG.permissions.ask ?? []) {
+    if (rule && haystack.includes(rule.toLowerCase())) return rule;
+  }
+  return null;
+}
+
 // Decide what a bash command deserves: deny, ask, or allow.
 function checkBash(command: string, auto = false): Verdict {
   const summary = command.trim(); // what the user will see in the prompt
@@ -371,6 +384,8 @@ function checkBash(command: string, auto = false): Verdict {
   for (const [re, why] of BASH_DENY) if (re.test(command) && !(readOnly && why === GIT_DIR_RULE)) return { decision: "deny", reason: why, summary };
   for (const d of user.deny)
     if (command.toLowerCase().includes(d.toLowerCase())) return { decision: "deny", reason: `denied by your settings ("${d}")`, summary };
+  const guard = guardHit(command);
+  if (guard) return { decision: "ask", requiresHuman: true, reason: `prod guard: "${guard}"`, summary };
   // node/npm/npx, git aliases and tool-wide grants can run arbitrary code.
   // Auto mode must inspect the actual command, including background commands.
   if (auto) {
@@ -449,7 +464,11 @@ export function checkPermission(toolName: string, argsJson: string, auto = false
       summary: base.summary,
     };
   }
-  if (CONFIG.bypassPermissions && base.decision === "ask" && toolName !== "exit_plan_mode" && toolName !== "ask_user") {
+  if (CONFIG.bypassPermissions && base.decision === "ask" && !base.requiresHuman && toolName !== "exit_plan_mode" && toolName !== "ask_user") {
+    // Bypass may skip an ordinary approval, never one the user's own guard list
+    // marked for a human. Every skip is recorded: a bypass run with no audit row
+    // is indistinguishable from a run that never checked.
+    emit("agent_permission_bypassed", { tool: toolName, reason: base.reason });
     return { decision: "allow", reason: "permission approvals bypassed for this run", summary: base.summary };
   }
   return base;
@@ -553,6 +572,8 @@ function basePermission(toolName: string, argsJson: string, auto: boolean): Verd
       const p = args.path ?? ""; // the file the model wants to change
       const hit = noFlyHit(p); // is it in the no-fly zone?
       if (hit) return { decision: "deny", reason: hit, summary: p }; // hard stop — deny always wins
+      const guard = guardHit(p); // the user's prod guard, applied to the path
+      if (guard) return { decision: "ask", requiresHuman: true, reason: `prod guard: "${guard}"`, summary: p };
       // The user may pre-approve write tools ("tool:edit_file") to skip the
       // prompt — note this runs AFTER the no-fly check, so it widens "ask",
       // never "deny".

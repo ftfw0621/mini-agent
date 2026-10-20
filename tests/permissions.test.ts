@@ -184,4 +184,28 @@ try {
   expectVerdict("bypass does not override plan restrictions", "run_bash", { command: "rm -f fixture.txt" }, "deny");
   expectVerdict("exiting plan still needs user interaction", "exit_plan_mode", { plan: "change files" }, "ask");
 } finally { CONFIG.bypassPermissions = false; setPlanMode(false); }
+
+// ---- prod guard (permissions.ask): text that always needs a human ---------------
+// The user's policy: only prod writes stop the run. Everything else may proceed
+// under bypass. A guard hit is an ask no reviewer and no bypass may approve.
+CONFIG.permissions.ask = ["--context prod", "--context=prod", "cipherowl-aws-prod", "deploy/prod/"];
+try {
+  const guarded = checkPermission("run_bash", JSON.stringify({ command: "kubectl --context prod apply -f k8s/x.yaml" }));
+  check("guard: a prod context asks", guarded.decision === "ask", `got ${guarded.decision} (${guarded.reason})`);
+  check("guard: a prod ask is human-only", guarded.requiresHuman === true, `requiresHuman=${guarded.requiresHuman}`);
+  check("guard: the reason names the matched rule", guarded.reason.includes("--context prod"), guarded.reason);
+  check("guard: --context=prod also matches", checkPermission("run_bash", JSON.stringify({ command: "kubectl --context=prod get pods" })).requiresHuman === true);
+  check("guard: a profile in the environment matches", checkPermission("run_bash", JSON.stringify({ command: "AWS_PROFILE=cipherowl-aws-prod aws s3 ls" })).requiresHuman === true);
+  check("guard: a dev command is not guarded", !checkPermission("run_bash", JSON.stringify({ command: "kubectl --context dev apply -f k8s/x.yaml" })).reason.startsWith("prod guard"));
+  check("guard: a prod path asks on write", checkPermission("write_file", JSON.stringify({ path: "deploy/prod/app.yaml", content: "x" })).requiresHuman === true);
+  check("guard: a non-prod path is unaffected", !checkPermission("write_file", JSON.stringify({ path: "deploy/dev/app.yaml", content: "x" })).reason?.startsWith("prod guard"));
+  CONFIG.bypassPermissions = true;
+  check("guard: bypass cannot swallow a guarded command", checkPermission("run_bash", JSON.stringify({ command: "kubectl --context prod apply -f k8s/x.yaml" })).decision === "ask");
+  check("guard: bypass cannot swallow a guarded path", checkPermission("write_file", JSON.stringify({ path: "deploy/prod/app.yaml", content: "x" })).decision === "ask");
+  check("guard: bypass still runs a dev command", checkPermission("run_bash", JSON.stringify({ command: "kubectl --context dev apply -f k8s/x.yaml" })).decision === "allow");
+  check("guard: bypass still runs a plain edit", checkPermission("edit_file", JSON.stringify({ path: "src/agent.ts", old_string: "a", new_string: "b" })).decision === "allow");
+  check("guard: bypass still runs an unrecognized command", checkPermission("run_bash", JSON.stringify({ command: "make release" })).decision === "allow");
+  check("guard: a hard deny still wins over bypass", checkPermission("run_bash", JSON.stringify({ command: "rm -rf .git" })).decision === "deny");
+} finally { CONFIG.bypassPermissions = false; CONFIG.permissions.ask = []; }
+
 finish();

@@ -71,6 +71,7 @@ interface SettingsFile {
   permissions?: {
     allow?: string[]; // bash first-words (e.g. "cargo") or "tool:<name>" to skip asking
     deny?: string[]; // substrings of bash commands (e.g. "git push") or "tool:<name>" to hard-block
+    ask?: string[]; // substrings that always need a human, even under bypass (the prod guard)
   };
   // Hooks keyed by lifecycle event (PreToolUse, PostToolUse, SessionStart, Stop,
   // UserPromptSubmit, SessionEnd, PreCompact, PostCompact, SubagentStart,
@@ -156,6 +157,7 @@ export function mcpConfigPath(name: string): string {
 export interface PermissionRules {
   allow: string[]; // widens what runs without asking — can NEVER override a deny
   deny: string[]; // hard blocks — nothing overrides these
+  ask?: string[]; // always needs a human, even under bypass — the prod guard (absent = none)
 }
 
 // Provider-agnostic configuration. Resolution order, most specific wins:
@@ -194,6 +196,7 @@ export const CONFIG = {
     // the test suite injects rules here instead of writing temp files.
     allow: [...(globalSettings.permissions?.allow ?? []), ...(projectSettings.permissions?.allow ?? [])],
     deny: [...(globalSettings.permissions?.deny ?? []), ...(projectSettings.permissions?.deny ?? [])],
+    ask: [...(globalSettings.permissions?.ask ?? []), ...(projectSettings.permissions?.ask ?? [])],
   } as PermissionRules,
   // Hooks for every event, merged across layers (global first, then project) by
   // a generic union so adding a new event needs no edit here.
