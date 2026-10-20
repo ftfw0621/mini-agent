@@ -3,11 +3,12 @@ import os from "node:os"; // the home directory root
 import path from "node:path"; // joining and resolving paths
 
 // Per-project state that is history rather than configuration — session
-// transcripts and long-term memory — lives OUTSIDE the checkout, one bucket per
-// working directory, mirroring how Claude Code keeps ~/.claude/projects/<slug>.
-// A repo you open should not grow an untracked state directory just because an
-// agent ran in it; configuration and tooling (settings, skills, tasks, cron
-// state) stay project-local where they belong to the code.
+// transcripts, long-term memory, and the local event/trace logs — lives OUTSIDE
+// the checkout, one bucket per working directory, mirroring how Claude Code
+// keeps ~/.claude/projects/<slug>. A repo you open should not grow an untracked
+// state directory just because an agent ran in it; configuration and tooling
+// (settings, skills, task board, team mailboxes, cron state) stay project-local
+// where they belong to the code.
 //
 // The bucket is keyed by the absolute cwd with separators flattened, so
 // /Users/me/proj becomes -Users-me-proj, the same escaping Claude Code uses.
@@ -40,6 +41,12 @@ export function projectMemoryPath(cwd: string = process.cwd()): string {
   return path.join(projectStateDir(cwd), "MEMORY.md");
 }
 
+// Any other per-project log or file that should live beside sessions and memory
+// rather than inside the checkout (telemetry, review-debug traces).
+export function projectStateFile(name: string, cwd: string = process.cwd()): string {
+  return path.join(projectStateDir(cwd), name);
+}
+
 // Move a path only when the destination is absent, so a second run is a no-op
 // and a newly written home file is never clobbered by an old checkout copy.
 // rename works on one filesystem; cp+rm covers the home-on-another-volume case.
@@ -66,6 +73,10 @@ export function migrateLegacyState(cwd: string = process.cwd()): void {
   try {
     moveIfAbsent(path.resolve(cwd, ".mini-agent", "sessions"), projectSessionsDir(cwd));
     moveIfAbsent(path.resolve(cwd, ".mini-agent", "MEMORY.md"), projectMemoryPath(cwd));
+    // Logs are per-project too, and telemetry is usually the biggest file left
+    // behind by an older checkout.
+    moveIfAbsent(path.resolve(cwd, ".mini-agent", "telemetry.jsonl"), projectStateFile("telemetry.jsonl", cwd));
+    moveIfAbsent(path.resolve(cwd, ".mini-agent", "review-debug.jsonl"), projectStateFile("review-debug.jsonl", cwd));
   } catch {
     /* leave the legacy files where they are */
   }

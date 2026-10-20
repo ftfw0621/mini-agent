@@ -26,7 +26,7 @@ events this session:
       2  agent_api_call
       1  agent_tool_call:run_bash
       1  agent_session_start
-full log: .mini-agent/telemetry.jsonl (local only — nothing leaves this machine)
+full log: ~/.config/mini-agent/projects/<cwd-slug>/telemetry.jsonl (local only — nothing leaves this machine)
 ```
 
 ## 跟着写:会话持久化
@@ -72,7 +72,7 @@ if (prev) {
 
 ### 第 4 步:埋点,但只埋在本机
 
-「没有数据的优化都是猜测」——哪类错误真的常发、压缩多久触发一次、哪个工具老被拒。但这是个**单机 CLI**,所以事件只写 `.mini-agent/telemetry.jsonl`,**绝不出本机**,`MINI_AGENT_NO_TELEMETRY=1` 完全关闭。
+「没有数据的优化都是猜测」——哪类错误真的常发、压缩多久触发一次、哪个工具老被拒。但这是个**单机 CLI**,所以事件只写当前项目桶里的 `telemetry.jsonl`(`~/.config/mini-agent/projects/<cwd-slug>/`),**绝不出本机**,`MINI_AGENT_NO_TELEMETRY=1` 完全关闭。
 
 ```ts
 export function emit(event, fields = {}) {
@@ -90,8 +90,8 @@ export function emit(event, fields = {}) {
 所有事件名走 `agent_<域>_<动作>`:`agent_api_call`、`agent_api_error`、`agent_tool_denied`、`agent_compaction_ok`……统一前缀才能工程化分析:
 
 ```bash
-grep agent_api_error .mini-agent/telemetry.jsonl | wc -l     # 这个会话错了几次
-grep agent_tool_denied .mini-agent/telemetry.jsonl           # 哪些工具老被拦
+grep agent_api_error ~/.config/mini-agent/projects/<cwd-slug>/telemetry.jsonl | wc -l     # 这个会话错了几次
+grep agent_tool_denied ~/.config/mini-agent/projects/<cwd-slug>/telemetry.jsonl           # 哪些工具老被拦
 ```
 
 埋点埋在哪也有讲究:`agent_api_error` 带上 `kind`(复用 Ch4 的错误分类)和第几次重试——「rate_limited 从 0 跳到 5%」五分钟定位,靠的就是这个 `kind` 字段。`/stats` 只是把本会话的计数器排个序给你看,真正的分析在那个 jsonl 文件里。

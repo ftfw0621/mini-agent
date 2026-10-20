@@ -2,10 +2,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { check, finish } from "./helpers.js";
+import { projectStateFile } from "../src/state.js";
 
-// Telemetry resolves its file from the cwd at import time, so move into a temp
+// Telemetry resolves its file from the cwd at call time, so move into a temp
 // directory BEFORE importing anything that pulls it in — this test must never
-// append fixture events to the project's real .mini-agent/telemetry.jsonl.
+// append fixture events to the real project bucket.
 const cwd = process.cwd();
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "auto-report-"));
 process.chdir(dir);
@@ -17,7 +18,7 @@ try {
   const { RULE_QUESTIONS } = await import("../src/auto-review.js");
   const { summarize, render } = await import("../eval/auto-report.js");
   initTelemetry("fixture-session");
-  const events = () => fs.readFileSync(".mini-agent/telemetry.jsonl", "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  const events = () => fs.readFileSync(projectStateFile("telemetry.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
 
   // Scores policy: Jev says unauthorized and risky → ask, with no second stage.
   const client = { chat: { completions: { create: async () => ({ choices: [{ message: { content: '{"authorized":false,"risky":true}' } }] }) } } };

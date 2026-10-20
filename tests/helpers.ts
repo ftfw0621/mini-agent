@@ -5,8 +5,8 @@
 // Every suite imports this module, so tracing is switched off here for ALL of
 // them, however they are launched: config.ts copies MINI_AGENT_REVIEW_DEBUG=1
 // from .env, and a suite run directly (`npx tsx tests/x.test.ts`) would append
-// mocked reviews to the real .mini-agent/review-debug.jsonl. The flag is read
-// per call, so suites that test tracing set "1" themselves inside a temp dir.
+// mocked reviews to the real project bucket. The flag is read per call, so
+// suites that test tracing set "1" themselves inside a temp dir.
 process.env.MINI_AGENT_REVIEW_DEBUG = "0";
 // Peer sessions register in a machine-wide directory; a suite (or a CLI it
 // spawns, which inherits this) must never show up in your real /peers list.

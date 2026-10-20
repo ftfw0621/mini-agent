@@ -13,6 +13,7 @@ import { reviewHistory, ruleHistory } from "../src/auto-context.js";
 import { runLoop, TerminateReason, type LoopOptions } from "../src/loop.js";
 import { registerExternalTool } from "../src/tools.js";
 import { check, finish } from "./helpers.js";
+import { projectStateFile } from "../src/state.js";
 
 const allow = { matches: [], uncertainty: null };
 const match = (ruleId: ReviewRuleId) => ({ matches: [{ ruleId, evidence: "Concrete fixture effect" }], uncertainty: null });
@@ -77,7 +78,7 @@ try {
   check("late approval after cancellation never allows", (await mode.classify("run_bash", "{}", mode.snapshot(), cancel.signal)).decision === "ask");
   cancel = undefined;
   check("Jev-only rules configuration cannot fall back to old scores", (await new AutoMode(undefined, { apiKey: "fixture", policy: "rules" }).classify("run_bash", "{}", ["Work"], signal)).decision === "ask");
-  const log = fs.readFileSync(".mini-agent/review-debug.jsonl", "utf8").trim().split("\n").map((s) => JSON.parse(s));
+  const log = fs.readFileSync(projectStateFile("review-debug.jsonl"), "utf8").trim().split("\n").map((s) => JSON.parse(s));
   const verdict = log.find((e) => e.event === "verdict" && e.verdict.decision === "allow");
   check("policy, actual request, assessment and final decision share one review ID", log.some((e) => e.id === verdict.id && e.backend === "model" && e.event === "request" && JSON.parse(e.request.messages[1].content).policyVersion === "effects-v1") && log.some((e) => e.id === verdict.id && e.event === "assessment"));
 

@@ -355,7 +355,9 @@ Alternatively, `/auto debug on` enables capture in the current session;
 These commands do not toggle auto mode or alter approval thresholds.
 To enable on subsequent starts in this project, put `MINI_AGENT_REVIEW_DEBUG=1`
 in its local `.env` (ignored by Git).
-The startup notice shows the absolute path to `.mini-agent/review-debug.jsonl`.
+The startup notice shows the absolute path to `review-debug.jsonl` in the
+project's home bucket (`~/.config/mini-agent/projects/<cwd-slug>/`), beside
+sessions and memory rather than inside the checkout.
 This opt-in local log is separate from telemetry; it contains user requests,
 project instructions, proposed arguments, retained history and the exact policy
 questions. The model fallback logs its actual messages through the same facility.
@@ -369,9 +371,9 @@ Past requests cannot be reconstructed from score-only telemetry.
 
 ```sh
 # In a second terminal; jq is optional (tail alone shows the JSONL).
-tail -f .mini-agent/review-debug.jsonl | jq .
+tail -f ~/.config/mini-agent/projects/<cwd-slug>/review-debug.jsonl | jq .
 # Print the most recent Jev request, including state and questions.
-jq -s '[.[] | select(.backend == "jev" and .event == "request")][-1].request' .mini-agent/review-debug.jsonl
+jq -s '[.[] | select(.backend == "jev" and .event == "request")][-1].request' ~/.config/mini-agent/projects/<cwd-slug>/review-debug.jsonl
 ```
 
 Headers are never logged. Known credential values from the environment and

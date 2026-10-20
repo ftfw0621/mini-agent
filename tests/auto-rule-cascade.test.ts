@@ -7,6 +7,7 @@ import { registerExternalTool } from "../src/tools.js";
 import { AutoMode } from "../src/auto.js";
 import { screenRules, RULE_QUESTIONS, JEV_CLEAR_RULE_MAX, type RuleProbabilities, type ReviewState } from "../src/auto-review.js";
 import { check, finish } from "./helpers.js";
+import { projectStateFile } from "../src/state.js";
 const history = { actions: [], omittedActions: 0 };
 const scores = (overrides: Record<string, number> = {}): RuleProbabilities => ({ kind: "probabilities", probabilities: { ...Object.fromEntries(Object.keys(RULE_QUESTIONS).map((key) => [key, 0.01])), ...overrides } as RuleProbabilities["probabilities"] });
 const response = (assessment = scores()) => new Response(JSON.stringify({ answers: Object.fromEntries(Object.entries(assessment.probabilities).map(([id, noul]) => [id, { type: "noul", noul }])) }));
@@ -98,7 +99,7 @@ try {
   process.env.MINI_AGENT_REVIEW_DEBUG = "1";
   assessment = scores({ forbidden_scope: 0.4 });
   await classify();
-  const events = fs.readFileSync(".mini-agent/review-debug.jsonl", "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  const events = fs.readFileSync(projectStateFile("review-debug.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
   check("both requests, routing and final result correlate in one trace", new Set(events.map((e) => e.id)).size === 1 && events.some((e) => e.backend === "jev" && e.event === "request") && events.some((e) => e.backend === "model" && e.event === "request") && events.some((e) => e.event === "routing" && e.route === "review") && events.some((e) => e.event === "verdict" && e.backend === "model" && e.verdict.decision === "allow"));
 } finally {
   process.chdir(cwd);

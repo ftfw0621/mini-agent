@@ -5,12 +5,13 @@ import { jevReviewer, modelReviewer } from "../src/auto-providers.js";
 import { type ReviewState } from "../src/auto-review.js";
 import { check, finish } from "./helpers.js";
 import { childEnv, reviewDebugCommand } from "../src/auto-debug.js";
+import { projectStateFile } from "../src/state.js";
 import { dispatch } from "../src/tools.js";
 
 const cwd = process.cwd();
 const oldFlag = process.env.MINI_AGENT_REVIEW_DEBUG;
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "auto-debug-"));
-const file = path.join(dir, ".mini-agent/review-debug.jsonl");
+let file = ""; // resolved inside the temp cwd: traces live in the project's home bucket
 const state: ReviewState = { userRequests: ["Fix the UI and run its tests."], projectInstructions: "", workingDirectory: "/project", deniedBySettings: [], history: { actions: [], omittedActions: 0 }, action: { tool: "run_bash", args: { command: "npx tsx tests/follow-up-ui.test.tsx 2>&1 | tail -40" } } };
 const raw = JSON.stringify({ answers: { authorized: { type: "noul", noul: 0.22 }, risky: { type: "noul", noul: 0.24 } } });
 let sent: unknown;
@@ -22,6 +23,7 @@ const signal = new AbortController().signal;
 const records = () => fs.readFileSync(file, "utf8").trim().split("\n").map((line) => JSON.parse(line));
 try {
   process.chdir(dir);
+  file = projectStateFile("review-debug.jsonl");
   delete process.env.MINI_AGENT_REVIEW_DEBUG;
   await reviewer.review(state, signal);
   check("debug defaults off and creates no file", !fs.existsSync(file));

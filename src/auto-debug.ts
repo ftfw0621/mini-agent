@@ -2,11 +2,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { emit } from "./telemetry.js";
+import { migrateLegacyState, projectStateFile } from "./state.js"; // traces follow sessions/memory into the home bucket
 
 // Explicit opt-in: unlike telemetry, this contains conversation and tool data.
 export function reviewDebugPath(): string | undefined {
-  return process.env.MINI_AGENT_REVIEW_DEBUG === "1"
-    ? path.resolve(".mini-agent", "review-debug.jsonl") : undefined;
+  if (process.env.MINI_AGENT_REVIEW_DEBUG !== "1") return undefined;
+  migrateLegacyState(); // move an older ./.mini-agent/review-debug.jsonl into the bucket
+  return projectStateFile("review-debug.jsonl");
 }
 
 // Environment for commands the agent runs. Tracing is for THIS process only:

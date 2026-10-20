@@ -1,7 +1,7 @@
 import fs from "node:fs"; // build a fake checkout with legacy state
 import os from "node:os"; // temp root
 import path from "node:path"; // path joining
-import { migrateLegacyState, projectMemoryPath, projectSessionsDir, projectSlug, projectStateDir } from "../src/state.js"; // unit under test
+import { migrateLegacyState, projectMemoryPath, projectSessionsDir, projectSlug, projectStateDir, projectStateFile } from "../src/state.js"; // unit under test
 import { check, finish } from "./helpers.js"; // assertions
 
 // The bucket root is redirected into a temp dir so the real ~/.config stays clean.
@@ -26,17 +26,26 @@ check("a symlinked path resolves to the same bucket", projectStateDir(link) === 
 // ---- legacy migration -------------------------------------------------------------------
 const legacySessions = path.join(proj, ".mini-agent", "sessions");
 const legacyMemory = path.join(proj, ".mini-agent", "MEMORY.md");
+const legacyTelemetry = path.join(proj, ".mini-agent", "telemetry.jsonl");
+const legacyTrace = path.join(proj, ".mini-agent", "review-debug.jsonl");
 fs.mkdirSync(legacySessions, { recursive: true });
 fs.writeFileSync(path.join(legacySessions, "s1.json"), "{}");
 fs.writeFileSync(legacyMemory, "- [project] old fact\n");
+fs.writeFileSync(legacyTelemetry, '{"event":"agent_api_call"}\n');
+fs.writeFileSync(legacyTrace, '{"event":"request"}\n');
 
 migrateLegacyState(proj);
 
 check("legacy session landed in the home bucket", fs.existsSync(path.join(projectSessionsDir(proj), "s1.json")));
 check("legacy memory landed in the home bucket", fs.existsSync(projectMemoryPath(proj)));
+check("legacy telemetry landed in the home bucket", fs.existsSync(projectStateFile("telemetry.jsonl", proj)));
+check("legacy review trace landed in the home bucket", fs.existsSync(projectStateFile("review-debug.jsonl", proj)));
 check("legacy sessions directory is gone", !fs.existsSync(legacySessions));
 check("legacy memory file is gone", !fs.existsSync(legacyMemory));
+check("legacy telemetry file is gone", !fs.existsSync(legacyTelemetry));
+check("legacy review trace is gone", !fs.existsSync(legacyTrace));
 check("memory content survived the move", fs.readFileSync(projectMemoryPath(proj), "utf8").includes("old fact"));
+check("telemetry content survived the move", fs.readFileSync(projectStateFile("telemetry.jsonl", proj), "utf8").includes("agent_api_call"));
 
 // ---- idempotence ------------------------------------------------------------------------
 fs.writeFileSync(projectMemoryPath(proj), "- [project] new fact\n");
