@@ -68,7 +68,7 @@ const app = render(<App session={session} clipboard={{ read: async () => clipboa
   }
   if (_input === "Approval task" || _input === "Form task") {
     if (_input === "Approval task") approved = await h.confirm("Do the pending action?", "example");
-    else answers = await h.askUser!([{ question: "Which option?", options: ["First", "Second"] }]);
+    else answers = await h.askUser!([{ question: "Which option?", options: [{ label: "First" }, { label: "Second" }] }]);
     for (const message of h.followUps!.drain()) { submitted.push(message.text); submittedContent.push(message.content); h.onFollowUp?.(message.displayText ?? message.text); }
     return { reason: TerminateReason.Done };
   }

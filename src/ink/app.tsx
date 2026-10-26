@@ -5,7 +5,7 @@ import { Box, Text, Static, useInput, useApp } from "ink";
 import chalk from "chalk";
 import { COMPACTING_VERB, formatElapsed, renderMenu, MENU_HINT, formatModelChoices } from "../ui.js"; // status format + the SAME pure menu renderer the readline REPL uses
 import { renderMarkdown } from "../markdown.js"; // model speaks markdown → ANSI, same as the non-Ink REPL
-import { initFormState, reduceForm, renderForm, collectAnswers, type FormQuestion, type FormState, type FormAnswer } from "../form.js"; // the ask_user form: pure state machine + renderer
+import { initFormState, reduceForm, renderForm, collectAnswers, onTypedRow, type FormQuestion, type FormState, type FormAnswer, type FormAction } from "../form.js"; // the ask_user form: pure state machine + renderer
 import { CONFIG, saveGlobalSetting } from "../config.js"; // session allowlist + /model save
 import { effortMenu, setEffort } from "../effort.js";
 import { useSlashCompletion } from "./completion.js";
@@ -62,7 +62,7 @@ export interface StatusData {
 // multi-question form (form.ts's pure state machine).
 type Pending =
   | { kind: "select"; header: string; body?: string; options: string[]; onChoose: (index: number) => void }
-  | { kind: "form"; questions: FormQuestion[]; resolve: (answers: FormAnswer[] | null) => void }
+  | { kind: "form"; questions: FormQuestion[]; resolve: (answers: FormAnswer[] | "chat" | null) => void }
   | { kind: "skills" }; // the /skills manager — it handles its own keys
 
 // Injected when plan mode turns on, so the model knows the rules it now lives in.
@@ -365,7 +365,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
           });
         }),
       askUser: (questions) =>
-        new Promise<FormAnswer[] | null>((resolve) => {
+        new Promise<FormAnswer[] | "chat" | null>((resolve) => {
           if (!questions.length) return resolve(null);
           setDetails(null);
           setFormState(initFormState(questions));
@@ -998,24 +998,36 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
     }
 
     // The ask_user form is up: reuse form.ts's pure state machine verbatim.
+    // ↑/↓ rows, ←/→ or Tab questions, Enter chooses, Esc cancels. On a "Type
+    // something" row the input box IS the answer's editor: it travels with each
+    // action, is loaded when the cursor arrives and cleared when it leaves.
+    // Anywhere else, text in the input box is a follow-up, as before.
     if (pending?.kind === "form" && formState) {
-      if (key.upArrow) { setFormState(reduceForm(pending.questions, formState, "up").state); return; }
-      else if (key.downArrow || key.tab) { setFormState(reduceForm(pending.questions, formState, "down").state); return; }
-      else if ((key.return || modifiedReturn) && !input.trim()) {
-        const next = reduceForm(pending.questions, formState, "select");
-        setFormState(next.state);
-        if (next.done) {
-          pending.resolve(collectAnswers(pending.questions, next.state));
+      const questions = pending.questions;
+      const typing = onTypedRow(questions, formState);
+      const act = (action: FormAction) => {
+        const next = reduceForm(questions, formState, action, typing ? input : undefined);
+        const close = (result: FormAnswer[] | "chat" | null) => {
+          pending.resolve(result);
           setPending(null);
           setFormState(null);
-        }
-        return;
-      } else if (key.escape) {
-        pending.resolve(null);
-        setPending(null);
-        setFormState(null);
-        return;
-      }
+          if (typing) { setInput(""); setCursor(0); }
+        };
+        if (next.outcome === "submit") return close(collectAnswers(questions, next.state));
+        if (next.outcome === "chat") return close("chat");
+        if (next.outcome === "cancel") return close(null);
+        setFormState(next.state);
+        const moved = next.state.tab !== formState.tab || next.state.cursor !== formState.cursor;
+        const stored = next.state.typed[next.state.tab] ?? "";
+        if (onTypedRow(questions, next.state) && moved && stored) { setInput(stored); setCursor(stored.length); }
+        else if (typing && !onTypedRow(questions, next.state)) { setInput(""); setCursor(0); }
+      };
+      if (key.upArrow) return act("up");
+      if (key.downArrow) return act("down");
+      if (key.tab) return act(key.shift ? "left" : "right");
+      if ((key.leftArrow || key.rightArrow) && !input) return act(key.leftArrow ? "left" : "right");
+      if ((key.return || modifiedReturn) && (typing || !input.trim())) return act("enter");
+      if (key.escape) return act("escape");
     }
 
     if ((key.tab || (key.rightArrow && !input)) && placeholder) { // Tab (or →) turns the predicted next message into real text; Enter then sends it
@@ -1230,10 +1242,11 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
       {/* the ask_user multi-question form */}
       {pending?.kind === "form" && formState && (
         <Box marginTop={1}>
-          <Text>{renderForm(pending.questions, formState)}</Text>
+          <Text>{renderForm(pending.questions, formState, onTypedRow(pending.questions, formState) ? input : undefined)}</Text>
         </Box>
       )}
-      {pending && pending.kind !== "skills" && <Text dimColor wrap="truncate-end">Type a follow-up · Enter sends text; empty input selects · Esc cancels</Text>}
+      {pending && pending.kind !== "skills" && pending.kind !== "form" && <Text dimColor wrap="truncate-end">Type a follow-up · Enter sends text; empty input selects · Esc cancels</Text>}
+      {pending?.kind === "form" && formState && !onTypedRow(pending.questions, formState) && <Text dimColor wrap="truncate-end">Or type a follow-up below · Enter sends it instead of answering</Text>}
 
       {/* the pinned input box — stays at the bottom, conversation scrolls above it.
           The caret is drawn AT its position: the char under it is inverted (a block

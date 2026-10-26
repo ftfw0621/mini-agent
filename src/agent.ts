@@ -32,6 +32,7 @@ import { SCREEN_KINDS, listPeers, peerInboxPending, peerMessageContent, peersCom
 import { STDOUT_OUTPUT } from "./output.js"; // /compact draws its progress bar with the same ora spinner the loop uses
 import { gitBranch, toggleLastCollapsed, revealReasoning, clearReasoning, revealToolCalls, clearToolCalls, cleanup as tuiCleanup } from "./tui.js"; // git branch + collapsible output + collapsed reasoning (Ctrl+R) + folded tool-call trace (Ctrl+T)
 import { promptSelect, promptForm } from "./menu.js"; // arrow-key approval menu + multi-question form
+import type { FormQuestion } from "./form.js"; // the ask_user form's questions
 import { editLine } from "./editor.js"; // our own line editor (keeps the status footer pinned even when input wraps)
 import { normalizeDroppedPaths } from "./drop.js"; // drag-and-drop: a dropped file's path → a clean absolute path in the input
 import { rememberTool, readMemory, readMemoryTyped, extractMemories, memoryPath } from "./memory.js"; // long-term project memory + auto-extract
@@ -458,7 +459,7 @@ async function main() {
   // The model's handle on the user: present a multi-question form and return the
   // selections. Null in a non-interactive session — the model is told to ask in
   // plain text instead.
-  const askUser = async (questions: { question: string; options: string[] }[]) => {
+  const askUser = async (questions: FormQuestion[]) => {
     if (!process.stdin.isTTY) return null;
     editing = true;
     try { return await promptForm(rl, questions, process.stdin, enqueuePromptFollowUp); }

@@ -1,4 +1,5 @@
 import { AutoReviewBudget } from "./auto-budget.js";
+import type { FormAnswer, FormOption, FormQuestion } from "./form.js"; // the ask_user form's questions and answers
 import OpenAI from "openai"; // types + client for the chat completions API
 import chalk from "chalk"; // terminal colors for status lines
 import { effortMessages, effortParameters, retainsReasoning } from "./effort.js";
@@ -79,7 +80,7 @@ export interface LoopOptions {
   followUps?: FollowUpQueue;
   onFollowUp?: (text: string) => void; // delivered, not merely queued
   canPrompt?: boolean; // false for print mode and unattended teammates
-  askUser?: (questions: { question: string; options: string[] }[]) => Promise<{ question: string; answer: string }[] | null>; // present a multi-question form (Day 30); null if cancelled/non-interactive
+  askUser?: (questions: FormQuestion[]) => Promise<FormAnswer[] | "chat" | null>; // present a multi-question form (Day 30); "chat" if the user would rather talk, null if cancelled/non-interactive
   progress?: AgentProgress; // per-worker activity, tokens and bounded transcript
   output?: LoopOutput; // where screen output goes — stdout by default (readline REPL); the Ink REPL passes its own sink
   transcript?: readonly OpenAI.ChatCompletionMessageParam[]; // the top-level conversation, set by runLoop — the goal verifier reads its recent tool results
@@ -149,21 +150,35 @@ const askUserTool: OpenAI.ChatCompletionTool = {
   function: {
     name: "ask_user",
     description: `Ask the user one or more multiple-choice questions and get back their selections. Use this WHENEVER you need the user to make a decision between options (which approach, which file, yes/no/which) — it is easier for them to pick than to type, and the answers come back unambiguous.
-Provide each question with 2–4 concrete options. Do NOT use it for open-ended input that has no clear options; ask in prose for that.
+Ask 1–4 questions, each with 2–4 concrete options; each option a short label plus a one-line description of what choosing it means. Put a recommended option first and end its label with "(Recommended)". Set multiSelect when several options can apply together.
+The user can always type their own answer or choose to chat instead, so never add an "Other" option. Do NOT use it for open-ended input that has no clear options; ask in prose for that.
 If the user cancels, you'll be told — then proceed with your best judgment or ask again.`,
     parameters: {
       type: "object",
       properties: {
         questions: {
           type: "array",
-          description: "The questions to ask, each with a list of options",
+          description: "The questions to ask (1–4)",
           items: {
             type: "object",
             properties: {
-              question: { type: "string", description: "The question text" },
-              options: { type: "array", items: { type: "string" }, description: "2–4 concrete choices" },
+              question: { type: "string", description: "The full question, ending with a question mark" },
+              header: { type: "string", description: "A very short tab label, at most 12 characters, e.g. \"Branch\", \"Auth\"" },
+              options: {
+                type: "array",
+                description: "2–4 concrete choices",
+                items: {
+                  type: "object",
+                  properties: {
+                    label: { type: "string", description: "The choice, 1–5 words" },
+                    description: { type: "string", description: "What choosing it means, one line" },
+                  },
+                  required: ["label", "description"],
+                },
+              },
+              multiSelect: { type: "boolean", description: "true when the user may pick several options" },
             },
-            required: ["question", "options"],
+            required: ["question", "header", "options"],
           },
         },
       },
@@ -1144,17 +1159,31 @@ function teammateConfirm(name: string, output: LoopOutput): (question: string, t
 async function runAskUser(call: AssembledCall, opts: LoopOptions): Promise<string> {
   if (opts.subAgent) return "[error] Sub-agents cannot ask the user. Decide yourself, or report back to the parent."; // only the top-level agent talks to the human
   if (!opts.askUser) return "[error] No interactive prompt is available in this session — ask in plain text instead.";
-  let questions: { question: string; options: string[] }[] = [];
+  let raw: unknown = [];
   try {
-    questions = (JSON.parse(call.args) as { questions?: typeof questions }).questions ?? [];
+    raw = (JSON.parse(call.args) as { questions?: unknown }).questions ?? [];
   } catch {
     /* fall through */
   }
-  // Keep only well-formed questions (text + at least two options).
-  questions = (questions ?? []).filter((q) => q && typeof q.question === "string" && Array.isArray(q.options) && q.options.length >= 2);
+  // Keep only well-formed questions (text + at least two options). An option may
+  // still arrive as a bare string (the original schema): it becomes a label.
+  const text = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
+  const option = (o: unknown): FormOption | null => {
+    const label = typeof o === "string" ? o.trim() : text((o as { label?: unknown } | null)?.label);
+    const description = typeof o === "object" && o ? text((o as { description?: unknown }).description) : "";
+    return label ? { label, ...(description ? { description } : {}) } : null;
+  };
+  const questions: FormQuestion[] = (Array.isArray(raw) ? raw : []).flatMap((q) => {
+    const question = text(q?.question);
+    const options = (Array.isArray(q?.options) ? q.options : []).map(option).filter((o: FormOption | null): o is FormOption => o !== null);
+    if (!question || options.length < 2) return [];
+    const header = text(q.header).slice(0, 16);
+    return [{ question, options, ...(header ? { header } : {}), ...(q.multiSelect === true || q.multiSelect === "true" ? { multiSelect: true } : {}) }];
+  });
   if (!questions.length) return "[error] ask_user needs at least one question with two or more options.";
 
   const answers = await opts.askUser(questions);
+  if (answers === "chat") return "The user chose to talk this through instead of picking an option. Do not act on any of these questions yet: end your turn now and wait for their message.";
   if (!answers) return "The user dismissed the question form without answering. Proceed with your best judgment, or ask again if you truly need their input."; // cancelled / non-interactive
   return `The user answered:\n${answers.map((a) => `- ${a.question} → ${a.answer}`).join("\n")}`; // organized, unambiguous
 }
@@ -1364,8 +1393,8 @@ export async function runLoop(
   const askUser = opts.askUser;
   if (askUser && !opts.subAgent) opts.askUser = async (questions) => {
     const answers = await askUser(questions);
-    if (!opts.signal.aborted && !opts.isInterrupted()) {
-      for (const answer of answers ?? []) {
+    if (Array.isArray(answers) && !opts.signal.aborted && !opts.isInterrupted()) {
+      for (const answer of answers) {
         const question = questions.find((q) => q.question === answer.question);
         if (question && typeof answer.answer === "string" && answer.answer.trim()) {
           recordHumanInput(`Human form reply (question is context; only the submitted answer expresses the user's choice): ${JSON.stringify({ question: question.question, answer: answer.answer })}`);
