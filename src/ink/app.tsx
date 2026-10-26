@@ -12,7 +12,7 @@ import { useSlashCompletion } from "./completion.js";
 import { generatePromptSuggestion } from "../suggestion.js"; // the predicted next message (Claude Code's prompt suggestion)
 import { lastRequestTools } from "../loop.js"; // resend the main call's tools so the guess hits the prompt cache
 import { commandNames, commandTokenRanges, inlineCommandGhost } from "../completion.js"; // which /command tokens to paint + the mid-text ghost suggestion
-import { TerminateReason, type LoopResult, listAgentViews } from "../loop.js"; // how a turn can end
+import { TerminateReason, type LoopResult, listAgentViews, finishedWorkPending, takeFinishedWork } from "../loop.js"; // how a turn can end + background work that finished while idle
 import { compactHistory, compactThreshold, contextWindowFor } from "../context.js"; // /compact + /model info
 import { forgetFilesExcept } from "../tools.js"; // /clear resets the file read-state
 import { clearUndo } from "../undo.js";
@@ -444,6 +444,25 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
       // A cron NOTE (not a user bar); the agent runs it and reports. When the run
       // is over, ring the bell and blink the tab: you were probably not watching.
       runConversationTurn(content, { kind: "note", text: chalk.cyan(label) }, [], false, () => flashTerminalTitle(6000, `⏰ ${fired.map((j) => j.id).join(", ")} done`));
+    }, 2000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [busy, pending]);
+
+  // The FINISHED-WORK idle processor: a background job (run_bash_background) or
+  // a sub-agent (task) can finish after the turn that started it ended. Its
+  // result must still reach the model, so while idle we start a turn with it and
+  // the agent carries on, without waiting for your next message. Bell and tab
+  // blink when that turn is done: long work usually finishes while you're away.
+  useEffect(() => {
+    if (busy || pending || followUps.size) return; // human follow-ups take priority
+    const id = setInterval(() => {
+      if (turn.current || !finishedWorkPending()) return;
+      const content = takeFinishedWork();
+      if (!content) return;
+      const ids = [...content.matchAll(/<(?:task_id|id)>([^<]+)<\//g)].map((m) => m[1]).join(", ");
+      runConversationTurn(content, { kind: "note", text: chalk.cyan(`⚙ ${ids || "background work"} finished — the agent picks it up`) }, [], false,
+        () => flashTerminalTitle(6000, `⚙ ${ids || "background work"} done`));
     }, 2000);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -1,4 +1,5 @@
-import { startBackground, pendingNotifications, readBackground, listBackground, hasRunningBackground, killAllBackground } from "../src/background.js"; // unit under test
+import { startBackground, pendingNotifications, hasPendingNotifications, readBackground, listBackground, hasRunningBackground, killAllBackground } from "../src/background.js"; // unit under test
+import { finishedWorkPending, takeFinishedWork } from "../src/loop.js"; // the idle wake-up's view of finished work
 import { check, checkContains, finish } from "./helpers.js"; // assertions
 
 // Background tasks are inherently timing-dependent (a real child process runs),
@@ -26,7 +27,9 @@ async function main() {
   const status = await waitUntilDone(id);
   check("a quick command reaches completed", status === "completed", status);
 
+  check("a finished, undelivered task is pending", hasPendingNotifications());
   const note = pendingNotifications();
+  check("delivering it clears the pending flag", !hasPendingNotifications());
   checkContains("notification uses the <task_notification> tag", note, "<task_notification>");
   checkContains("notification names the task id", note, `<task_id>${id}</task_id>`);
   checkContains("notification reports completed status", note, "<status>completed</status>");
@@ -62,6 +65,15 @@ async function main() {
   const killNote = pendingNotifications();
   checkContains("killed task reports a killed status", killNote, "<status>killed</status>");
   checkContains("killed notification names the long runner", killNote, "sleep 30");
+
+  // ---- the idle wake-up: work that finishes after the turn still reaches the model ----
+  const lateId = startBackground("echo finished-while-idle");
+  check("nothing to wake for while it runs", !finishedWorkPending());
+  await waitUntilDone(lateId);
+  check("finished work wakes an idle agent", finishedWorkPending());
+  const late = takeFinishedWork();
+  check("the wake-up turn carries the result", late.includes(`<task_id>${lateId}</task_id>`) && late.includes("finished-while-idle"));
+  check("each result is delivered once", !finishedWorkPending() && takeFinishedWork() === "");
 
   finish();
 }

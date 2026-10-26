@@ -1,7 +1,7 @@
 import fs from "node:fs"; // fixture files
 import os from "node:os"; // temp directory
 import path from "node:path"; // path joining
-import { dispatch } from "../src/tools.js"; // the unit under test
+import { dispatch, bashTimeoutMs } from "../src/tools.js"; // the unit under test
 import { checkContains, check, finish } from "./helpers.js"; // assertions
 
 // A scratch file in a fresh temp dir — every run starts clean.
@@ -56,5 +56,11 @@ const inFlight = dispatch("run_bash", JSON.stringify({ command: "sleep 0.4" }));
 setTimeout(() => (tickedDuringRun = true), 100); // would never fire under a blocking execSync
 await inFlight;
 check("event loop stays responsive during a command", tickedDuringRun, "a timer did not fire while run_bash ran — the loop was blocked");
+
+// ---- run_bash timeout: 2 minutes by default, up to 10 on request ----------------------
+check("the timeout defaults to 2 minutes", [undefined, "", "soon", -5, 0].every((v) => bashTimeoutMs(v) === 120_000));
+check("a requested timeout is honoured, capped at 10 minutes", bashTimeoutMs(300) === 300_000 && bashTimeoutMs("45") === 45_000 && bashTimeoutMs(3600) === 600_000);
+const slow = await dispatch("run_bash", JSON.stringify({ command: "sleep 3", timeout: 1 }));
+check("a short timeout kills the command and says how to get more", slow.includes("timed out after 1s") && slow.includes("larger timeout"), slow);
 
 finish();

@@ -27,14 +27,15 @@ const READ_LIMIT = 16000; // read_file gets a larger cap of its own
 const SEARCH_MAX_MATCHES = 50; // max matches returned by search
 const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build"]); // directories search never enters
 
-const BASH_TIMEOUT_MS = 30_000; // a single command may run this long before we kill it
+const BASH_TIMEOUT_MS = 120_000; // a single command may run this long before we kill it (Claude Code's 2 minutes)
+const BASH_MAX_TIMEOUT_MS = 600_000; // the most a command may ask for; anything longer belongs in the background
 const BASH_OUTPUT_LIMIT = 8_000; // chars of command output kept inline; beyond this we spill to a file
 const SPILL_NOTE_SLACK = 400; // room for the "[...saved to FILE]" note so dispatch's cap never eats it
 
 // A tool = a manual for the model to read (definition) + code that does the work
 // (run). Since Day 13, run may be async (run_bash spawns a process) and may
 // receive an AbortSignal so a long command dies with Ctrl+C instead of running
-// to its 30s timeout. We use the function-tool variant specifically (not the
+// to its timeout. We use the function-tool variant specifically (not the
 // custom-tool one) so .function.name is always available.
 export interface Tool {
   definition: OpenAI.ChatCompletionFunctionTool; // the machine-readable manual
@@ -224,22 +225,33 @@ function spillIfHuge(out: string, what: string): string {
   return `${head}\n\n[...${what} truncated: ${out.length} chars total. Full output saved to ${file} — use read_file to inspect more.]`;
 }
 
+// The watchdog for one run_bash call: the model may ask for more (or less) than
+// the default, never past the maximum. Anything that isn't a positive number of
+// seconds — missing, "", garbage — gets the default.
+export function bashTimeoutMs(seconds: unknown): number {
+  const s = Number(seconds);
+  return Number.isFinite(s) && s > 0 ? Math.min(Math.round(s * 1000), BASH_MAX_TIMEOUT_MS) : BASH_TIMEOUT_MS;
+}
+
 const runBash: Tool = {
   definition: def(
     "run_bash",
-    `Run a bash command on the user's machine (30s timeout) and return its output.
+    `Run a bash command on the user's machine and return its output. It is killed after 2 minutes unless you pass a longer timeout (up to 600 seconds) — set one when you expect a slow command (a full test suite, a build). Longer, or work you don't need to wait for: run_bash_background.
 Boundaries: only for things that truly need execution — installing dependencies, running tests/scripts, git operations.
 To read files use read_file (not cat), to search use search (not grep/find), to edit files use edit_file (not sed/redirection).
 Dangerous commands require user approval; some are denied outright. A [permission] result is a hard boundary — never try to work around it.
 On error: failures return the error output — analyze it and try a different approach; do not resend the same command unchanged.`,
-    { command: { type: "string", description: "The bash command to run" } },
+    {
+      command: { type: "string", description: "The bash command to run" },
+      timeout: { type: "number", description: "Optional: seconds before the command is killed (default 120, max 600)" },
+    },
     ["command"],
   ),
   // Async + spawn: the event loop stays responsive while the command runs, so
   // the spinner keeps spinning and Ctrl+C is heard. execSync would freeze
   // everything — the whole process, the UI, the signal handler — until it
   // returned. The AbortSignal lets the loop kill the child on interruption
-  // instead of waiting out the 30s timeout.
+  // instead of waiting out the timeout.
   run: (args, signal) =>
     new Promise<string>((resolve) => {
       const child = spawn(args.command, { shell: true, stdio: ["ignore", "pipe", "pipe"], env: childEnv() }); // shell:true → bash semantics
@@ -254,10 +266,12 @@ On error: failures return the error output — analyze it and try a different ap
         resolve(text); // hand the result back
       };
       // Hard timeout: SIGKILL the whole process group, never hang the agent.
+      const timeoutMs = bashTimeoutMs(args.timeout);
       const timer = setTimeout(() => {
         child.kill("SIGKILL");
-        done(fail(`Command timed out after ${BASH_TIMEOUT_MS / 1000}s and was killed.${stdout ? `\npartial stdout:\n${stdout.slice(0, 2000)}` : ""}`));
-      }, BASH_TIMEOUT_MS);
+        const hint = timeoutMs < BASH_MAX_TIMEOUT_MS ? ` If it needs longer, rerun with a larger timeout (max ${BASH_MAX_TIMEOUT_MS / 1000}) or use run_bash_background.` : " Use run_bash_background for anything this long.";
+        done(fail(`Command timed out after ${timeoutMs / 1000}s and was killed.${hint}${stdout ? `\npartial stdout:\n${stdout.slice(0, 2000)}` : ""}`));
+      }, timeoutMs);
       // Ctrl+C while a command runs: kill the child immediately.
       const onAbort = () => {
         child.kill("SIGKILL");
@@ -280,19 +294,21 @@ On error: failures return the error output — analyze it and try a different ap
 };
 
 // ============ run_bash_background (Day 37) ============
-// run_bash blocks and dies at its 30s watchdog — useless for anything truly
-// slow. This is its asynchronous twin: it spawns the command and returns a task
-// id IMMEDIATELY, so the agent keeps reasoning while the work happens. The loop
-// injects a <task_notification> when the command finishes (background.ts). Use
-// it for installs, builds, full test runs, or servers that never exit — exactly
-// the keywords that signal a slow operation. The command goes through the SAME
-// permission gate as run_bash (see permissions.ts), so the danger rules are
-// identical; only the blocking behavior differs.
+// run_bash blocks, and dies at its watchdog (2 minutes, 10 at most) — useless
+// for anything truly slow. This is its asynchronous twin: it spawns the command
+// and returns a task id IMMEDIATELY, so the agent keeps reasoning while the work
+// happens. The loop injects a <task_notification> when the command finishes
+// (background.ts); if the agent is idle by then, the frontend wakes it with one
+// (loop.ts, takeFinishedWork). Use it for installs, builds, full test runs, or
+// servers that never exit — exactly the keywords that signal a slow operation.
+// The command goes through the SAME permission gate as run_bash (see
+// permissions.ts), so the danger rules are identical; only the blocking
+// behavior differs.
 const runBashBackground: Tool = {
   definition: def(
     "run_bash_background",
     `Run a slow bash command in the BACKGROUND and return immediately with a task id (e.g. bg_1) — do NOT wait for it.
-When to use: anything that would exceed run_bash's 30s limit or block you — installing dependencies (npm/pip install), builds (npm run build, cargo build, make), full test suites (pytest, npm test), deploys, or long-running servers (npm run dev) that never exit.
+When to use: anything that could outlast run_bash's timeout (10 minutes at most) or that you don't need to wait for — installing dependencies (npm/pip install), builds (npm run build, cargo build, make), full test suites (pytest, npm test), deploys, or long-running servers (npm run dev) that never exit.
 What you get back: just the task id. The command keeps running. When it finishes you'll receive a <task_notification> with its status and output tail — react to that. For a server or a job still running, poll it with bash_output.
 Boundaries & permissions are identical to run_bash (dangerous commands are still gated or denied). For quick commands use run_bash instead — waiting on a one-off background job wastes a turn.`,
     { command: { type: "string", description: "The bash command to run in the background" } },

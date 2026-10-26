@@ -14,6 +14,7 @@ import { AutoMode } from "../src/auto.js";
 import { CONFIG } from "../src/config.js";
 import { CostMeter, DEFAULT_PRICING } from "../src/cost.js";
 import { TerminateReason } from "../src/loop.js";
+import { startBackground, listBackground } from "../src/background.js";
 import { clearToolCalls, recordToolCall, recordToolResult } from "../src/tui.js";
 import { parseSkill } from "../src/skills.js";
 import { check, finish } from "./helpers.js";
@@ -58,9 +59,11 @@ const submitted: string[] = [];
 const submittedContent: unknown[] = [];
 let clipboardText: string | undefined;
 const peerTurns: string[] = [];
+const wakeTurns: string[] = [];
 const app = render(<App session={session} clipboard={{ read: async () => clipboardText === undefined ? { image: png } : { text: clipboardText } }} runTurn={async (_input, h) => {
   if (typeof _input === "string" && (_input.startsWith("[Message from another mini-agent session") || _input.startsWith("[The user sent this"))) { peerTurns.push(_input); return { reason: TerminateReason.Done, finalText: "answer for you" }; } // an idle-started peer turn
   if (_input === "Quick task") { turns++; return { reason: TerminateReason.Done, finalText: "done" }; } // a turn that simply finishes
+  if (typeof _input === "string" && _input.includes("<task_notification>")) { wakeTurns.push(_input); return { reason: TerminateReason.Done, finalText: "picked it up" }; } // an idle wake-up for finished background work
   turns++; hooks = h;
   if (_input === null) {
     for (const message of h.followUps!.drain()) h.onFollowUp?.(message.displayText ?? message.text);
@@ -227,6 +230,11 @@ try {
   finishSummary(); await sleep();
   check("the bar goes away and the result is reported", !frame.includes("Compacting conversation…") && allOutput.includes("compacted:"));
   (client.chat.completions as { create: unknown }).create = originalCreate;
+  // ---- finished background work wakes an idle session ----
+  const bgId = startBackground("echo built-while-idle");
+  for (let i = 0; i < 50 && listBackground().find((t) => t.id === bgId)?.status === "running"; i++) await sleep(20);
+  await sleep(2500); // the idle processor polls every 2s
+  check("a background job that finishes while idle starts a turn with its result", wakeTurns.length === 1 && wakeTurns[0].includes("built-while-idle") && allOutput.includes(`⚙ ${bgId} finished`));
   // ---- peer sessions: a message while idle starts a turn; a streak is capped
   registerSession({ cwd: "/work/ui", branch: null, model: "test" });
   const dropPeerMessage = (text: string) => {

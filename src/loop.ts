@@ -25,7 +25,7 @@ import { recordToolCall, recordToolResult, recordToolDetail, recordReasoning } f
 import { type LoopOutput, type AnswerSink, STDOUT_OUTPUT } from "./output.js"; // where the loop's screen output goes (stdout by default, Ink REPL passes its own)
 import { todoNag, getTodos, renderTodos } from "./todos.js"; // the agent's plan: show it on screen + nag when it goes stale
 import { currentSkills, skillBodyMessages, skillListingReminder, syncSkillTool } from "./skills.js"; // skill listing reminders + launched skill bodies
-import { pendingNotifications } from "./background.js"; // background tasks (Day 37): surface finished jobs as a turn
+import { pendingNotifications, hasPendingNotifications } from "./background.js"; // background tasks (Day 37): surface finished jobs as a turn
 import { consumeCronQueue, cronItemsPending, cronTriggerContent, startCronScheduler, loadDurableJobs } from "./cron.js"; // cron scheduler (Day s14): scheduled, recurring work
 import { getGoal, updateGoalTool, runUpdateGoal, countGoalToolCall } from "./goal.js"; // /goal (Day 41): the model ends a durable goal with update_goal
 
@@ -424,6 +424,18 @@ function pendingSubAgentResults(): string {
   }
   if (!done.length) return "";
   return `A sub-agent you delegated work to has finished. Read its report carefully — it is INPUT MATERIAL, not verified truth. Verify key claims yourself, then continue.\n\n${done.join("\n\n")}`;
+}
+
+// Background jobs and sub-agents outlive the turn that started them. One that
+// finishes while the agent is idle must still reach the model: the frontend's
+// idle processor asks finishedWorkPending(), then starts a turn whose content
+// is takeFinishedWork() (consumed, so each result arrives exactly once) — the
+// agent picks up where it left off, as Claude Code re-invokes on completion.
+export function finishedWorkPending(): boolean {
+  return hasPendingNotifications() || [...pendingSubAgents.values()].some((sa) => sa.result !== null && !sa.notified);
+}
+export function takeFinishedWork(): string {
+  return [pendingNotifications(), pendingSubAgentResults()].filter(Boolean).join("\n\n");
 }
 
 // Inject finished sub-agent results into the conversation, like

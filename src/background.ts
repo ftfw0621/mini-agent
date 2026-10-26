@@ -1,9 +1,9 @@
 // ============ Background tasks (Day 37) ============
-// The problem: run_bash blocks. A command that takes longer than its 30s
-// watchdog (npm install, a full test run, a build) is SIGKILLed before it
-// finishes, and even a 25s one freezes the agent — we sit idle, paying for
-// tokens we aren't using, while a child process churns. The model cannot think
-// and wait at the same time.
+// The problem: run_bash blocks. A command that takes longer than its watchdog
+// (2 minutes by default, 10 at most) is SIGKILLed before it finishes, and even
+// a shorter slow one (npm install, a full test run, a build) freezes the agent:
+// we sit idle, paying for tokens we aren't using, while a child process churns.
+// The model cannot think and wait at the same time.
 //
 // The fix, mirroring Claude Code: a command can be sent to the BACKGROUND. We
 // spawn it, hand the model a task id immediately, and let the loop keep going.
@@ -56,7 +56,7 @@ function append(task: BgTask, chunk: string): void {
 
 // Start a command in the background. Returns its task id immediately — the
 // command keeps running after this returns. Note the deliberate omissions vs
-// run_bash: NO 30s timeout (the whole point is to outlive it) and NO turn
+// run_bash: NO timeout (the whole point is to outlive it) and NO turn
 // AbortSignal (Ctrl+C interrupts the current turn, but a background job is meant
 // to survive into later turns; only killAll, on session exit, stops them).
 export function startBackground(command: string): string {
@@ -128,6 +128,12 @@ export function pendingNotifications(): string {
   // The framing line matters: without it the model can mistake the XML for
   // something it must echo. Tell it plainly that a job it started has finished.
   return `A background task you started has finished. Read the notification, then continue.\n\n${done.join("\n\n")}`;
+}
+
+// Has a task finished whose notification has not been delivered yet? Lets an
+// idle frontend wake the agent without consuming the notification itself.
+export function hasPendingNotifications(): boolean {
+  return [...tasks.values()].some((task) => task.status !== "running" && !task.notified);
 }
 
 // Read a background task's current state for the bash_output tool. Returns only
