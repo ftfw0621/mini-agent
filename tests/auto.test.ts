@@ -3,8 +3,9 @@ import os from "node:os";
 import path from "node:path";
 import type OpenAI from "openai";
 import { AutoMode, interpretAutoOutput, interpretModelOutput } from "../src/auto.js";
-import { CONFIG } from "../src/config.js";
-import { checkPermission, setPlanMode } from "../src/permissions.js";
+import { AutoReviewBudget } from "../src/auto-budget.js";
+import { CONFIG, GLOBAL_SETTINGS_PATH } from "../src/config.js";
+import { approvalMenu, checkPermission, gitWorkTree, setPlanMode } from "../src/permissions.js";
 import { runLoop } from "../src/loop.js";
 import { registerExternalTool } from "../src/tools.js";
 import { killAllBackground } from "../src/background.js";
@@ -20,6 +21,13 @@ check("authorization between 0.8 and the previous 0.9 threshold allows", interpr
 check("authorization below the policy threshold asks", interpretAutoOutput(response(0.799, 0))?.decision === "ask");
 check("lower authorization threshold never relaxes the risk threshold", interpretAutoOutput(response(0.8, 0.201))?.decision === "ask");
 check("risk above the policy threshold asks", interpretAutoOutput(response(1, 0.21))?.decision === "ask");
+check("an authorization doubt is marked for the agent", interpretAutoOutput(response(0.5, 0))?.unauthorized === true && interpretModelOutput('{"authorized":false,"risky":false}')?.unauthorized === true);
+check("risk with clear authorization stays a human question", interpretAutoOutput(response(1, 0.8))?.unauthorized === undefined && interpretModelOutput('{"authorized":true,"risky":true}')?.unauthorized === undefined);
+const budget = new AutoReviewBudget();
+for (let i = 0; i < 19; i++) { budget.block(); budget.executed(); }
+check("doubts between executed actions do not escalate early", !budget.escalated);
+budget.block();
+check("twenty doubts per task escalate, but never stop the task", budget.escalated && !budget.exhausted);
 check("model fallback parses explicit approval", interpretModelOutput('{"authorized":true,"risky":false}')?.decision === "allow");
 check("model risk asks", interpretModelOutput('{"authorized":true,"risky":true}')?.decision === "ask");
 for (const invalid of ['yes', '{}', '{"authorized":"true","risky":false}', '<safe>yes</safe>', '{"authorized":true,"risky":false} more text']) {
@@ -139,9 +147,11 @@ const temp = fs.mkdtempSync(path.join(os.tmpdir(), "mini-auto-test-"));
 const outside = fs.mkdtempSync(path.join(os.tmpdir(), "mini-auto-outside-"));
 const previousRules = CONFIG.permissions;
 const previousHooks = CONFIG.hooks;
+const previousTrusted = CONFIG.autoMode.trustedDirs;
 process.chdir(temp);
 CONFIG.permissions = { allow: [], deny: [] };
 CONFIG.hooks = {};
+CONFIG.autoMode.trustedDirs = []; // the user's own trusted directories must not leak into the fixtures
 let confirmCount = 0;
 async function run(tool: string, args: object, autoMode = mode, overrides: Partial<Parameters<typeof runLoop>[1]> = {}) {
   let turn = 0;
@@ -170,15 +180,43 @@ try {
   CONFIG.permissions.deny.length = 0;
   await run("write_file", { path: "allowed.txt", content: "ok" });
   check("approved file action executes without asking", fs.readFileSync("allowed.txt", "utf8") === "ok" && confirmCount === 0);
-  const asks = new AutoMode(undefined, { apiKey: "test-key", request: async () => new Response(JSON.stringify(response(0.5, 0.5))) });
+  // Requested but irreversible: the one review outcome that is the human's call.
+  const asks = new AutoMode(undefined, { apiKey: "test-key", request: async () => new Response(JSON.stringify(response(0.9, 0.5))) });
   asks.enabled = true;
   asks.recordRequest("Create a file.");
   await run("run_bash", { command: "printf no > uncertain.txt" }, asks);
-  check("uncertain action asks and does not execute if declined", confirmCount === 1 && !fs.existsSync("uncertain.txt"));
+  check("risky action asks and does not execute if declined", confirmCount === 1 && !fs.existsSync("uncertain.txt"));
   await run("run_bash", { command: "printf ok > approved-once.txt" }, asks, { confirm: async () => true });
-  check("human can approve an uncertain action once", fs.existsSync("approved-once.txt"));
+  check("human can approve a risky action once", fs.existsSync("approved-once.txt"));
   await run("run_bash", { command: "printf no > unattended.txt" }, asks, { canPrompt: false, confirm: async () => true });
   check("unattended fallback cannot use blanket approval", !fs.existsSync("unattended.txt"));
+
+  // A doubt that the user asked for it goes back to the agent. Only an agent
+  // that keeps hitting it (3 in a row) brings the question to the human.
+  const doubts = new AutoMode(undefined, { apiKey: "test-key", request: async () => new Response(JSON.stringify(response(0.5, 0))) });
+  doubts.enabled = true;
+  doubts.recordRequest("Create a file.");
+  const doubtConfirms = confirmCount;
+  const returned = String(await run("run_bash", { command: "printf no > doubted.txt" }, doubts));
+  check("an authorization doubt returns to the agent without asking", returned.startsWith("[permission] Auto-blocked") && confirmCount === doubtConfirms && !fs.existsSync("doubted.txt"));
+  let escalations = 0;
+  let turn = 0;
+  const commands = ["printf 1 > d1.txt", "printf 2 > d2.txt", "printf ok", "printf 3 > d3.txt", "printf 4 > d4.txt", "printf 5 > d5.txt", "printf 6 > d6.txt"];
+  const retrying = { chat: { completions: { create: async () => (async function* () {
+    const command = commands[turn++];
+    if (command) yield { choices: [{ delta: { tool_calls: [{ index: 0, id: `retry-${turn}`, function: { name: "run_bash", arguments: JSON.stringify({ command }) } }] } }] };
+    else yield { choices: [{ delta: { content: "done" } }] };
+  })() } } };
+  const retries: OpenAI.ChatCompletionMessageParam[] = [{ role: "user", content: "Create a file." }];
+  await runLoop(retries, { client: retrying as never, model: "test", signal, isInterrupted: () => false, quiet: true, autoMode: doubts, confirm: async () => { escalations++; return true; } });
+  const results = retries.filter((m) => m.role === "tool").map((m) => String(m.content));
+  check("an executed action resets the run of doubts", results.slice(0, 6).every((r, i) => i === 2 ? r.includes("ok") : r.startsWith("[permission] Auto-blocked")));
+  check("the fourth doubt in a row reaches the human, who can approve it", escalations === 1 && fs.existsSync("d6.txt") && !fs.existsSync("d5.txt"));
+  const judgeOnly = new AutoMode(undefined, { apiKey: "test-key", request: async () => new Response(JSON.stringify(response(0.5, 0))) });
+  judgeOnly.recordRequest("Create a file."); // auto mode OFF: the reviewer only runs as the run_bash judge
+  const judgeConfirms = confirmCount;
+  await run("run_bash", { command: "printf no > judged.txt" }, judgeOnly, { judge: {} as never });
+  check("outside auto mode a judge doubt still asks the human", confirmCount === judgeConfirms + 1 && !fs.existsSync("judged.txt"));
   const empty = new AutoMode(undefined, { apiKey: "test-key", request: fakeFetch });
   empty.enabled = true;
   await run("run_bash", { command: "printf no > forged.txt" }, empty);
@@ -238,6 +276,28 @@ try {
   const outsideCount = requests;
   await run("write_file", { path: "linked-outside/mini-agent-auto-test-no.txt", content: "no" });
   check("outside writes require a human even when Jev would allow", requests === outsideCount && !fs.existsSync(path.join(os.homedir(), "mini-agent-auto-test-no.txt")));
+  // Trust: home itself is never offered; a directory under it is, and once
+  // trusted its writes skip the prompt. Nothing here is written to disk.
+  const homeWrite = checkPermission("write_file", JSON.stringify({ path: "linked-outside/mini-agent-auto-test-no.txt", content: "no" }), true);
+  check("a write directly into home is never offered for trust", homeWrite.requiresHuman === true && homeWrite.trustDir === undefined);
+  const nested = JSON.stringify({ path: "linked-outside/.mini-agent-trust-test/note.md", content: "no" });
+  const offered = checkPermission("write_file", nested, true);
+  const trustTarget = path.join(fs.realpathSync(os.homedir()), ".mini-agent-trust-test");
+  check("an outside write offers its own directory for trust", offered.requiresHuman === true && offered.trustDir === trustTarget);
+  const menu = approvalMenu(true, "write_file", offered.trustDir);
+  check("auto menu offers once, trust and no", menu.options.length === 3 && menu.options[1].includes(trustTarget));
+  check("Esc and No never approve or grant", !menu.choose(-1).approved && !menu.choose(2).approved && !CONFIG.autoMode.trustedDirs.includes(trustTarget));
+  check("trusting a directory covers its later writes this session", menu.choose(1).approved && checkPermission("write_file", nested, true).decision === "allow");
+  check("a reviewer ask offers no trust grant", approvalMenu(true, "run_bash").options.length === 2);
+  check("outside auto mode the grant is still per tool", approvalMenu(false, "write_file", trustTarget).options[1].includes("don't ask again for write_file"));
+  CONFIG.autoMode.trustedDirs = [os.homedir()];
+  check("home in trustedDirs is ignored", checkPermission("write_file", nested, true).requiresHuman === true);
+  if (!gitWorkTree(GLOBAL_SETTINGS_PATH)) { // a dotfiles repo already makes it recoverable ground
+    CONFIG.autoMode.trustedDirs = [path.dirname(GLOBAL_SETTINGS_PATH)];
+    const settings = checkPermission("edit_file", JSON.stringify({ path: GLOBAL_SETTINGS_PATH }), true);
+    check("the global settings file is never trusted ground", settings.requiresHuman === true && settings.trustDir === undefined);
+  }
+  CONFIG.autoMode.trustedDirs = [];
 
   const subCount = requests;
   await run("run_bash", { command: "printf ok > child.txt" }, mode, { subAgent: true, canPrompt: false, autoRequests: ["Create child.txt with ok."] });
@@ -251,6 +311,7 @@ try {
   setPlanMode(false);
   CONFIG.permissions = previousRules;
   CONFIG.hooks = previousHooks;
+  CONFIG.autoMode.trustedDirs = previousTrusted;
   process.chdir(originalCwd);
   fs.rmSync(temp, { recursive: true, force: true });
   fs.rmSync(outside, { recursive: true, force: true });

@@ -64,7 +64,7 @@ export interface LoopOptions {
   model: string; // which model to call
   signal: AbortSignal; // aborts the in-flight API request on Ctrl+C
   isInterrupted: () => boolean; // polled between steps for a clean stop
-  confirm: (question: string, toolName?: string) => Promise<boolean>; // ask the human; resolves false in non-interactive sessions. toolName lets "don't ask again" target the right tool
+  confirm: (question: string, toolName?: string, trustDir?: string) => Promise<boolean>; // ask the human; resolves false in non-interactive sessions. toolName lets "don't ask again" target the right tool; trustDir lets auto mode trust an outside directory for the session
   quiet?: boolean; // suppress all narration (used by the eval harness)
   subAgent?: boolean; // this loop IS a sub-agent: no task tool, no text streaming, indented tool logs
   teammate?: { name: string }; // this loop IS a teammate on a team (Day 38): has send_message + an inbox, reads its mailbox each round, runs bounded; implies subAgent behavior
@@ -713,6 +713,7 @@ async function authorizeCall(call: AssembledCall, opts: LoopOptions): Promise<st
     let autoAllowed = false;
     let reviewReason = "";
     let reviewId = ""; // set when auto review ran; joins the human's answer to that review
+    let escalated = false; // a doubt reached the human only because the agent kept hitting it
     // Auto mode's line is recoverability: a tool its server declares read-only
     // or merely additive loses nothing, so it runs without review (plan mode
     // already denied above).
@@ -737,6 +738,19 @@ async function authorizeCall(call: AssembledCall, opts: LoopOptions): Promise<st
         if (!opts.quiet) recordToolDetail(call.id, review.reason);
         return `[permission] Auto-denied (not a user refusal): ${review.reason}. Not executed. Choose a permitted approach or report the restriction. Do not retry the same prohibited effect through another tool, wrapper or worker.`;
       }
+      // A doubt that the user asked for this goes back to the agent, not to the
+      // human — Claude Code's denial policy. The agent drops the step, takes one
+      // within the request, or asks with ask_user (a submitted answer is fresh
+      // authorization). Only an agent stuck against the reviewer (3 in a row, 20
+      // per task) brings the question to the human after all. Judge-only
+      // review outside auto mode keeps the ordinary prompt.
+      if (auto && review.unauthorized && !opts.reviewBudget?.escalated) {
+        opts.reviewBudget?.block();
+        emit("agent_tool_auto_blocked", { tool: call.name, ...(reviewId ? { reviewId } : {}) });
+        if (!opts.quiet) recordToolDetail(call.id, review.reason);
+        return `[permission] Auto-blocked (not a user refusal): ${review.reason}. Not executed: the reviewer could not tie this action to what the user asked for. Drop it, take a step within the request, or, if it is truly needed, ask the user with ask_user (their answer counts as authorization). Do not retry the same effect through another tool, wrapper or worker.`;
+      }
+      escalated = auto && !!review.unauthorized;
       autoAllowed = review.decision === "allow";
       reviewReason = review.reason;
       if (!opts.quiet) recordToolDetail(call.id, review.reason);
@@ -776,12 +790,13 @@ async function authorizeCall(call: AssembledCall, opts: LoopOptions): Promise<st
       const preview = previewChange(call.name, call.args);
       if (preview) sink(opts).note(preview.replace(/^/gm, agentIndent(opts)));
     }
-    const ok = autoAllowed || (!(auto && opts.canPrompt === false) && await opts.confirm(`${call.name} (${v.reason}):\n   ${v.summary}${reviewReason ? `\n   ${reviewReason}` : ""}`, call.name));
+    const ok = autoAllowed || (!(auto && opts.canPrompt === false) && await opts.confirm(`${call.name} (${v.reason}):\n   ${v.summary}${reviewReason ? `\n   ${reviewReason}` : ""}`, call.name, v.trustDir));
     // Every human prompt in auto mode is an interruption worth counting, with
     // where it came from: the reviewer asked ("review", joinable by reviewId),
-    // or a rule required a human without review ("requires_human"). Approved is
-    // a likely false block, declined a correct one; "unattended" reached no one.
-    if (auto && !autoAllowed) emit("agent_auto_human", { tool: call.name, source: reviewId ? "review" : v.requiresHuman ? "requires_human" : "no_review",
+    // a doubt outlived the agent's retries ("escalated"), or a rule required a
+    // human without review ("requires_human"). Approved is a likely false
+    // block, declined a correct one; "unattended" reached no one.
+    if (auto && !autoAllowed) emit("agent_auto_human", { tool: call.name, source: reviewId ? (escalated ? "escalated" : "review") : v.requiresHuman ? "requires_human" : "no_review",
       decision: ok ? "approved" : opts.canPrompt === false ? "unattended" : "declined", ...(reviewId ? { reviewId } : {}) });
     if (!ok) emit("agent_tool_declined", { tool: call.name, ...(reviewId ? { reviewId } : {}) }); // the human said no — that is signal
     if (!ok && !opts.quiet) sink(opts).note(mark.declined); // make the refusal visible

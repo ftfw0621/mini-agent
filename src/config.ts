@@ -86,6 +86,7 @@ interface SettingsFile {
     policy?: "scores" | "rules"; // rules is opt-in until held-out live evaluation
     enabled?: boolean; // opt-in tool review: Jev with a key, current vendor otherwise
     model?: string; // Jev model only; the vendor fallback uses judge.model or model
+    trustedDirs?: string[]; // directories outside any git work tree that auto mode may edit without asking (global settings only)
   };
   pricing?: {
     inputPerM?: number; // $ per 1M uncached input tokens
@@ -218,6 +219,11 @@ export const CONFIG = {
     policy: (process.env.MINI_AGENT_AUTO_POLICY ?? projectSettings.autoMode?.policy ?? globalSettings.autoMode?.policy ?? "scores") === "rules" ? "rules" as const : "scores" as const,
     enabled: process.env.MINI_AGENT_AUTO_MODE !== undefined ? process.env.MINI_AGENT_AUTO_MODE === "1" : (projectSettings.autoMode?.enabled ?? globalSettings.autoMode?.enabled ?? false),
     model: projectSettings.autoMode?.model || globalSettings.autoMode?.model || "jev-1.13.0",
+    // GLOBAL settings only: a cloned repo's settings must never extend auto
+    // mode's write reach into your home. "Trust this directory" in the approval
+    // menu appends here for the rest of the session.
+    trustedDirs: (globalSettings.autoMode?.trustedDirs ?? []).filter((dir) => typeof dir === "string" && dir.trim())
+      .map((dir) => path.resolve(dir.replace(/^~(?=$|\/)/, os.homedir()))),
   },
   // Token prices for the /cost estimate (defaults applied in cost.ts). Project
   // overrides global; either may set just the fields it cares about.

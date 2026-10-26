@@ -14,7 +14,7 @@ import type { LoopOutput } from "../output.js"; // the Ink sink implements this
 export interface TurnHooks {
   images?: readonly ImageAttachment[];
   output: LoopOutput; // the Ink sink (src/ink/sink.ts)
-  confirm: (question: string, toolName?: string) => Promise<boolean>; // permission prompt
+  confirm: (question: string, toolName?: string, trustDir?: string) => Promise<boolean>; // permission prompt
   askUser?: (questions: { question: string; options: string[] }[]) => Promise<{ question: string; answer: string }[] | null>; // the ask_user form
   signal: AbortSignal; // aborts the in-flight request (Esc / Ctrl+C)
   isInterrupted: () => boolean; // polled between steps for a clean stop

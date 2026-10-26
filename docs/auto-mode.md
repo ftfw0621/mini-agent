@@ -107,9 +107,12 @@ reconstruction of Claude Code 2.1.88. It includes auto mode behind feature gates
 - `utils/permissions/permissionSetup.ts`: temporarily strips overly broad allow
   rules that would otherwise bypass the classifier.
 
-This implementation borrows the permission-layer design. It uses immediate human
-review for risk or uncertainty rather than reproducing Claude's denial/retry
-policy, internal feature gates or two-stage classifier. The referenced prompt
+This implementation borrows the permission-layer design and, since 2026-10-26,
+the denial/retry policy for authorization doubts: they return to the agent, and
+only three in a row or twenty per task fall back to the human (see "Doubts go
+back to the agent" below). Risk with clear authorization still asks the human
+immediately. It does not reproduce the internal feature gates or the two-stage
+classifier. The referenced prompt
 text files are not present as standalone files in the inspected restored tree.
 The classifier model is selected at runtime: this snapshot supports an internal
 override, a remote configuration value, and finally the main-loop model. It does
@@ -221,7 +224,8 @@ Contracts were checked against the live [TypeSafe HTTP API](https://docs.typesaf
 the single authorize/execute path; a reviewer can only turn an eligible ask into
 an allow. File tools, foreground/background shell and MCP actions use that path.
 Shell first-word allowlists and tool-wide grants do not skip auto review. Plan exit
-and resolved writes outside the project require the human. Symlinks cannot hide
+and resolved writes outside the project require the human, unless the target is
+inside a directory the user trusts (`autoMode.trustedDirs`, or the approval menu). Symlinks cannot hide
 protected file targets. Hook rewrites are checked again before execution.
 
 Frontends record original human text before adding file attachments, hook output
@@ -252,8 +256,9 @@ instructions and the current action remain intact. If the complete state exceeds
 are never silently truncated.
 
 Unattended calls cannot use an affirmative confirmation callback as a fallback.
-Interactive approval in auto mode is per action; the UI removes the misleading
-"don't ask again for this tool" option. Turning auto off restores the ordinary
+Interactive approval in auto mode is per action; the UI replaces the misleading
+"don't ask again for this tool" option with "trust this directory", offered only
+for an outside write. Turning auto off restores the ordinary
 permission policy without rewriting the user's stored allow rules.
 
 ## Validation and limits
@@ -512,3 +517,38 @@ assistant explanations and unstructured tool output are not supplied to the
 reviewer. A screenshot-led request can therefore leave it without the task
 context available to the main model. Inspect `request.state.userRequests` and
 `request.state.history` before attributing a low score to model accuracy.
+
+## Doubts go back to the agent (2026-10-26)
+
+Local telemetry from 2026-09-15 to 2026-10-20 counted 58 human prompts in auto
+mode, and all 58 were approved. Two causes dominated:
+
+- **Authorization doubts.** The reviewer sees the user's literal requests
+  ("push", "需要啊") and a bounded history, so routine supporting steps often
+  scored under the 0.8 authorization line (`git commit` after "你提交一下"
+  scored 0.79). Every such doubt interrupted the human.
+- **Outside writes.** Edits to `~/.config/mini-agent/skills/*`, not a git work
+  tree, were `requiresHuman` with no session grant: 17 prompts in five minutes.
+
+`decideReview` now records which dimension failed. A failed authorization marks
+the verdict `unauthorized`, and the loop returns `[permission] Auto-blocked …` to
+the agent instead of prompting. The agent drops the step, takes one within the
+request, or asks with `ask_user`, whose submitted answer is fresh authorization.
+`AutoReviewBudget` counts these returns with Claude Code's limits: from the third
+in a row, or the twentieth in a task, the next doubt is escalated to the human
+prompt ("nobody is reachable" when unattended). An executed action resets the
+consecutive count. Escalation never stops the task; rules-policy denials still
+stop at the same limits. Clear authorization with failed risk is requested but
+irreversible work, so the human confirms it directly, as do precondition and
+failure asks (no request, oversized state, reviewer unavailable) that the agent
+cannot fix. Telemetry: `agent_tool_auto_blocked` with its `reviewId`, and source
+`escalated` on `agent_auto_human`; `npm run auto:report` prints "Returned to agent".
+
+`autoMode.trustedDirs` in **global** settings lists directories outside any work
+tree that auto mode edits like project ground. Project settings cannot set it: a
+cloned repo must not extend auto mode into your home. The prompt for an outside
+write offers "Yes, and trust <dir>/ for this session" for the file's directory.
+Home and `/` are never offered, and listing them is ignored. The global settings
+file is never trusted ground, since it holds this list. No-fly paths and the prod
+guard are checked first, and trust covers file tools only: shell deletions keep
+the recoverability rules.

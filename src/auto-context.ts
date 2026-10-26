@@ -52,7 +52,7 @@ export function reviewHistory(messages: readonly OpenAI.ChatCompletionMessagePar
       if (call.type !== "function" || !results.has(call.id)) continue;
       const result = results.get(call.id)!;
       actions.push({ callId: call.id, tool: call.function.name, input: projectInput(call.function.name, call.function.arguments),
-        outcome: /^\[permission\] Auto-denied/.test(result) ? "auto_denied" : /^\[follow-up\]/.test(result) ? "skipped" : /^\[(?:permission|hook)\]/.test(result) ? "denied" : /^\[error\]/.test(result) ? "failed" : "returned", ...resultEvidence(result) });
+        outcome: /^\[permission\] Auto-(?:denied|blocked)/.test(result) ? "auto_denied" : /^\[follow-up\]/.test(result) ? "skipped" : /^\[(?:permission|hook)\]/.test(result) ? "denied" : /^\[error\]/.test(result) ? "failed" : "returned", ...resultEvidence(result) });
     }
   }
   let bytes = 0;

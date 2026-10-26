@@ -100,7 +100,8 @@ try {
       else yield { choices: [{ delta: { content: "Following the new request." } }] };
     })();
   } } } };
-  const askMode = new AutoMode(undefined, { apiKey: "fake", request: async () => new Response('{"answers":{"authorized":{"type":"noul","noul":0},"risky":{"type":"noul","noul":0}}}') });
+  // Requested but irreversible: the reviewer outcome that reaches the human prompt.
+  const askMode = new AutoMode(undefined, { apiKey: "fake", request: async () => new Response('{"answers":{"authorized":{"type":"noul","noul":1},"risky":{"type":"noul","noul":1}}}') });
   askMode.enabled = true; askMode.recordRequest("Do the original task.");
   const beforeFirst = firstRuns;
   let approvalDisplay = "";

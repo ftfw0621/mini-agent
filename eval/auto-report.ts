@@ -36,7 +36,8 @@ export interface AutoReport {
   sessions: number; toolCalls: number; reviews: number; instrumented: number;
   verdicts: Record<string, number>;
   humans: Record<string, number>;
-  humanSources: [string, number][]; // review vs. requires_human (a rule, no reviewer involved)
+  humanSources: [string, number][]; // review vs. escalated vs. requires_human (a rule, no reviewer involved)
+  returned: number; // doubts sent back to the agent instead of interrupting the human
   unanswered: number;
   cliffs: { stateTooLarge: number; historyTruncated: number };
   routes: [string, number][];
@@ -52,7 +53,9 @@ export function summarize(events: Event[]): AutoReport {
   const sessions = new Set(verdicts.map((e) => e.session));
   const toolCalls = events.filter((e) => e.event === "agent_tool_call" && sessions.has(e.session)).length;
   const humans = events.filter((e) => e.event === "agent_auto_human");
-  const answered = new Set(humans.map((e) => String(e.reviewId)));
+  const returned = events.filter((e) => e.event === "agent_tool_auto_blocked");
+  // A doubt returned to the agent was answered too — by the agent, not a human.
+  const answered = new Set([...humans, ...returned].map((e) => String(e.reviewId)));
   // Events written before reviewId/stateBytes existed still count as verdicts
   // but cannot contribute to joins or cliff counts.
   const instrumented = verdicts.filter((e) => e.reviewId !== undefined && e.stateBytes !== undefined);
@@ -64,6 +67,7 @@ export function summarize(events: Event[]): AutoReport {
     verdicts: Object.fromEntries(tally(verdicts.map((e) => String(e.verdict)))),
     humans: Object.fromEntries(tally(humans.map((e) => String(e.decision)))),
     humanSources: tally(humans.filter((e) => e.decision !== "unattended").map((e) => String(e.source ?? "review"))),
+    returned: returned.length,
     // An ask with no recorded answer: interrupted, or logged before linking existed.
     unanswered: asks.filter((e) => e.reviewId !== undefined && !answered.has(String(e.reviewId))).length,
     cliffs: {
@@ -91,6 +95,7 @@ export function render(r: AutoReport): string {
     `Verdicts:            ${Object.entries(r.verdicts).map(([k, v]) => `${k} ${v}`).join(", ") || "none"}`,
     `Ask rate:            ${pct(asks, r.reviews)} of reviews${wilson(asks, r.reviews)}`,
     `Human interruptions: ${interruptions} → ${r.toolCalls ? (100 * interruptions / r.toolCalls).toFixed(1) : "n/a"} per 100 tool calls`,
+    `Returned to agent:   ${r.returned} (doubts the agent handled instead of interrupting you)`,
     ...(r.instrumented < r.reviews ? [`(${r.reviews - r.instrumented} older reviews predate reviewId/size fields: they count in rates, not in joins or cliffs)`] : []),
     ...(r.humanSources.length ? [`Prompt sources:      ${r.humanSources.map(([k, v]) => `${k} ${v}`).join(", ")}`] : []),
     `Human answers:       approved ${r.humans.approved ?? 0} (likely false block), declined ${r.humans.declined ?? 0}, unattended ${r.humans.unattended ?? 0}, unanswered ${r.unanswered}`,

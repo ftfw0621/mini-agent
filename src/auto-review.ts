@@ -1,6 +1,8 @@
 import type { ReviewHistory } from "./auto-context.js";
 
-export interface AutoVerdict { decision: "allow" | "deny" | "ask"; reason: string; ruleIds?: string[]; reviewId?: string }
+// unauthorized: the ask is a doubt that the user requested this action at all.
+// The loop returns it to the agent first instead of interrupting the human.
+export interface AutoVerdict { decision: "allow" | "deny" | "ask"; reason: string; ruleIds?: string[]; reviewId?: string; unauthorized?: boolean }
 export interface ReviewState {
   reviewId?: string;
   policyVersion?: string;
@@ -76,13 +78,18 @@ export function needsAuthorizationReview(assessment: ReviewAssessment): boolean 
 
 // The ONLY semantic allow/ask decision. Boolean answers are categorical and keep
 // that representation in the UI. An invalid provider result can never approve.
+// Which dimension failed decides who hears the ask: a doubt about authorization
+// goes back to the agent (it can drop the step or ask the user), while risk with
+// clear authorization is irreversible work the user requested, so the human
+// confirms it.
 export function decideReview(assessment: ReviewAssessment): AutoVerdict {
   const { authorized, risky } = assessment;
   if (!valid(authorized) || !valid(risky)) return { decision: "ask", reason: "Invalid review assessment" };
-  const allow = (typeof authorized === "boolean" ? authorized : authorized >= MIN_AUTHORIZATION)
-    && (typeof risky === "boolean" ? !risky : risky <= MAX_RISK);
+  const requested = typeof authorized === "boolean" ? authorized : authorized >= MIN_AUTHORIZATION;
+  const allow = requested && (typeof risky === "boolean" ? !risky : risky <= MAX_RISK);
   const format = (value: number | boolean) => typeof value === "boolean" ? (value ? "yes" : "no") : value.toFixed(3);
-  return { decision: allow ? "allow" : "ask", reason: `authorization=${format(authorized)}, risk=${format(risky)}${allow ? " — auto-approved" : " — human review required"}` };
+  const outcome = allow ? " — auto-approved" : requested ? " — human review required" : " — not clearly requested";
+  return { decision: allow ? "allow" : "ask", ...(requested ? {} : { unauthorized: true }), reason: `authorization=${format(authorized)}, risk=${format(risky)}${outcome}` };
 }
 
 // The score policy above remains a deliberate rollout fallback. Rules v1 has

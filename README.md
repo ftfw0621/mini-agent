@@ -49,7 +49,7 @@ export DEEPSEEK_API_KEY=sk-你的key
 
 ### 配置审核模型 judge.model
 
-开启 auto 模式（会话里输入 `/auto`，或启动时加 `--auto`）后，每个需要审批的工具调用会先交给一个审核模型判断：安全的直接执行，有风险或拿不准的仍然问你。审核模型只有两种选择：
+开启 auto 模式（会话里输入 `/auto`，或启动时加 `--auto`）后，每个需要审批的工具调用会先交给一个审核模型判断：安全的直接执行；看不出是你要求的，先退回给 agent，让它换个做法或用表单问你（同一个任务里连续 3 次、累计 20 次还卡住，才弹给你）；你要求了但做了就回不去的（比如删掉 git 恢复不了的文件），弹出来让你确认。审核模型只有两种选择：
 
 1. **主 agent 用的模型**（默认）：和主 agent 共用同一个 API key 和 base URL。没配 `judge.model` 就直接用主 agent 当前的模型。
 2. **Jev**：配好 Jev 的 key 后自动优先用它（见下一节）。
@@ -84,6 +84,18 @@ export TYPESAFE_API_KEY=你的key
   "autoMode": { "model": "jev-1.13.0" }
 }
 ```
+
+### 信任项目外的目录
+
+auto 模式下，改当前项目、其他 git 仓库或临时目录里的文件不用审批，其他地方的文件每次都要你确认。经常要改的目录（比如全局 skills 目录）可以写进**全局** settings（`~/.config/mini-agent/settings.json`），写在项目级 settings 里不生效：
+
+```json
+{
+  "autoMode": { "trustedDirs": ["~/.config/mini-agent/skills"] }
+}
+```
+
+也可以在确认弹窗里选 "Yes, and trust …/ for this session"，只对本次会话有效。家目录本身和 `/` 不能被信任，`settings.json` 本身永远要你确认。
 
 ### 换别的模型
 

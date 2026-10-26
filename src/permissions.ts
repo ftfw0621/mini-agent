@@ -2,7 +2,7 @@ import path from "node:path"; // used to resolve and split file paths
 import fs from "node:fs"; // resolve symlinks before auto mode grants file access
 import os from "node:os"; // `cd ~` in the recoverable-shell analyzer
 import { execFileSync } from "node:child_process"; // ask git whether a deletion target is disposable
-import { CONFIG } from "./config.js"; // user-configured allow/deny rules from settings files
+import { CONFIG, GLOBAL_SETTINGS_PATH } from "./config.js"; // user-configured allow/deny rules from settings files
 import { emit } from "./telemetry.js"; // a bypassed approval leaves an audit row, not silence
 
 // Three verdicts, checked in strict order. The invariant that holds the whole
@@ -18,6 +18,7 @@ export interface Verdict {
   summary: string; // what we show the user in the confirmation prompt
   requiresHuman?: boolean; // an ask that no automatic reviewer may approve
   readOnly?: boolean; // false marks an allowed shell command that changes state (plan mode must still block it)
+  trustDir?: string; // an outside directory the human may trust for the session instead of approving each write
 }
 
 // ---- The no-fly zone --------------------------------------------------------
@@ -207,6 +208,22 @@ export function gitWorkTree(target: string): string | null {
     topLevels.set(dir, top === os.homedir() || top === path.parse(dir).root ? null : top);
   }
   return topLevels.get(dir)!;
+}
+
+// Trusted ground outside any work tree: autoMode.trustedDirs from global
+// settings, plus directories trusted from the approval menu this session.
+// Home and / never count, for the same reason as above. Nor does the global
+// settings file: it holds this very list, and an agent that could edit it
+// unasked could widen its own reach.
+const tooBroadToTrust = (dir: string): boolean => dir === os.homedir() || dir === resolveFileTarget(os.homedir()) || dir === path.parse(dir).root;
+const settingsFile = (): string => resolveFileTarget(GLOBAL_SETTINGS_PATH);
+function trustedDir(target: string): boolean {
+  if (target === settingsFile()) return false;
+  return CONFIG.autoMode.trustedDirs.some((dir) => {
+    let root: string;
+    try { root = resolveFileTarget(dir); } catch { return false; }
+    return !tooBroadToTrust(root) && inside(root, target);
+  });
 }
 
 // A deletion is recoverable when the target is scratch (inside a temp dir) or
@@ -503,9 +520,13 @@ function basePermission(toolName: string, argsJson: string, auto: boolean): Verd
       if (reason) return { decision: "deny", reason, summary: args.path };
       const relative = path.relative(fs.realpathSync(process.cwd()), resolved);
       // Outside the start directory is still recoverable in another git work
-      // tree or a temp dir (git, /undo); anywhere else a human decides.
-      if (toolName !== "read_file" && (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) && !inTempDir(resolved) && !gitWorkTree(resolved)) {
-        return { decision: "ask", requiresHuman: true, reason: "resolved write target is outside the project", summary: `${args.path} → ${resolved}` };
+      // tree or a temp dir (git, /undo), and a trusted directory is one the
+      // user vouched for; anywhere else a human decides, and may trust the
+      // file's directory for the session rather than approve every write.
+      if (toolName !== "read_file" && (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) && !inTempDir(resolved) && !gitWorkTree(resolved) && !trustedDir(resolved)) {
+        const dir = path.dirname(resolved);
+        return { decision: "ask", requiresHuman: true, reason: "resolved write target is outside the project", summary: `${args.path} → ${resolved}`,
+          ...(resolved === settingsFile() || tooBroadToTrust(dir) ? {} : { trustDir: dir }) };
       }
     } catch {
       return { decision: "deny", reason: "cannot resolve the file target safely", summary: args.path };
@@ -649,4 +670,29 @@ function resolveFileTarget(target: string): string {
     current = parent;
   }
   return path.join(fs.realpathSync(current), ...missing);
+}
+
+// ---- The approval menu ----------------------------------------------------------
+// Both frontends (readline and Ink) offer the same choices and apply the same
+// session grant, so the menu lives next to the rules it widens. Outside auto
+// mode the grant is "don't ask again for this tool"; in auto mode it is "trust
+// this directory", offered only for an outside write. The last option is always
+// "No", and so is -1 (Esc). `granted` is the note to show after a grant.
+export function approvalMenu(auto: boolean, toolName?: string, trustDir?: string): { options: string[]; choose: (i: number) => { approved: boolean; granted?: string } } {
+  const grant = auto
+    ? (trustDir ? `Yes, and trust ${trustDir}/ for this session` : null)
+    : (toolName ? `Yes, and don't ask again for ${toolName} this session` : "Yes, and don't ask again this session");
+  const options = [auto ? "Yes, once" : "Yes", ...(grant ? [grant] : []), "No — let me tell the agent what to do instead"];
+  const choose = (i: number) => {
+    if (i < 0 || i >= options.length - 1) return { approved: false };
+    if (i === 0) return { approved: true };
+    if (auto && trustDir) {
+      CONFIG.autoMode.trustedDirs.push(trustDir);
+      return { approved: true, granted: `trusting ${trustDir}/ for this session` };
+    }
+    if (!toolName) return { approved: true };
+    CONFIG.permissions.allow.push(`tool:${toolName}`); // "don't ask again" → session allowlist
+    return { approved: true, granted: `won't ask again for ${toolName} this session` };
+  };
+  return { options, choose };
 }

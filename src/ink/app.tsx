@@ -27,7 +27,7 @@ import { currentSession, peerInboxPending, readPeerInbox, peerMessageContent, pe
 import { cronItemsPending, consumeCronQueue, cronTriggerContent } from "../cron.js"; // cron scheduler (Day s14): fire scheduled jobs autonomously while idle
 import { newSessionId, saveSession, listSessions, loadSession, setSessionTitle, sessionPath } from "../session.js";
 import { generateSessionTitle, setTerminalTitle, refreshTerminalTitle, flashTerminalTitle } from "../title.js"; // concise session name, generated after the first message + the terminal tab that shows it
-import { isPlanMode, setPlanMode } from "../permissions.js";
+import { approvalMenu, isPlanMode, setPlanMode } from "../permissions.js";
 import { findSkill, recordSkillUsage, skillSource, skillUsageScores, userSkillMessages } from "../skills.js";
 import { SkillsPanel } from "./skills-panel.js"; // /skills: Claude Code's on / user-only / off manager
 import { extractMemories } from "../memory.js";
@@ -355,14 +355,12 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
     const hooks: TurnHooks = {
       images: attachments,
       output: sink,
-      confirm: (question, toolName) =>
+      confirm: (question, toolName, trustDir) =>
         new Promise<boolean>((resolve) => {
-          const allowLabel = toolName ? `Yes, and don't ask again for ${toolName} this session` : "Yes, and don't ask again this session";
-          const options = autoMode.enabled ? ["Yes, once", "No — let me tell the agent what to do instead"] : ["Yes", allowLabel, "No — let me tell the agent what to do instead"];
-          openSelect(`⚠ approval needed — ${question}`, options, (i) => {
-            const approved = i === 0 || (!autoMode.enabled && i === 1);
-            if (!autoMode.enabled && approved && i === 1 && toolName) CONFIG.permissions.allow.push(`tool:${toolName}`); // "don't ask again" → session allowlist
-            note(`${chalk.yellow("⚠ approval")} — ${question.split("\n")[0]} → ${approved ? chalk.green("✓ approved") : chalk.yellow("✗ declined")}`);
+          const menu = approvalMenu(autoMode.enabled, toolName, trustDir); // same choices and session grants as the readline REPL
+          openSelect(`⚠ approval needed — ${question}`, menu.options, (i) => {
+            const { approved, granted } = menu.choose(i);
+            note(`${chalk.yellow("⚠ approval")} — ${question.split("\n")[0]} → ${approved ? chalk.green("✓ approved") : chalk.yellow("✗ declined")}${granted ? chalk.dim(` (${granted})`) : ""}`);
             resolve(approved);
           });
         }),

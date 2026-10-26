@@ -21,7 +21,7 @@ import { parseCli, applyCliOptions, readPrintPrompt, CliUsageError } from "./cli
 import { reservePrintOutput, formatPrintResult, streamJsonInit, streamJsonMessage } from "./print.js";
 import { FollowUpQueue } from "./follow-up.js";
 import { reviewDebugCommand } from "./auto-debug.js";
-import { isPlanMode, setPlanMode } from "./permissions.js"; // plan mode: research-only until the user approves a plan
+import { approvalMenu, isPlanMode, setPlanMode } from "./permissions.js"; // plan mode: research-only until the user approves a plan; the shared approval menu
 import { undoLast, clearUndo, sessionChanges } from "./undo.js"; // /undo + /diff: take back, or review, this session's writes
 import { clearTodos, getTodos, renderTodos } from "./todos.js"; // the agent's plan: /todos to view, cleared with the conversation
 import { renderDiff } from "./diff.js"; // show what /undo put back / what /diff changed, reusing the Day 21 diff renderer
@@ -435,7 +435,7 @@ async function main() {
   // Fail closed: in a non-interactive session nobody can say yes, so the
   // answer is no. MINI_AGENT_AUTO_APPROVE=1 bypasses the QUESTION, but hard
   // denies were already enforced in permissions.ts before we get here.
-  const confirm = async (question: string, toolName?: string): Promise<boolean> => {
+  const confirm = async (question: string, toolName?: string, trustDir?: string): Promise<boolean> => {
     console.log(chalk.yellow(`\n⚠ approval needed — ${question}`)); // always show what is being asked
     if (!autoMode.enabled && process.env.MINI_AGENT_AUTO_APPROVE === "1") {
       console.log(chalk.dim("  auto-approved (MINI_AGENT_AUTO_APPROVE=1)")); // bypass mode — say so out loud
@@ -446,15 +446,11 @@ async function main() {
       return false; // fail closed
     }
     // Selecting beats typing: ↑/↓ + Enter instead of "type y/N". The middle
-    // option lets the user stop being asked about this tool for the session.
-    const allowLabel = toolName ? `Yes, and don't ask again for ${toolName} this session` : "Yes, and don't ask again this session";
-    const options = autoMode.enabled ? ["Yes, once", "No — let me tell the agent what to do instead"] : ["Yes", allowLabel, "No — let me tell the agent what to do instead"];
-    const choice = await select(options);
-    const approved = choice === 0 || (!autoMode.enabled && choice === 1);
-    if (!autoMode.enabled && choice === 1 && toolName) {
-      CONFIG.permissions.allow.push(`tool:${toolName}`); // remember the grant for the rest of the session
-      console.log(chalk.dim(`  won't ask again for ${toolName} this session`));
-    }
+    // option lets the user stop being asked about this tool (or, in auto mode,
+    // this outside directory) for the session.
+    const menu = approvalMenu(autoMode.enabled, toolName, trustDir);
+    const { approved, granted } = menu.choose(await select(menu.options));
+    if (granted) console.log(chalk.dim(`  ${granted}`));
     console.log(approved ? chalk.green("  ✓ approved") : chalk.yellow("  ✗ declined"));
     return approved;
   };

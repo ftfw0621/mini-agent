@@ -131,7 +131,8 @@ export class AutoMode {
 
   status(): string {
     if (CONFIG.bypassPermissions) return "(bypassPermissions — approvals and AI review skipped for this run; hard denies, plan restrictions and hooks still apply)";
-    return `(auto mode ${this.enabled ? "ON" : "OFF"} — ${this.backend}; ${this.enabled ? "uncertain or risky actions require approval" : "use /auto to enable"})`;
+    const enabled = this.policy === "rules" ? "uncertain or risky actions require approval" : "irreversible actions require approval; unrequested ones go back to the agent first";
+    return `(auto mode ${this.enabled ? "ON" : "OFF"} — ${this.backend}; ${this.enabled ? enabled : "use /auto to enable"})`;
   }
 
   async classify(tool: string, argsJson: string, userRequests: readonly string[], signal: AbortSignal, options: AutoReviewOptions = {}): Promise<AutoVerdict> {
