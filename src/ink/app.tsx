@@ -331,7 +331,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
   // as the prompt (a user highlight bar, or a note for /skill); the loop appends
   // `content` to `messages` itself. The permission menu + ask_user form raise a
   // `pending` prompt that returns a promise the loop awaits.
-  const runConversationTurn = (content: string | readonly string[] | null, display?: Item, attachments: readonly ImageAttachment[] = [], goalTurn = false) => {
+  const runConversationTurn = (content: string | readonly string[] | null, display?: Item, attachments: readonly ImageAttachment[] = [], goalTurn = false, afterTurn?: () => void) => {
     setDetails(null);
     setDetailOffset(0);
     if (display) pushItem(display);
@@ -416,6 +416,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
         // is saved: Stop does not fire on an interrupt or an error, and fires
         // before the save. An orchestrator reads this as "idle, transcript current".
         void runHooks("TurnEnd", { reason: ending.reason, last_assistant_message: ending.text });
+        afterTurn?.();
       });
   };
 
@@ -440,7 +441,9 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
       if (!fired.length) return;
       const content = fired.map(cronTriggerContent).join("\n\n---\n\n");
       const label = fired.length === 1 ? `⏰ cron ${fired[0].id} fired (${fired[0].cron})` : `⏰ ${fired.length} cron jobs fired`;
-      runConversationTurn(content, { kind: "note", text: chalk.cyan(label) }); // a cron NOTE (not a user bar); the agent runs it + reports
+      // A cron NOTE (not a user bar); the agent runs it and reports. When the run
+      // is over, ring the bell and blink the tab: you were probably not watching.
+      runConversationTurn(content, { kind: "note", text: chalk.cyan(label) }, [], false, () => flashTerminalTitle(6000, `⏰ ${fired.map((j) => j.id).join(", ")} done`));
     }, 2000);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps

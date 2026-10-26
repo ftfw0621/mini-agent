@@ -45,8 +45,9 @@ export function setTerminalTitle(title: string | undefined): void {
 export const refreshTerminalTitle = (): void => setTerminalTitle(lastTitle);
 
 // "Which window is this?" — another session asked. Ring the bell and blink the
-// tab title for a few seconds, then put the real title back.
-export function flashTerminalTitle(ms = 6000): void {
+// tab title for a few seconds, then put the real title back. A finished cron run
+// uses it too, blinking its own label ("⏰ cron_1 done") instead.
+export function flashTerminalTitle(ms = 6000, label?: string): void {
   if (!process.stdout.isTTY) return;
   process.stdout.write("\x07");
   const name = currentSession()?.name ?? "mini-agent";
@@ -61,7 +62,7 @@ export function flashTerminalTitle(ms = 6000): void {
       process.stdout.write(terminalTitleSequence(tabTitle(lastTitle)));
       return;
     }
-    process.stdout.write(terminalTitleSequence(on ? `👋 ${name} — HERE 👋` : tabTitle(lastTitle)));
+    process.stdout.write(terminalTitleSequence(on ? label ?? `👋 ${name} — HERE 👋` : tabTitle(lastTitle)));
   }, 500);
   flashing.unref();
 }

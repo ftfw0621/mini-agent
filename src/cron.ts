@@ -174,15 +174,19 @@ export function listJobs(): CronJob[] {
 // Shared by both consumers — the in-turn one (injectCronMessages in loop.ts, for
 // a job that fires mid-task) and the idle one (the REPL's idle processor, for a
 // job that fires while the user is at the prompt) — so they behave identically.
+// The report is the run's summary: the user was not watching, so a quiet run is
+// one line and anything wrong is laid out point by point (a prod-alert monitor:
+// "No alerts — all normal.", or each alert with what, where and impact).
 export function cronTriggerContent(job: CronJob): string {
   return [
     `[Cron job "${job.id}" triggered — ${job.cron}]`,
     ``,
     `${job.prompt}`,
     ``,
-    `Execute this now. When done, report the result directly to the user — make it visible and clear.`,
-    `If the task produces output (e.g. a shell command result, a file change, a value), show it.`,
-    `If there's nothing to show, confirm success with one line.`,
+    `Execute this now, then report to the user, who was not watching. Write the report in the language of the task above:`,
+    `- Nothing needs attention: ONE line that says so, e.g. "没有告警，一切正常。" / "No alerts — all normal."`,
+    `- Otherwise: first line the outcome, then bullet points under short bold labels — each problem with what, where and impact, then anything the user must decide or do.`,
+    `- Quote exact values (counts, names, error lines), never a raw log dump.`,
     ``,
     `After this, return to idle — do NOT start additional work unless the user asked for a chain of follow-ups.`,
   ].join("\n");
