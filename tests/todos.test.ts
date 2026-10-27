@@ -1,4 +1,4 @@
-import { parseTodos, renderTodos, summarizeTodos, setTodos, getTodos, clearTodos, todoNag, NAG_AFTER_ROUNDS, type Todo } from "../src/todos.js"; // unit under test
+import { parseTodos, renderTodos, summarizeTodos, setTodos, getTodos, clearTodos, todoNag, NAG_AFTER_ROUNDS, MAX_NAGS, type Todo } from "../src/todos.js"; // unit under test
 import { check, checkContains, finish } from "./helpers.js"; // assertions
 
 // ---- parseTodos: strict validation ------------------------------------------
@@ -47,8 +47,17 @@ fired = todoNag(); // the NAG_AFTER_ROUNDS-th round
 check("nag fires after N quiet rounds", typeof fired === "string" && fired.includes("[plan reminder]"), String(fired));
 check("nag re-arms (quiet again right after)", todoNag() === null);
 
+// Ignored reminders back off (N, 2N, 4N rounds) and stop after MAX_NAGS: a
+// 500-round task must not get a reminder every few rounds.
+setTodos([{ content: "step", status: "pending" }]);
+const firedAt: number[] = [];
+for (let round = 1; round <= 200; round++) if (todoNag()) firedAt.push(round);
+check("ignored reminders back off, then stop", JSON.stringify(firedAt) === JSON.stringify([NAG_AFTER_ROUNDS, NAG_AFTER_ROUNDS * 3, NAG_AFTER_ROUNDS * 7]) && firedAt.length === MAX_NAGS, JSON.stringify(firedAt));
+
 setTodos([{ content: "step", status: "pending" }]); // updating the plan resets the clock
 check("an update resets the nag clock", todoNag() === null);
+for (let i = 0; i < NAG_AFTER_ROUNDS - 2; i++) todoNag();
+check("…and the backoff: the next reminder is N rounds away again", typeof todoNag() === "string");
 
 clearTodos();
 setTodos([{ content: "step", status: "completed" }]); // a finished plan

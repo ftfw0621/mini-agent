@@ -66,11 +66,13 @@ export function summarizeTodos(todos: Todo[]): string {
 // ---- session state + the nag --------------------------------------------------
 // The current plan lives for the session (in process memory, like Claude Code's).
 let current: Todo[] = [];
-let staleRounds = 0; // tool-rounds since the plan was last touched
+let staleRounds = 0; // tool-rounds since the plan was last touched (or last nagged)
+let nags = 0; // reminders sent since the plan was last touched
 
 export function setTodos(todos: Todo[]): void {
   current = todos;
   staleRounds = 0; // an update is a fresh signal — restart the patience clock
+  nags = 0;
 }
 export function getTodos(): Todo[] {
   return current;
@@ -78,19 +80,25 @@ export function getTodos(): Todo[] {
 export function clearTodos(): void {
   current = [];
   staleRounds = 0; // /clear and session switches wipe the plan too
+  nags = 0;
 }
 
 // Call once per tool-round. If there's an unfinished plan the model has stopped
 // touching, return a reminder to inject (else null). This is the "nag": without
 // it the model writes a plan once and never looks back — the list goes stale and
-// stops meaning anything. We re-arm after firing, so it nudges every N rounds,
-// not every round (which would be noise).
+// stops meaning anything. Each ignored reminder doubles the wait (3, 6, 12
+// rounds) and after MAX_NAGS it goes quiet until the next todo_write: a model
+// that ignored three reminders won't heed a fourth, and a reminder every few
+// rounds of a 500-round task floods the history with user-role text the model
+// learns to skip — including, then, the human's own messages.
 export const NAG_AFTER_ROUNDS = 3;
+export const MAX_NAGS = 3;
 export function todoNag(): string | null {
   const unfinished = current.some((t) => t.status !== "completed");
-  if (!current.length || !unfinished) return null; // no plan, or all done → nothing to nag about
+  if (!current.length || !unfinished || nags >= MAX_NAGS) return null; // no plan, all done, or given up → nothing to nag about
   staleRounds++;
-  if (staleRounds < NAG_AFTER_ROUNDS) return null;
-  staleRounds = 0; // re-arm
-  return "[plan reminder] Your todo list still has unfinished items but you haven't updated it in a few steps. If you've made progress, call todo_write to mark items completed / move the next one to in_progress; if the plan changed, rewrite it. Don't lose the original goal.";
+  if (staleRounds < NAG_AFTER_ROUNDS * 2 ** nags) return null;
+  staleRounds = 0; // re-arm, with a longer wait next time
+  nags++;
+  return "[plan reminder] Your todo list still has unfinished items but you haven't updated it in a few steps. If you've made progress, call todo_write to mark items completed / move the next one to in_progress; if the plan changed, rewrite it. Keep the user's goal in view — their latest instruction, if they have changed it.";
 }

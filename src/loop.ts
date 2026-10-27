@@ -18,13 +18,13 @@ import type { Judge } from "./judge.js"; // optional LLM permission classifier
 import { reviewHistory, type ReviewHistory } from "./auto-context.js";
 import { AgentProgress, type AgentView } from "./agent-progress.js";
 import type { AutoMode } from "./auto.js"; // Jev review, shared by all tool execution paths
-import type { FollowUpQueue } from "./follow-up.js";
+import type { FollowUpMessage, FollowUpQueue } from "./follow-up.js";
 import { recordUsage } from "./cost.js"; // meter token usage from the stream
 import { mark, thinkingWord, spinnerText } from "./ui.js"; // centralized terminal styling (markers, spinner)
 import { recordToolCall, recordToolResult, recordToolDetail, recordReasoning } from "./tui.js"; // folded tool-call trace (Ctrl+T) + the model's hidden thinking (Ctrl+R)
 import { type LoopOutput, type AnswerSink, STDOUT_OUTPUT } from "./output.js"; // where the loop's screen output goes (stdout by default, Ink REPL passes its own)
 import { todoNag, getTodos, renderTodos } from "./todos.js"; // the agent's plan: show it on screen + nag when it goes stale
-import { currentSkills, skillBodyMessages, skillListingReminder, syncSkillTool } from "./skills.js"; // skill listing reminders + launched skill bodies
+import { currentSkills, skillBodyMessages, skillListingReminder, syncSkillTool, wrapInSystemReminder } from "./skills.js"; // skill listing reminders + launched skill bodies
 import { pendingNotifications, hasPendingNotifications } from "./background.js"; // background tasks (Day 37): surface finished jobs as a turn
 import { consumeCronQueue, cronItemsPending, cronTriggerContent, startCronScheduler, loadDurableJobs } from "./cron.js"; // cron scheduler (Day s14): scheduled, recurring work
 import { getGoal, updateGoalTool, runUpdateGoal, countGoalToolCall } from "./goal.js"; // /goal (Day 41): the model ends a durable goal with update_goal
@@ -1386,6 +1386,15 @@ async function shutdownTeam(opts: LoopOptions): Promise<void> {
   resetBoard(); // and a fresh task board — its work is done with this team
 }
 
+// A follow-up lands mid-task, among tool results and the agent's own injected
+// notes. A bare user message there is easy to skim past as more plumbing, so
+// say whose it is and that it comes first. Only the model sees the header:
+// authorization records the raw text, and the transcript shows what was typed.
+const FOLLOW_UP_HEADER = "[The user sent this while you were working. Address it before you continue; if it changes the task, follow it and update your plan.]";
+export function framedFollowUp(content: FollowUpMessage["content"]): FollowUpMessage["content"] {
+  return typeof content === "string" ? `${FOLLOW_UP_HEADER}\n${content}` : [{ type: "text", text: FOLLOW_UP_HEADER }, ...content];
+}
+
 // The agent main loop, as a state machine: every iteration either continues
 // for a named reason or terminates for a named reason — nothing implicit.
 export async function runLoop(
@@ -1415,12 +1424,14 @@ export async function runLoop(
     }
     return answers;
   };
-  const receiveFollowUps = (): boolean => {
+  // `at`: the top of a round, or in place of a final answer — for telemetry.
+  const receiveFollowUps = (at: "round" | "answer"): boolean => {
     const pending = opts.followUps?.drain() ?? [];
     for (const message of pending) {
-      messages.push({ role: "user", content: message.content });
+      messages.push({ role: "user", content: framedFollowUp(message.content) });
       recordHumanInput(message.text);
       opts.onFollowUp?.(message.displayText ?? message.text);
+      emit("agent_follow_up", { phase: "delivered", at, waitedMs: Date.now() - (message.queuedAt ?? Date.now()) });
     }
     return pending.length > 0;
   };
@@ -1442,7 +1453,7 @@ export async function runLoop(
     while (true) {
       if (opts.isInterrupted()) return { reason: TerminateReason.UserInterrupt }; // user asked us to stop — obey before spending money
       if (opts.reviewBudget?.exhausted) return { reason: TerminateReason.ReviewLimit };
-      receiveFollowUps();
+      receiveFollowUps("round");
 
       // Proactive compaction: act BEFORE the API rejects us. Waiting for the
       // hard limit means the failure already happened. The count is the last
@@ -1534,7 +1545,7 @@ export async function runLoop(
       if (out.content) lastText = out.content; // remember the latest answer text — the round-cap path returns it
 
       if (!out.toolCalls.length) {
-        if (receiveFollowUps()) break; // new human input takes precedence over finishing
+        if (receiveFollowUps("answer")) break; // new human input takes precedence over finishing
         // The model wants to stop. A Stop hook gets the last word: if it exits
         // 2, the agent is NOT done — its stderr becomes a new instruction and
         // the loop continues. This is how you build test-driven AI: a Stop hook
@@ -1561,7 +1572,7 @@ export async function runLoop(
         // shutdown handshake (or its idle backstop). If there's something to
         // process, run another round instead of stopping.
         if (await continueForTeam(messages, opts)) break; // exit the inner while → advance the round counter
-        if (receiveFollowUps()) break;
+        if (receiveFollowUps("answer")) break;
         // The lead is really finishing: disband any teammates still idling so
         // they exit cleanly (Day 39) instead of being orphaned.
         if (!opts.subAgent && !opts.teammate) await shutdownTeam(opts);
@@ -1579,8 +1590,10 @@ export async function runLoop(
         if (opts.followUps?.size && !opts.isInterrupted()) {
           // Resolve every outstanding tool ID BEFORE adding a user message.
           // Unstarted actions came from the old intent and must be replanned.
+          // The message itself waits for the top of the next round, so this
+          // round's injections below (cron, task notifications, the plan
+          // reminder) land before it, not between it and the model.
           for (const call of out.toolCalls.slice(i)) record(messages, opts, { role: "tool", tool_call_id: call.id, content: "[follow-up] Not executed: new user input arrived. Reconsider this action using the latest instructions." });
-          receiveFollowUps();
           break;
         }
         const batch: AssembledCall[] = []; // a run of safe, parallelizable calls
@@ -1626,11 +1639,14 @@ export async function runLoop(
 
       // The nag: if there's an unfinished plan the model has stopped touching for
       // a few rounds, slip in a reminder so the list doesn't go stale and
-      // meaningless. Top-level only — a sub-agent has no plan of its own.
-      if (!opts.subAgent) {
+      // meaningless. Top-level only — a sub-agent has no plan of its own. Not
+      // while a human message waits: they are steering, and a nudge back to the
+      // old plan would be the last thing the model read before them. Wrapped as
+      // a <system-reminder> so it never reads as something the human typed.
+      if (!opts.subAgent && !opts.followUps?.size) {
         const nag = todoNag();
         if (nag) {
-          messages.push({ role: "user", content: nag });
+          messages.push({ role: "user", content: wrapInSystemReminder(nag) });
           if (!opts.quiet) sink(opts).note(chalk.dim("  ⎿ plan reminder injected"));
         }
       }

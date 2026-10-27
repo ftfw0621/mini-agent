@@ -61,6 +61,16 @@ request receive explicit skipped tool results before new user messages enter
 history; the next model call replans with the new instructions. This preserves
 the API's tool-call/result pairing.
 
+The message is delivered at the top of the next round, so that round's cron,
+task, inbox and skill injections land before it rather than between it and the
+model. It carries a one-line header telling the model the user sent it
+mid-task and that it comes first. The header goes only to the model; the
+transcript and authorization use the typed text. The todo plan reminder holds
+off while a message is queued, so "keep to your plan" never lands right before
+"change of plan". Telemetry records `agent_follow_up` at `queued` and at
+`delivered` (with `at` and `waitedMs`), which separates a message that never
+arrived from one the model ignored.
+
 Ctrl+Enter requests interruption and immediate processing. Esc does the same
 when messages are queued, after closing any open detail panel first. The current
 controller is aborted, then the same history/queue resumes with a fresh controller;

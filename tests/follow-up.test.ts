@@ -1,12 +1,13 @@
 import type OpenAI from "openai";
 import { FollowUpQueue } from "../src/follow-up.js";
-import { runLoop, TerminateReason } from "../src/loop.js";
+import { framedFollowUp, runLoop, TerminateReason } from "../src/loop.js";
 import { makeRunTurn } from "../src/ink/chat.js";
 import { makeInkSink } from "../src/ink/sink.js";
 import { AutoMode } from "../src/auto.js";
 import { CONFIG } from "../src/config.js";
 import { registerExternalTool } from "../src/tools.js";
 import { reviewHistory } from "../src/auto-context.js";
+import { clearTodos, NAG_AFTER_ROUNDS, setTodos } from "../src/todos.js";
 import { check, finish } from "./helpers.js";
 
 const hooksBefore = CONFIG.hooks;
@@ -110,7 +111,33 @@ try {
     onFollowUp: (text) => { approvalDisplay = text; },
   });
   check("follow-up at approval executes neither pending action nor stale sibling", firstRuns === beforeFirst && secondRuns === 0);
-  check("approval follow-up reaches the same loop once after paired results", approvalRequests.length === 2 && approvalRequests[1].filter((m) => m.role === "tool").length === 2 && approvalRequests[1].at(-1)?.content === "Stop these actions and inspect instead." && askMode.snapshot().at(-1) === "Stop these actions and inspect instead.");
+  check("approval follow-up reaches the same loop once after paired results", approvalRequests.length === 2 && approvalRequests[1].filter((m) => m.role === "tool").length === 2 && approvalRequests[1].at(-1)?.content === framedFollowUp("Stop these actions and inspect instead.") && askMode.snapshot().at(-1) === "Stop these actions and inspect instead.");
   check("compact display is kept separate from provider content and authorization", approvalDisplay === "[Pasted text #1 +13 lines]" && !JSON.stringify(askMode.snapshot()).includes("Pasted text"));
+  check("the model is told the follow-up is the user's, the authorization record is not", String(approvalRequests[1].at(-1)?.content).startsWith("[The user sent this while you were working.") && !JSON.stringify(askMode.snapshot()).includes("while you were working"));
+  check("an image follow-up keeps its parts after the header", JSON.stringify(framedFollowUp(content)) === JSON.stringify([{ type: "text", text: String(framedFollowUp("")).trim() }, ...content]));
+
+  // A stale plan's reminder never lands between the human and the model, and
+  // never reads as typed text. The step that is due for the nag queues a
+  // follow-up: the nag stays quiet that round, the human's message is the last
+  // thing the next request carries, and the reminder comes a round later as a
+  // <system-reminder>.
+  setTodos([{ content: "old plan step", status: "in_progress" }]);
+  let steps = 0;
+  add("mcp__follow_test__step", () => { if (++steps === NAG_AFTER_ROUNDS) queue.enqueue({ text: "Stop and summarize instead.", content: "Stop and summarize instead." }); return "step done"; });
+  const nagRequests: OpenAI.ChatCompletionMessageParam[][] = [];
+  const nagClient = { chat: { completions: { create: async (params: { messages: OpenAI.ChatCompletionMessageParam[] }) => {
+    const round = nagRequests.push(structuredClone(params.messages)) - 1;
+    return (async function* () {
+      if (round <= NAG_AFTER_ROUNDS) yield { choices: [{ delta: { tool_calls: [tool(`step${round}`, "mcp__follow_test__step", 0)] } }] };
+      else yield { choices: [{ delta: { content: "Summary." } }] };
+    })();
+  } } } };
+  await runLoop([{ role: "user", content: "Work through the plan." }], { ...base, client: nagClient as never, model: "fake", quiet: true, followUps: queue, confirm: async () => true });
+  const redirected = nagRequests[NAG_AFTER_ROUNDS];
+  check("a waiting follow-up holds back the plan reminder", !JSON.stringify(redirected).includes("[plan reminder]"));
+  check("the follow-up is the last message the model reads", redirected.at(-1)?.role === "user" && redirected.at(-1)?.content === framedFollowUp("Stop and summarize instead."));
+  const nudged = nagRequests[NAG_AFTER_ROUNDS + 1]?.at(-1);
+  check("the reminder comes later, as a system-reminder", nudged?.role === "user" && String(nudged.content).startsWith("<system-reminder>") && String(nudged.content).includes("[plan reminder]"));
+  clearTodos();
 } finally { CONFIG.hooks = hooksBefore; }
 finish();
