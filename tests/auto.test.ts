@@ -212,6 +212,12 @@ try {
   const results = retries.filter((m) => m.role === "tool").map((m) => String(m.content));
   check("an executed action resets the run of doubts", results.slice(0, 6).every((r, i) => i === 2 ? r.includes("ok") : r.startsWith("[permission] Auto-blocked")));
   check("the fourth doubt in a row reaches the human, who can approve it", escalations === 1 && fs.existsSync("d6.txt") && !fs.existsSync("d5.txt"));
+  // A prod-guard prompt carries the rules it matched, so the menu can offer to release them.
+  CONFIG.permissions.ask = ["--context prod"];
+  let guardOffer: unknown;
+  await run("run_bash", { command: "printf x > guarded.txt # --context prod" }, mode, { confirm: async (_q, _t, offer) => { guardOffer = offer; return false; } });
+  check("a guarded command's prompt offers its rules for release", JSON.stringify(guardOffer) === JSON.stringify({ guardRules: ["--context prod"] }) && !fs.existsSync("guarded.txt"));
+  CONFIG.permissions.ask = [];
   const judgeOnly = new AutoMode(undefined, { apiKey: "test-key", request: async () => new Response(JSON.stringify(response(0.5, 0))) });
   judgeOnly.recordRequest("Create a file."); // auto mode OFF: the reviewer only runs as the run_bash judge
   const judgeConfirms = confirmCount;
@@ -284,12 +290,12 @@ try {
   const offered = checkPermission("write_file", nested, true);
   const trustTarget = path.join(fs.realpathSync(os.homedir()), ".mini-agent-trust-test");
   check("an outside write offers its own directory for trust", offered.requiresHuman === true && offered.trustDir === trustTarget);
-  const menu = approvalMenu(true, "write_file", offered.trustDir);
+  const menu = approvalMenu(true, "write_file", { trustDir: offered.trustDir });
   check("auto menu offers once, trust and no", menu.options.length === 3 && menu.options[1].includes(trustTarget));
   check("Esc and No never approve or grant", !menu.choose(-1).approved && !menu.choose(2).approved && !CONFIG.autoMode.trustedDirs.includes(trustTarget));
   check("trusting a directory covers its later writes this session", menu.choose(1).approved && checkPermission("write_file", nested, true).decision === "allow");
   check("a reviewer ask offers no trust grant", approvalMenu(true, "run_bash").options.length === 2);
-  check("outside auto mode the grant is still per tool", approvalMenu(false, "write_file", trustTarget).options[1].includes("don't ask again for write_file"));
+  check("outside auto mode the grant is still per tool", approvalMenu(false, "write_file", { trustDir: trustTarget }).options[1].includes("don't ask again for write_file"));
   CONFIG.autoMode.trustedDirs = [os.homedir()];
   check("home in trustedDirs is ignored", checkPermission("write_file", nested, true).requiresHuman === true);
   if (!gitWorkTree(GLOBAL_SETTINGS_PATH)) { // a dotfiles repo already makes it recoverable ground

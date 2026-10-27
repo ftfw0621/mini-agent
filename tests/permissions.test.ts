@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { checkPermission, setPlanMode, gitWorkTree } from "../src/permissions.js"; // the unit under test
+import { checkPermission, setPlanMode, gitWorkTree, approvalMenu, releaseGuards } from "../src/permissions.js"; // the unit under test
 import { CONFIG } from "../src/config.js"; // mutated directly to simulate user settings
 import { check, finish } from "./helpers.js"; // assertions
 
@@ -208,14 +208,30 @@ try {
   check("guard: a hard deny still wins over bypass", checkPermission("run_bash", JSON.stringify({ command: "rm -rf .git" })).decision === "deny");
 } finally { CONFIG.bypassPermissions = false; CONFIG.permissions.ask = []; }
 
-// ---- a prod-guard ask needs a human every time, whatever was granted ----------------
-CONFIG.permissions.ask = ["--context prod"];
+// ---- a prod-guard ask needs a human every time, unless auto mode releases it ----
+CONFIG.permissions.ask = ["--context prod", "aws secretsmanager", "cipherowl-prod", "terraform apply"];
 const allowBefore = [...CONFIG.permissions.allow];
-const bash = (command: string) => checkPermission("run_bash", JSON.stringify({ command }));
+const bash = (command: string, auto = false) => checkPermission("run_bash", JSON.stringify({ command }), auto);
+const secretQuery = "AWS_PROFILE=x aws secretsmanager get-secret-value --secret-id cipherowl-prod-db";
 try {
   CONFIG.permissions.allow.push("tool:run_bash"); // "Yes, and don't ask again for run_bash this session"
   check("guard: a run_bash session grant does not answer a guarded command", bash("kubectl --context prod delete pod web-1").requiresHuman === true);
   check("guard: ...it still answers an ordinary ask", bash("make release").decision === "allow");
-} finally { CONFIG.permissions.ask = []; CONFIG.permissions.allow = allowBefore; }
+  const both = bash(secretQuery, true);
+  check("guard: every matched rule is named, for one approval", JSON.stringify(both.guardRules) === JSON.stringify(["aws secretsmanager", "cipherowl-prod"]) && both.reason.includes('"cipherowl-prod"'));
+  const menu = approvalMenu(true, "run_bash", { guardRules: both.guardRules });
+  check("guard: auto mode offers to release the rules", menu.options.length === 3 && menu.options[1].includes('"aws secretsmanager", "cipherowl-prod"'));
+  check("guard: the default mode offers no release", !approvalMenu(false, "run_bash", { guardRules: both.guardRules }).options.some((o) => o.includes("auto review")));
+  check("guard: choosing it approves this command", menu.choose(1).approved);
+  const released = bash(secretQuery, true);
+  check("guard: a released command goes to auto review, not to a human", released.decision === "ask" && !released.requiresHuman);
+  check("guard: only auto mode honours a release", bash(secretQuery, false).requiresHuman === true);
+  CONFIG.bypassPermissions = true;
+  check("guard: bypass ignores a release too", bash(secretQuery).decision === "ask" && bash(secretQuery).requiresHuman === true);
+  CONFIG.bypassPermissions = false;
+  check("guard: an unreleased rule still needs a human", bash("terraform apply -auto-approve && aws secretsmanager list-secrets", true).requiresHuman === true);
+  releaseGuards(["--context prod"]);
+  check("guard: a released context still meets a hard deny", bash("kubectl --context prod exec web-1 -- cat .env", true).decision === "deny");
+} finally { CONFIG.bypassPermissions = false; CONFIG.permissions.ask = []; CONFIG.permissions.allow = allowBefore; }
 
 finish();

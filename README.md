@@ -97,6 +97,18 @@ auto 模式下，改当前项目、其他 git 仓库或临时目录里的文件�
 
 也可以在确认弹窗里选 "Yes, and trust …/ for this session"，只对本次会话有效。家目录本身和 `/` 不能被信任，`settings.json` 本身永远要你确认。
 
+### prod 保护（permissions.ask）
+
+`permissions.ask` 里列的文字，只要出现在命令或文件路径里，就一定要你确认（不区分大小写，按子串匹配）。auto 审核和 `--dangerously-skip-permissions` 都不能替你放行：
+
+```json
+{
+  "permissions": { "ask": ["--context prod", "cipherowl-aws-prod", "terraform apply"] }
+}
+```
+
+排查 prod 问题时，往往一连串命令都带着同一个标记（比如每条查询都用 `AWS_PROFILE=cipherowl-aws-prod`）。auto 模式下，确认弹窗里可以选 "Yes, and let auto review handle … commands this session"：本次会话里，命中这些规则的命令不再强制找你，改为交给 auto 审核逐条判断。只读的直接执行，删除、部署这类做了就回不去的仍然会问你。这个放行只在 auto 模式下有效，关掉 auto 或用 `--dangerously-skip-permissions` 运行时都会恢复每次确认。
+
 ### 换别的模型
 
 和 API key 放在同一个地方，设置这三个变量就行，各家的 base URL 写在 [.env.example](.env.example) 里：

@@ -5,7 +5,7 @@ import chalk from "chalk"; // terminal colors for status lines
 import { effortMessages, effortParameters, retainsReasoning } from "./effort.js";
 import { toolDefinitions, dispatch, snapshotFileState, restoreFileState, isReadOnlyTool, declaresRecoverable } from "./tools.js"; // the tool manuals + the executor + file-state isolation
 import { classifyError, ApiErrorKind } from "./errors.js"; // failure taxonomy
-import { checkPermission } from "./permissions.js"; // the allow/ask/deny gate
+import { checkPermission, type SessionOffer } from "./permissions.js"; // the allow/ask/deny gate
 import { previewChange } from "./diff.js"; // show the diff before a write so approval is informed
 import { contextTokens, compactHistory, compactThreshold, recordContextUsage, MAX_COMPACTIONS_PER_QUERY, MAX_COMPACT_FAILURES } from "./context.js"; // context management
 import { SUB_AGENT_PROMPT, TEAMMATE_PROMPT } from "./prompt.js"; // the sub-agent + teammate constitutions
@@ -65,7 +65,7 @@ export interface LoopOptions {
   model: string; // which model to call
   signal: AbortSignal; // aborts the in-flight API request on Ctrl+C
   isInterrupted: () => boolean; // polled between steps for a clean stop
-  confirm: (question: string, toolName?: string, trustDir?: string) => Promise<boolean>; // ask the human; resolves false in non-interactive sessions. toolName lets "don't ask again" target the right tool; trustDir lets auto mode trust an outside directory for the session
+  confirm: (question: string, toolName?: string, offer?: SessionOffer) => Promise<boolean>; // ask the human; resolves false in non-interactive sessions. toolName lets "don't ask again" target the right tool; offer: what auto mode may grant for the session (trust an outside directory, release prod-guard rules)
   quiet?: boolean; // suppress all narration (used by the eval harness)
   subAgent?: boolean; // this loop IS a sub-agent: no task tool, no text streaming, indented tool logs
   teammate?: { name: string }; // this loop IS a teammate on a team (Day 38): has send_message + an inbox, reads its mailbox each round, runs bounded; implies subAgent behavior
@@ -817,7 +817,7 @@ async function authorizeCall(call: AssembledCall, opts: LoopOptions): Promise<st
       const preview = previewChange(call.name, call.args);
       if (preview) sink(opts).note(preview.replace(/^/gm, agentIndent(opts)));
     }
-    const ok = autoAllowed || (!(auto && opts.canPrompt === false) && await opts.confirm(`${call.name} (${v.reason}):\n   ${v.summary}${reviewReason ? `\n   ${reviewReason}` : ""}`, call.name, v.trustDir));
+    const ok = autoAllowed || (!(auto && opts.canPrompt === false) && await opts.confirm(`${call.name} (${v.reason}):\n   ${v.summary}${reviewReason ? `\n   ${reviewReason}` : ""}`, call.name, { trustDir: v.trustDir, guardRules: v.guardRules }));
     // Every human prompt in auto mode is an interruption worth counting, with
     // where it came from: the reviewer asked ("review", joinable by reviewId),
     // a doubt outlived the agent's retries ("escalated"), or a rule required a

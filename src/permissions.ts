@@ -19,6 +19,7 @@ export interface Verdict {
   requiresHuman?: boolean; // an ask that no automatic reviewer may approve
   readOnly?: boolean; // false marks an allowed shell command that changes state (plan mode must still block it)
   trustDir?: string; // an outside directory the human may trust for the session instead of approving each write
+  guardRules?: string[]; // the prod-guard rules this ask matched; auto mode may release them for the session
 }
 
 // ---- The no-fly zone --------------------------------------------------------
@@ -380,13 +381,28 @@ export function recoverableShell(command: string): { readOnly: boolean; reason: 
 // Text that always needs a human: a prod context, a deployment verb, a prod
 // path. Checked BEFORE auto review and BEFORE the bypass rewrite, so neither
 // can approve it. Case-insensitive substring, on the whole command or the path.
-function guardHit(text: string): string | null {
-  const haystack = text.toLowerCase();
-  for (const rule of CONFIG.permissions.ask ?? []) {
-    if (rule && haystack.includes(rule.toLowerCase())) return rule;
-  }
-  return null;
+//
+// Investigating prod means many commands carrying the same marker (every query
+// under AWS_PROFILE=cipherowl-aws-prod), so in auto mode the human may release
+// the rules a command matched, for the rest of the session. A released rule no
+// longer forces a human: its commands go to auto review one by one, which
+// still asks for anything irreversible. Only auto mode honours a release: the
+// default mode has no reviewer behind it, and bypass has nothing at all.
+const releasedGuards = new Set<string>();
+export function releaseGuards(rules: readonly string[]): void {
+  for (const rule of rules) releasedGuards.add(rule.toLowerCase());
+  emit("agent_guard_released", { rules: rules.join(",") });
 }
+
+// Every rule the text matches that still needs a human (all of them, so one
+// approval can release them together rather than one prompt per rule).
+function guardHits(text: string, auto: boolean): string[] {
+  const haystack = text.toLowerCase();
+  const honourReleases = auto && !CONFIG.bypassPermissions;
+  return (CONFIG.permissions.ask ?? []).filter((rule) => rule && haystack.includes(rule.toLowerCase()) && !(honourReleases && releasedGuards.has(rule.toLowerCase())));
+}
+const guardVerdict = (rules: string[], summary: string): Verdict =>
+  ({ decision: "ask", requiresHuman: true, reason: `prod guard: ${rules.map((r) => `"${r}"`).join(", ")}`, summary, guardRules: rules });
 
 // Decide what a bash command deserves: deny, ask, or allow.
 function checkBash(command: string, auto = false): Verdict {
@@ -401,8 +417,8 @@ function checkBash(command: string, auto = false): Verdict {
   for (const [re, why] of BASH_DENY) if (re.test(command) && !(readOnly && why === GIT_DIR_RULE)) return { decision: "deny", reason: why, summary };
   for (const d of user.deny)
     if (command.toLowerCase().includes(d.toLowerCase())) return { decision: "deny", reason: `denied by your settings ("${d}")`, summary };
-  const guard = guardHit(command);
-  if (guard) return { decision: "ask", requiresHuman: true, reason: `prod guard: "${guard}"`, summary };
+  const guards = guardHits(command, auto);
+  if (guards.length) return guardVerdict(guards, summary);
   // node/npm/npx, git aliases and tool-wide grants can run arbitrary code.
   // Auto mode must inspect the actual command, including background commands.
   if (auto) {
@@ -593,8 +609,8 @@ function basePermission(toolName: string, argsJson: string, auto: boolean): Verd
       const p = args.path ?? ""; // the file the model wants to change
       const hit = noFlyHit(p); // is it in the no-fly zone?
       if (hit) return { decision: "deny", reason: hit, summary: p }; // hard stop — deny always wins
-      const guard = guardHit(p); // the user's prod guard, applied to the path
-      if (guard) return { decision: "ask", requiresHuman: true, reason: `prod guard: "${guard}"`, summary: p };
+      const guards = guardHits(p, auto); // the user's prod guard, applied to the path
+      if (guards.length) return guardVerdict(guards, p);
       // The user may pre-approve write tools ("tool:edit_file") to skip the
       // prompt — note this runs AFTER the no-fly check, so it widens "ask",
       // never "deny".
@@ -677,11 +693,15 @@ function resolveFileTarget(target: string): string {
 // Both frontends (readline and Ink) offer the same choices and apply the same
 // session grant, so the menu lives next to the rules it widens. Outside auto
 // mode the grant is "don't ask again for this tool"; in auto mode it is "trust
-// this directory", offered only for an outside write. The last option is always
-// "No", and so is -1 (Esc). `granted` is the note to show after a grant.
-export function approvalMenu(auto: boolean, toolName?: string, trustDir?: string): { options: string[]; choose: (i: number) => { approved: boolean; granted?: string } } {
+// this directory" for an outside write, or "let auto review handle these
+// prod-guard rules" for a guarded command. The last option is always "No", and
+// so is -1 (Esc). `granted` is the note to show after a grant.
+export interface SessionOffer { trustDir?: string; guardRules?: readonly string[] }
+export function approvalMenu(auto: boolean, toolName?: string, offer: SessionOffer = {}): { options: string[]; choose: (i: number) => { approved: boolean; granted?: string } } {
+  const { trustDir, guardRules } = offer;
+  const rules = guardRules?.map((r) => `"${r}"`).join(", ");
   const grant = auto
-    ? (trustDir ? `Yes, and trust ${trustDir}/ for this session` : null)
+    ? (trustDir ? `Yes, and trust ${trustDir}/ for this session` : rules ? `Yes, and let auto review handle ${rules} commands this session` : null)
     : (toolName ? `Yes, and don't ask again for ${toolName} this session` : "Yes, and don't ask again this session");
   const options = [auto ? "Yes, once" : "Yes", ...(grant ? [grant] : []), "No — let me tell the agent what to do instead"];
   const choose = (i: number) => {
@@ -690,6 +710,10 @@ export function approvalMenu(auto: boolean, toolName?: string, trustDir?: string
     if (auto && trustDir) {
       CONFIG.autoMode.trustedDirs.push(trustDir);
       return { approved: true, granted: `trusting ${trustDir}/ for this session` };
+    }
+    if (auto && guardRules?.length) {
+      releaseGuards(guardRules);
+      return { approved: true, granted: `${rules} commands go to auto review for the rest of this session` };
     }
     if (!toolName) return { approved: true };
     CONFIG.permissions.allow.push(`tool:${toolName}`); // "don't ask again" → session allowlist

@@ -355,9 +355,9 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
     const hooks: TurnHooks = {
       images: attachments,
       output: sink,
-      confirm: (question, toolName, trustDir) =>
+      confirm: (question, toolName, offer) =>
         new Promise<boolean>((resolve) => {
-          const menu = approvalMenu(autoMode.enabled, toolName, trustDir); // same choices and session grants as the readline REPL
+          const menu = approvalMenu(autoMode.enabled, toolName, offer); // same choices and session grants as the readline REPL
           openSelect(`⚠ approval needed — ${question}`, menu.options, (i) => {
             const { approved, granted } = menu.choose(i);
             note(`${chalk.yellow("⚠ approval")} — ${question.split("\n")[0]} → ${approved ? chalk.green("✓ approved") : chalk.yellow("✗ declined")}${granted ? chalk.dim(` (${granted})`) : ""}`);

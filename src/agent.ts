@@ -21,7 +21,7 @@ import { parseCli, applyCliOptions, readPrintPrompt, CliUsageError } from "./cli
 import { reservePrintOutput, formatPrintResult, streamJsonInit, streamJsonMessage } from "./print.js";
 import { FollowUpQueue } from "./follow-up.js";
 import { reviewDebugCommand } from "./auto-debug.js";
-import { approvalMenu, isPlanMode, setPlanMode } from "./permissions.js"; // plan mode: research-only until the user approves a plan; the shared approval menu
+import { approvalMenu, isPlanMode, setPlanMode, type SessionOffer } from "./permissions.js"; // plan mode: research-only until the user approves a plan; the shared approval menu
 import { undoLast, clearUndo, sessionChanges } from "./undo.js"; // /undo + /diff: take back, or review, this session's writes
 import { clearTodos, getTodos, renderTodos } from "./todos.js"; // the agent's plan: /todos to view, cleared with the conversation
 import { renderDiff } from "./diff.js"; // show what /undo put back / what /diff changed, reusing the Day 21 diff renderer
@@ -436,7 +436,7 @@ async function main() {
   // Fail closed: in a non-interactive session nobody can say yes, so the
   // answer is no. MINI_AGENT_AUTO_APPROVE=1 bypasses the QUESTION, but hard
   // denies were already enforced in permissions.ts before we get here.
-  const confirm = async (question: string, toolName?: string, trustDir?: string): Promise<boolean> => {
+  const confirm = async (question: string, toolName?: string, offer?: SessionOffer): Promise<boolean> => {
     console.log(chalk.yellow(`\n⚠ approval needed — ${question}`)); // always show what is being asked
     if (!autoMode.enabled && process.env.MINI_AGENT_AUTO_APPROVE === "1") {
       console.log(chalk.dim("  auto-approved (MINI_AGENT_AUTO_APPROVE=1)")); // bypass mode — say so out loud
@@ -448,8 +448,8 @@ async function main() {
     }
     // Selecting beats typing: ↑/↓ + Enter instead of "type y/N". The middle
     // option lets the user stop being asked about this tool (or, in auto mode,
-    // this outside directory) for the session.
-    const menu = approvalMenu(autoMode.enabled, toolName, trustDir);
+    // this outside directory or these prod-guard rules) for the session.
+    const menu = approvalMenu(autoMode.enabled, toolName, offer);
     const { approved, granted } = menu.choose(await select(menu.options));
     if (granted) console.log(chalk.dim(`  ${granted}`));
     console.log(approved ? chalk.green("  ✓ approved") : chalk.yellow("  ✗ declined"));
