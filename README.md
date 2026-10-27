@@ -99,13 +99,15 @@ auto 模式下，改当前项目、其他 git 仓库或临时目录里的文件�
 
 ### prod 保护（permissions.ask）
 
-`permissions.ask` 里列的文字，只要出现在命令或文件路径里，就一定要你确认（不区分大小写，按子串匹配）。auto 审核和 `--dangerously-skip-permissions` 都不能替你放行：
+`permissions.ask` 里列的文字，只要出现在命令或文件路径里，就要你确认（不区分大小写，按子串匹配）。auto 审核和 `--dangerously-skip-permissions` 都不能替你放行这类改动：
 
 ```json
 {
   "permissions": { "ask": ["--context prod", "cipherowl-aws-prod", "terraform apply"] }
 }
 ```
+
+保护拦的是改动，不是读。auto 模式和 `--dangerously-skip-permissions` 下，能从命令文本本身确定只读的命令直接执行，不再找你：`kubectl get/describe/logs/top/events/rollout history`、`aws … describe-*/list-*/get-*`、`aws s3 ls`，以及由它们组成的管道和 `for` 循环（可以带 `AWS_PROFILE=…` 或 `export AWS_PROFILE=…`）。判断只靠固定规则，不靠模型。读密钥不算只读：`kubectl get secret`、`aws secretsmanager`、`aws ecr get-login-password`、`--with-decryption` 这类照样要你确认，`port-forward`、`exec`、`delete`、`helm upgrade` 也一样。默认模式（没开 auto）不变，每条都会问。
 
 排查 prod 问题时，往往一连串命令都带着同一个标记（比如每条查询都用 `AWS_PROFILE=cipherowl-aws-prod`）。auto 模式下，确认弹窗里可以选 "Yes, and let auto review handle … commands this session"：本次会话里，命中这些规则的命令不再强制找你，改为交给 auto 审核逐条判断。只读的直接执行，删除、部署这类做了就回不去的仍然会问你。这个放行只在 auto 模式下有效，关掉 auto 或用 `--dangerously-skip-permissions` 运行时都会恢复每次确认。
 

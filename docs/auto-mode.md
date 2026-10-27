@@ -552,3 +552,62 @@ Home and `/` are never offered, and listing them is ignored. The global settings
 file is never trusted ground, since it holds this list. No-fly paths and the prod
 guard are checked first, and trust covers file tools only: shell deletions keep
 the recoverability rules.
+
+## Prod reads pass the guard (2026-10-27)
+
+Across every auto-mode prompt in local telemetry (more than 100, from
+2026-09-15 to 2026-10-27), the human approved each one; none was declined. The
+first session on 0.39.2 still prompted 10 times and silently returned 5 actions
+to the agent. Two of the prompts were the prod guard (`permissions.ask`) on reads:
+`kubectl --context prod get pods/top` and an `aws cloudwatch
+get-metric-statistics` loop. All five returns were reads too: `kubectl rollout
+history`, `get events`, `logs`, `aws sts get-caller-identity`. Those went to the
+semantic reviewer only because the analyzer did not know kubectl or aws. The
+reviewer could not tie them to a request that was only a Slack link.
+
+`recoverableShell` now knows the read verbs of both CLIs:
+
+- `kubectl get/describe/logs/top/events/explain/version/api-resources/cluster-info`
+  (not `dump`), `rollout history|status`, `auth can-i|whoami`, `config
+  current-context|get-contexts|get-clusters`.
+- `aws <service> describe-*|list-*`, `get-*` in services whose get operations
+  only print (cloudwatch, logs, ec2, ecs, eks, iam, sts, s3api, rds, dynamodb…),
+  `s3 ls`, `logs tail|filter-log-events`.
+
+Global flags before the verb are walked by name. An unknown one goes to review,
+because it might take a value and hide the real verb (`kubectl --x get delete
+pod web`). Words up to the verb must be literal. Past it, a word starting with
+`$` goes to review; `Value=table-$t` does not.
+
+Secrets never count as reads: any kubectl word naming a secret,
+`secretsmanager`, `configure`, `sso`, an operation that returns a credential
+(`get-login-password`, `get-session-token`, `eks get-token`), `--with-decryption`
+and `--debug` (it logs the session token). Neither does `get-object`, which
+writes a file.
+
+`for NAME in literal words; do …; done` is understood; its body is judged
+command by command. The list words must not start with `-` or contain spaces, so
+`$NAME` can never become a flag (`for x in -o/f; do sort $x a; done` writes f).
+A `cd` inside a loop goes to review. `AWS_PROFILE`, `AWS_REGION` and
+`AWS_DEFAULT_REGION` may prefix a command or be `export`ed; any other
+assignment still goes to review.
+
+With that proof in hand, `checkBash` lets a provably read-only command past the
+guard whenever no human sees each command: in auto mode and under bypass. The
+proof comes from the deterministic analyzer, never from a model. Changes,
+tunnels (`port-forward`), `exec` and secret reads still need the human. The
+default mode is unchanged, because there the human approves every command
+anyway. The fast-path reason reads "read-only command (the prod guard stops
+changes, not reads)", so `npm run auto:report` counts these separately.
+
+Replaying the 59 guarded shell commands in the monorepo sessions, 22 now pass.
+The other 37 still stop:
+
+- 18 read a secret (`aws secretsmanager get-secret-value`)
+- 5 open a `port-forward`
+- 2 kill processes
+- 1 is `aws sso login`
+- 11 use shell this analyzer does not model: `${pair%%:*}` and `x=$(aws …)`
+  inside loops, and scripts that only mention the guard text
+
+Those still meet the guard, once per rule per session, and then the reviewer.

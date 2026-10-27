@@ -310,6 +310,68 @@ const NPM_READ = new Set(["view", "info", "show", "v", "whoami", "ls", "list", "
 // awk as a filter only: no system(), getline, pipes or output redirection.
 const awkFilter = (words: string[]) => !words.some((w) => /system|getline|fflush|close\s*\(|[|>]/.test(w));
 
+// Cloud CLIs, read verbs only: investigating an incident is mostly these, and
+// each one only queries the cluster or the account. The verb decides, so the
+// words up to it must be literal, and a global flag before it is walked by
+// name: an unknown one might take a value and hide the real verb behind it
+// (`kubectl --x get delete pod web`). Past the verb, a word that starts with
+// $ could expand into flags or a different target, so it goes to review;
+// `Value=table-$t` cannot. Secrets never count as a read: once printed, a
+// secret is in every later request.
+const SECRET_WORD = /secret|password|passwd|token|credential|login|decrypt|private-key|signin/i;
+const KUBECTL_VALUE_FLAGS = new Set(["--context", "--cluster", "--user", "-n", "--namespace", "--kubeconfig", "-s", "--server", "--request-timeout", "--as", "--as-group", "--as-uid", "-v", "--v"]);
+const KUBECTL_READ = new Set(["get", "describe", "logs", "top", "events", "explain", "api-resources", "api-versions", "version", "cluster-info"]);
+const AWS_VALUE_FLAGS = new Set(["--profile", "--region", "--output", "--query", "--endpoint-url", "--color", "--cli-read-timeout", "--cli-connect-timeout", "--ca-bundle", "--cli-binary-format"]);
+const AWS_BOOL_FLAGS = new Set(["--no-paginate", "--no-cli-pager", "--no-verify-ssl", "--no-sign-request"]); // not --debug: it logs the session token
+// describe-* and list-* only print, in every service. Some get-* operations
+// write a local file (glacier get-job-output, kinesisvideo get-media), so get-*
+// counts only in services whose get operations print.
+const AWS_GET_SERVICES = new Set(["cloudwatch", "logs", "ec2", "ecs", "eks", "iam", "sts", "s3api", "rds", "dynamodb", "ce", "ssm", "lambda", "sqs", "sns",
+  "route53", "cloudformation", "autoscaling", "elbv2", "elb", "apigateway", "apigatewayv2", "cloudfront", "elasticache", "acm", "cloudtrail", "events", "athena", "xray"]);
+const AWS_TARGET_ENV = /^(AWS_PROFILE|AWS_REGION|AWS_DEFAULT_REGION)=[\w.-]*$/;
+
+// The words from the verb on, once the global flags before it are walked; null
+// when a flag is unknown or a word that picks the verb is not literal.
+function afterGlobalFlags(args: Word[], valueFlags: Set<string>, boolFlags: Set<string>, verbWords: number): string[] | null {
+  let i = 0;
+  for (; i < args.length && args[i].text.startsWith("-"); i++) {
+    const flag = args[i].text.split("=")[0];
+    if (boolFlags.has(flag)) continue;
+    if (!valueFlags.has(flag)) return null;
+    if (!args[i].text.includes("=")) i++; // `--context prod`: skip the value too
+  }
+  if (args.slice(0, i).some((w) => w.dynamic || w.glob)) return null; // `--context $C` could expand into a verb
+  const rest = args.slice(i);
+  if (rest.slice(0, verbWords).some((w) => w.dynamic || w.glob) || rest.some((w) => w.dynamic && w.text.startsWith("$"))) return null;
+  return rest.map((w) => w.text);
+}
+
+function kubectlEffect(args: Word[]): "read" | null {
+  const words = afterGlobalFlags(args, KUBECTL_VALUE_FLAGS, new Set(["--insecure-skip-tls-verify"]), 2);
+  if (!words || args.some((w) => /secret/i.test(w.text))) return null; // `get secret -o yaml`, `--raw …/secrets`
+  const [verb, sub] = words;
+  if (KUBECTL_READ.has(verb)) return verb === "cluster-info" && sub === "dump" ? null : "read"; // dump can write a directory
+  if (verb === "rollout") return sub === "history" || sub === "status" ? "read" : null;
+  if (verb === "auth") return sub === "can-i" || sub === "whoami" ? "read" : null;
+  if (verb === "config") return ["current-context", "get-contexts", "get-clusters"].includes(sub) ? "read" : null; // never `config view`: --raw prints keys
+  return null;
+}
+
+// `aws <service> <operation>`: describe-*, list-* and (see above) get-* only
+// query. Not secretsmanager or configure at all, nor an operation that hands
+// back a credential (get-login-password, get-session-token, eks get-token),
+// nor get-object, which writes its output to a local file.
+function awsEffect(args: Word[]): "read" | null {
+  const words = afterGlobalFlags(args, AWS_VALUE_FLAGS, AWS_BOOL_FLAGS, 2);
+  if (!words) return null;
+  if (words.length === 1 && words[0] === "--version") return "read";
+  const [service, op = ""] = words;
+  if (["secretsmanager", "configure", "sso", "sso-oidc"].includes(service) || SECRET_WORD.test(op) || words.some((w) => w === "--with-decryption" || w === "--debug")) return null;
+  if (/^(describe|list)-[a-z0-9-]+$/.test(op) || (/^get-[a-z0-9-]+$/.test(op) && AWS_GET_SERVICES.has(service) && !op.startsWith("get-object"))) return "read";
+  if ((service === "s3" && op === "ls") || (service === "logs" && (op === "tail" || op === "filter-log-events")) || op === "help") return "read";
+  return null;
+}
+
 // null → review. Otherwise the command is recoverable, with readOnly telling
 // plan mode whether it changes anything at all.
 export function recoverableShell(command: string): { readOnly: boolean; reason: string } | null {
@@ -332,7 +394,20 @@ export function recoverableShell(command: string): { readOnly: boolean; reason: 
   if (!segments?.length) return null;
   let cwd = root; // `cd` changes where later segments act
   let readOnly = true;
-  for (const [cmd, ...args] of segments) {
+  // `for t in a b; do …; done` arrives as segments `for t in a b`, `do …`,
+  // `done`: the body is ordinary commands, judged like any other. A `cd` in it
+  // runs once per pass, which the linear cwd tracking above cannot follow.
+  let loops = 0;
+  for (let [cmd, ...args] of segments) {
+    if (loops > 0 && cmd.text === "do" && !cmd.dynamic) {
+      if (!args.length) continue;
+      [cmd, ...args] = args;
+    }
+    // Which account and region to read from, the way prod queries are written
+    // (`AWS_PROFILE=… aws …`, `export AWS_PROFILE=…;`). Only these: PATH,
+    // PAGER, LD_PRELOAD and the like change what actually runs.
+    while (args.length && AWS_TARGET_ENV.test(cmd.text) && !cmd.dynamic) [cmd, ...args] = args;
+    if (cmd.text === "export" && args.length && args.every((w) => AWS_TARGET_ENV.test(w.text) && !w.dynamic)) continue;
     if (cmd.dynamic || cmd.glob || cmd.text.includes("=")) return null; // VAR=value prefixes change behavior
     const words = args.map((w) => w.text);
     // Reading is recoverable, leaking is not: once a secret is printed it is in
@@ -340,8 +415,16 @@ export function recoverableShell(command: string): { readOnly: boolean; reason: 
     if (words.some((w) => SECRET_FILE_RE.test(w) || /(^|\/)(\.aws|\.gnupg|\.kube|\.docker|\.netrc|\.npmrc|\.pypirc)(\/|$)|credentials|\.git\/config/.test(w))) return null;
     let effect: "read" | "write" | null;
     switch (cmd.text) {
+      case "for": // the list is literal and cannot split or pass as a flag: `for x in -o/f; do sort $x a; done` writes f
+        if (!/^[A-Za-z_]\w*$/.test(words[0] ?? "") || words[1] !== "in" || args.slice(2).some((w) => w.dynamic || w.glob || !/^[\w.:/@%+,=-]+$/.test(w.text) || w.text.startsWith("-"))) return null;
+        loops++;
+        continue;
+      case "done":
+        if (loops === 0 || args.length) return null;
+        loops--;
+        continue;
       case "cd": {
-        if (args.length > 1 || args.some((w) => w.dynamic || w.glob) || words[0] === "-") return null;
+        if (loops > 0 || args.length > 1 || args.some((w) => w.dynamic || w.glob) || words[0] === "-") return null;
         const target = words[0] ?? "~";
         cwd = target === "~" || target.startsWith("~/") ? path.join(os.homedir(), target.slice(1)) : path.resolve(cwd, target);
         continue;
@@ -364,6 +447,8 @@ export function recoverableShell(command: string): { readOnly: boolean; reason: 
       }
       case "git": effect = gitEffect(words, gitWorkTree(cwd) !== null); break;
       case "gh": effect = ghEffect(words); break;
+      case "kubectl": effect = kubectlEffect(args); break;
+      case "aws": effect = awsEffect(args); break;
       case "npm": effect = NPM_READ.has(words[0] ?? "") || (words.length === 1 && words[0] === "--version") ? "read" : null; break;
       case "awk": effect = awkFilter(words) ? "read" : null; break;
       case "command": effect = words[0] === "-v" && words.length === 2 ? "read" : null; break; // `command -v gh`: is it installed?
@@ -374,13 +459,15 @@ export function recoverableShell(command: string): { readOnly: boolean; reason: 
     if (!effect) return null;
     if (effect === "write") readOnly = false;
   }
+  if (loops !== 0) return null; // an unclosed loop is not a command we understand
   return readOnly ? { readOnly, reason: "read-only command" } : { readOnly, reason: "recoverable: git can undo it, or it only removes gitignored or temp files" };
 }
 
 // ---- The user's prod guard (permissions.ask) ----------------------------------
-// Text that always needs a human: a prod context, a deployment verb, a prod
-// path. Checked BEFORE auto review and BEFORE the bypass rewrite, so neither
-// can approve it. Case-insensitive substring, on the whole command or the path.
+// Text that needs a human: a prod context, a deployment verb, a prod path.
+// Checked BEFORE auto review and BEFORE the bypass rewrite, so neither can
+// approve it. Case-insensitive substring, on the whole command or the path.
+// In auto mode and bypass a provably read-only command passes it (checkBash).
 //
 // Investigating prod means many commands carrying the same marker (every query
 // under AWS_PROFILE=cipherowl-aws-prod), so in auto mode the human may release
@@ -413,16 +500,24 @@ function checkBash(command: string, auto = false): Verdict {
   // Reading inside .git (hook listings, `-not -path '*/.git/*'` filters) harms
   // nothing, so the .git rule spares provably read-only commands; .git/config
   // (it may embed tokens) is never read-only there. .env/.ssh stay absolute.
-  const readOnly = recoverableShell(command)?.readOnly === true;
+  const recoverable = recoverableShell(command);
+  const readOnly = recoverable?.readOnly === true;
   for (const [re, why] of BASH_DENY) if (re.test(command) && !(readOnly && why === GIT_DIR_RULE)) return { decision: "deny", reason: why, summary };
   for (const d of user.deny)
     if (command.toLowerCase().includes(d.toLowerCase())) return { decision: "deny", reason: `denied by your settings ("${d}")`, summary };
+  // Without a human per command (auto, bypass), the guard stops changes, not
+  // reads: a command the analyzer proves read-only (`kubectl --context prod
+  // logs …`) cannot touch prod. Proven means the deterministic rules above,
+  // never a model's opinion, and they never count a secret read as read-only,
+  // so `aws secretsmanager …` still stops. The default mode shows the human
+  // every command anyway, so there the guard keeps its old meaning.
   const guards = guardHits(command, auto);
-  if (guards.length) return guardVerdict(guards, summary);
+  const readsPastGuard = auto && readOnly && guards.length > 0;
+  if (guards.length && !readsPastGuard) return guardVerdict(guards, summary);
   // node/npm/npx, git aliases and tool-wide grants can run arbitrary code.
   // Auto mode must inspect the actual command, including background commands.
   if (auto) {
-    const recoverable = recoverableShell(command);
+    if (readsPastGuard) return { decision: "allow", reason: "read-only command (the prod guard stops changes, not reads)", summary, readOnly: true };
     return recoverable ? { decision: "allow", reason: recoverable.reason, summary, readOnly: recoverable.readOnly }
       : { decision: "ask", reason: "auto mode reviews commands whose effects it cannot establish", summary };
   }

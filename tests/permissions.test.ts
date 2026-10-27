@@ -138,6 +138,28 @@ for (const command of [
   "gh pr view 18011 --json state", "gh pr checks 1 2>&1 | awk -F'\\t' '$2!=\"pass\"' | head", "gh api repos/o/r/pulls/1", "gh run list", "gh auth status",
   "npm view agent-from-zero versions --json", "npm whoami", "git worktree list",
 ]) check(`auto: common read runs unreviewed — ${command}`, auto(command).decision === "allow" && auto(command).readOnly === true);
+// Cloud CLIs: read verbs run unreviewed; anything that changes, tunnels or
+// prints a secret goes to review. So do loops whose variable could pass as a flag.
+for (const command of [
+  "kubectl --context dev get pods -n x -o wide 2>&1 | head -20", "kubectl -n x logs deploy/web --since=90m --tail=40",
+  "kubectl rollout history deployment/web -n x", "kubectl top pods -n x; kubectl get events -n x --sort-by=.lastTimestamp",
+  "aws sts get-caller-identity --query Arn --output text", "aws --profile p ec2 describe-instances --region us-east-1",
+  "AWS_PROFILE=p aws cloudwatch get-metric-statistics --namespace AWS/EC2 --dimensions Name=InstanceId,Value=i-1",
+  "export AWS_PROFILE=p; aws s3 ls s3://bucket",
+  "for t in a b-c d.e; do\n  echo \"== $t ==\"\n  aws cloudwatch get-metric-statistics --dimensions Name=TableName,Value=prod-$t \\\n    --query 'x[?Sum>`0`]' --output text 2>&1 | head -10\ndone",
+  "for d in a b; do for m in x y; do echo $d $m; done; done",
+]) check(`auto: cloud read runs unreviewed — ${command.split("\n")[0]}`, auto(command).decision === "allow" && auto(command).readOnly === true);
+for (const command of [
+  "kubectl delete pod web", "kubectl rollout restart deploy/web", "kubectl exec web -- ls", "kubectl port-forward svc/x 1:1",
+  "kubectl get secret db -o yaml", "kubectl describe secrets", "kubectl get --raw /api/v1/namespaces/x/secrets", "kubectl config view --raw",
+  "kubectl cluster-info dump --output-directory=/tmp/x", "kubectl --unknown get delete pod x", "kubectl --context $C get pods", "kubectl get $KIND",
+  "aws secretsmanager list-secrets", "aws ecr get-login-password", "aws sts get-session-token", "aws eks get-token --cluster-name x",
+  "aws ssm get-parameter --name x --with-decryption", "aws s3 cp s3://b/k .", "aws s3api get-object --bucket b --key k out",
+  "aws glacier get-job-output --account-id - --vault-name v --job-id j out.tar", "aws ec2 terminate-instances --instance-ids i-1",
+  "aws configure get aws_secret_access_key", "aws ec2 describe-instances --debug", "PATH=/tmp aws sts get-caller-identity", "export PATH=/tmp; ls",
+  "for t in a b; do cd x; ls; done", "for t in a b; do rm -rf $t; done", "for x in -o/tmp/y; do sort $x a; done",
+  "for x in \"a -o/tmp/y\"; do sort $x a; done", "for f in *.log; do cat $f; done", "for t in a; do ls", "done",
+]) check(`auto: cloud change, secret or opaque loop goes to review — ${command}`, auto(command).decision === "ask");
 for (const command of ["gh pr create --title x --body y", "gh issue comment 3 --body ok", "git worktree remove ../wt", "git worktree prune"])
   check(`auto: additive/recoverable write runs unreviewed — ${command}`, auto(command).decision === "allow" && auto(command).readOnly === false);
 for (const command of [
@@ -233,5 +255,27 @@ try {
   releaseGuards(["--context prod"]);
   check("guard: a released context still meets a hard deny", bash("kubectl --context prod exec web-1 -- cat .env", true).decision === "deny");
 } finally { CONFIG.bypassPermissions = false; CONFIG.permissions.ask = []; CONFIG.permissions.allow = allowBefore; }
+
+// ---- without a human per command, the guard stops changes, not reads ------------
+// Investigating prod is mostly reads. Proven read-only (the deterministic
+// analyzer, never a model) passes the guard in auto mode and bypass; a change,
+// a tunnel or a secret read still needs the human. The default mode is unchanged.
+CONFIG.permissions.ask = ["--context=prod", "cipherowl-aws-prod", "aws secretsmanager", "helm upgrade"];
+try {
+  const logs = bash("kubectl --context=prod logs deploy/web -n x --since=1h 2>&1 | tail -40", true);
+  check("guard: a read-only prod command runs in auto mode", logs.decision === "allow" && logs.readOnly === true && !logs.requiresHuman, `${logs.decision} (${logs.reason})`);
+  check("guard: ...and says why it passed", logs.reason.includes("prod guard stops changes"), logs.reason);
+  check("guard: a read-only prod aws loop runs in auto mode", bash("export AWS_PROFILE=cipherowl-aws-prod; for t in a b; do aws ec2 describe-volumes --filters Name=tag:t,Values=$t; done", true).decision === "allow");
+  for (const command of ["kubectl --context=prod delete pod web-1", "kubectl --context=prod port-forward svc/db 5432:5432", "kubectl --context=prod get secret db -o yaml",
+    "AWS_PROFILE=cipherowl-aws-prod aws secretsmanager list-secrets", "AWS_PROFILE=cipherowl-aws-prod aws ecr get-login-password", "helm upgrade web chart/"])
+    check(`guard: a prod change or secret read still needs a human — ${command}`, bash(command, true).requiresHuman === true);
+  check("guard: the default mode still asks for a prod read", bash("kubectl --context=prod get pods", false).requiresHuman === true);
+  CONFIG.bypassPermissions = true;
+  check("guard: bypass runs a prod read", bash("kubectl --context=prod get pods").decision === "allow");
+  check("guard: bypass still stops a prod change", bash("kubectl --context=prod delete pod web-1").requiresHuman === true);
+  CONFIG.bypassPermissions = false;
+  setPlanMode(true);
+  check("guard: plan mode allows a prod read", bash("kubectl --context=prod get pods", true).decision === "allow");
+} finally { CONFIG.bypassPermissions = false; CONFIG.permissions.ask = []; setPlanMode(false); }
 
 finish();
