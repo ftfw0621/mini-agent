@@ -208,4 +208,14 @@ try {
   check("guard: a hard deny still wins over bypass", checkPermission("run_bash", JSON.stringify({ command: "rm -rf .git" })).decision === "deny");
 } finally { CONFIG.bypassPermissions = false; CONFIG.permissions.ask = []; }
 
+// ---- a prod-guard ask needs a human every time, whatever was granted ----------------
+CONFIG.permissions.ask = ["--context prod"];
+const allowBefore = [...CONFIG.permissions.allow];
+const bash = (command: string) => checkPermission("run_bash", JSON.stringify({ command }));
+try {
+  CONFIG.permissions.allow.push("tool:run_bash"); // "Yes, and don't ask again for run_bash this session"
+  check("guard: a run_bash session grant does not answer a guarded command", bash("kubectl --context prod delete pod web-1").requiresHuman === true);
+  check("guard: ...it still answers an ordinary ask", bash("make release").decision === "allow");
+} finally { CONFIG.permissions.ask = []; CONFIG.permissions.allow = allowBefore; }
+
 finish();

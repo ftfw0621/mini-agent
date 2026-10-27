@@ -617,7 +617,8 @@ function basePermission(toolName: string, argsJson: string, auto: boolean): Verd
       // upgrades an ASK to ALLOW — but a hard DENY (rm -rf /, .git, .env…) always
       // stands. Convenience never overrides the no-fly rules. A grant for either
       // shell tool covers the other: the command is what was vouched for.
-      if (!auto && verdict.decision === "ask" && (CONFIG.permissions.allow.includes(`tool:${toolName}`) || CONFIG.permissions.allow.includes("tool:run_bash"))) {
+      // Nor a prod-guard ask: that one needs a human every time, grant or not.
+      if (!auto && verdict.decision === "ask" && !verdict.requiresHuman && (CONFIG.permissions.allow.includes(`tool:${toolName}`) || CONFIG.permissions.allow.includes("tool:run_bash"))) {
         return { decision: "allow", reason: "bash pre-approved for this session", summary: verdict.summary };
       }
       return verdict;
