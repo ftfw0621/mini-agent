@@ -1,5 +1,5 @@
 import path from "node:path"; // locate the mock server
-import { connectMcpServers, reloadMcpServers, listMcpServers, mcpProblems, mcpActionsFor, mcpServerDetails, runMcpAction, disableMcpServer } from "../src/mcp.js"; // the unit under test
+import { connectMcpServers, reloadMcpServers, listMcpServers, mcpProblems, mcpActionsFor, mcpServerDetails, runMcpAction, disableMcpServer, MCP_CONNECT_RETRY } from "../src/mcp.js"; // the unit under test
 import { CONFIG } from "../src/config.js"; // inject a server (the test seam)
 import { tools, dispatch } from "../src/tools.js"; // verify registration + execution
 import { checkPermission } from "../src/permissions.js"; // verify the gate treats MCP tools as "ask"
@@ -61,14 +61,20 @@ check("empty map unregisters every mcp tool", !Object.keys(tools).some((n) => n.
 // ---- background connect (the Ink UI's startup): never blocks, reports problems -----------
 {
   CONFIG.mcpServers = { calc, dead: { url: "http://127.0.0.1:1/mcp" } }; // port 1: connection refused
+  const retryDelays = MCP_CONNECT_RETRY.delaysMs;
+  MCP_CONNECT_RETRY.delaysMs = [150, 150]; // a refused connection is a network failure: retried, quickly here
   const started = Date.now();
   const stop = await connectMcpServers({ background: true });
   check("background connect returns immediately", Date.now() - started < 200);
   check("servers start out pending", mcpProblems().pending === 2);
   check("the pending server's tools are not there yet", !("mcp__calc__add" in tools));
   check("a working server connects in the background", await waitFor(() => "mcp__calc__add" in tools));
+  const dead = () => listMcpServers().find((s) => s.name === "dead")!;
+  check("an unreachable server keeps connecting while it retries", await waitFor(() => !!dead().error) && dead().status === "pending");
+  check("the network cause is kept in the error", /fetch failed \(.+\)/.test(dead().error ?? ""), dead().error); // port 1: "bad port"; a closed port: ECONNREFUSED
   check("a failing server is reported for the red badge", await waitFor(() => mcpProblems().failed.join() === "dead"));
   check("nothing left pending", mcpProblems().pending === 0);
+  MCP_CONNECT_RETRY.delaysMs = retryDelays;
 
   // The /mcp server screen, Claude Code's fields and actions.
   const info = listMcpServers().find((s) => s.name === "calc")!;

@@ -160,6 +160,7 @@ const playBrowser = (authUrl: string) => {
   const stored = JSON.parse(fs.readFileSync(STORE, "utf8"));
   check("store: keeps what a refresh needs", stored.fake?.refreshToken === "ref-1" && stored.fake?.tokenEndpoint === `${origin}/token` && stored.fake?.resource === `${origin}/mcp`);
   check("store: written to the scratch path, not ~/.config", STORE.startsWith(os.tmpdir()));
+  check("store: bearer tokens are readable by their owner only (0600)", (fs.statSync(STORE).mode & 0o777) === 0o600);
 }
 
 // ---- the tool works; then the token expires mid-session → silent refresh + retry ------

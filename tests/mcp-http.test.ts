@@ -1,5 +1,5 @@
 import http from "node:http"; // stand up a real MCP-over-HTTP server for the test
-import { connectMcpServers, parseSseData } from "../src/mcp.js"; // unit under test
+import { connectMcpServers, parseSseData, listMcpServers, MCP_CONNECT_RETRY } from "../src/mcp.js"; // unit under test
 import { CONFIG } from "../src/config.js"; // inject the server URL (the test seam)
 import { tools, dispatch } from "../src/tools.js"; // verify registration + execution
 import { check, checkContains, finish } from "./helpers.js"; // assertions
@@ -101,6 +101,35 @@ checkContains("a reply that carries a notification still returns its result", aw
 check("the inline notification is delivered too", await waitFor(() => "mcp__calc__div" in tools));
 
 disconnect(); // best-effort DELETE the session
+
+// ---- a flaky network: the first connects are dropped, a retry gets through --------------
+// What a slow proxy does to a TLS handshake: the socket closes without an answer.
+// The background startup retries instead of leaving the server failed all session.
+let drops = 2;
+const flaky = http.createServer((req, res) => {
+  if (drops > 0) { drops--; req.socket.destroy(); return; }
+  let body = "";
+  req.on("data", (c) => (body += c));
+  req.on("end", () => {
+    const msg = body ? JSON.parse(body) : {};
+    if (msg.id === undefined) return void res.writeHead(202).end();
+    if (msg.method === "initialize") return sse(res, { jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2024-11-05", capabilities: {} } });
+    return sse(res, { jsonrpc: "2.0", id: msg.id, result: { tools: [{ name: "ping", description: "Ping.", inputSchema: { type: "object", properties: {} } }] } });
+  });
+});
+await new Promise<void>((resolve) => flaky.listen(0, "127.0.0.1", resolve));
+const retryDelays = MCP_CONNECT_RETRY.delaysMs;
+MCP_CONNECT_RETRY.delaysMs = [50, 50, 50];
+CONFIG.mcpServers = { flaky: { url: `http://127.0.0.1:${(flaky.address() as { port: number }).port}/mcp` } };
+const stopFlaky = await connectMcpServers({ background: true });
+const flakyInfo = () => listMcpServers().find((s) => s.name === "flaky")!;
+check("a dropped connect is retried, not left failed", await waitFor(() => flakyInfo().status === "connected") && drops === 0, flakyInfo().status);
+check("the retried server's tools work", "mcp__flaky__ping" in tools && !flakyInfo().error);
+stopFlaky();
+MCP_CONNECT_RETRY.delaysMs = retryDelays;
+flaky.closeAllConnections();
+await new Promise<void>((resolve) => flaky.close(() => resolve()));
+
 CONFIG.mcpServers = {}; // reset for any suite that follows
 (stream as http.ServerResponse | null)?.end(); // assigned in the request handler — TS can't see that
 server.closeAllConnections();

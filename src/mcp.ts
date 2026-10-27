@@ -39,13 +39,17 @@ import { emit } from "./telemetry.js"; // observability
 const INIT_TIMEOUT_MS = 15_000; // a server that doesn't initialize in 15s is skipped
 const CALL_TIMEOUT_MS = 60_000; // a single tool call may take this long
 const OAUTH_CALLBACK_TIMEOUT_MS = 5 * 60_000; // how long the local callback waits for the browser
+// A startup connect that dies on the network (a dropped TLS handshake through a
+// proxy, a timeout, a blip) is retried after these pauses before the server is
+// marked failed; it shows as "connecting…" meanwhile. Mutable for the tests.
+export const MCP_CONNECT_RETRY = { delaysMs: [2_000, 5_000, 10_000] };
 const PROTOCOL_VERSION = "2024-11-05"; // the MCP revision we speak in the handshake
 const CLIENT_INFO = { name: "mini-agent", version: "0" }; // who we say we are in the handshake
 
 interface JsonRpcResponse {
   id: number; // matches the request
   result?: { tools?: McpToolSpec[]; content?: McpContent[]; isError?: boolean; protocolVersion?: string; capabilities?: Record<string, unknown> & { tools?: { listChanged?: boolean } } }; // success payload
-  error?: { message: string }; // failure
+  error?: { message: string; network?: boolean }; // failure; network = the request never got an answer (worth retrying)
 }
 interface JsonRpcRequest {
   jsonrpc: "2.0";
@@ -87,6 +91,16 @@ export class NeedsAuthError extends Error implements AuthChallenge {
       if (m[1] === "resource_metadata") this.resourceMetadataUrl = m[2];
       if (m[1] === "scope") this.scope = m[2];
     }
+  }
+}
+
+// The request never reached the server or its answer never came back: no
+// connection, a dropped TLS handshake, a timeout. Unlike an error the server
+// returns, trying again later can succeed.
+export class McpNetworkError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "McpNetworkError";
   }
 }
 
@@ -314,7 +328,11 @@ class HttpTransport implements Transport {
       return msg ?? { id: payload.id, error: { message: `MCP request '${payload.method}' returned no response` } };
     } catch (err) {
       if (err instanceof NeedsAuthError) throw err; // propagate so the registry can mark needs-auth
-      return { id: payload.id, error: { message: `MCP HTTP request '${payload.method}' failed: ${(err as Error).message}` } };
+      // fetch says only "fetch failed"; the reason (UND_ERR_CONNECT_TIMEOUT,
+      // ECONNRESET, ENOTFOUND…) is on its cause, and it is what you need to know.
+      const cause = (err as { cause?: { code?: string; message?: string } }).cause;
+      const why = cause?.code ?? cause?.message;
+      return { id: payload.id, error: { message: `MCP HTTP request '${payload.method}' failed: ${(err as Error).message}${why ? ` (${why})` : ""}`, network: true } };
     }
   }
 
@@ -365,7 +383,7 @@ class McpClient {
   // The MCP startup dance: initialize → initialized → list tools.
   async start(): Promise<McpToolSpec[]> {
     const init = await this.request("initialize", { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: CLIENT_INFO }, INIT_TIMEOUT_MS);
-    if (init.error) throw new Error(init.error.message); // server refused to initialize
+    if (init.error) throw init.error.network ? new McpNetworkError(init.error.message) : new Error(init.error.message); // unreachable, or the server refused to initialize
     this.protocolVersion = init.result?.protocolVersion;
     this.capabilities = Object.keys(init.result?.capabilities ?? {});
     this.transport.notify("notifications/initialized", {}); // tell the server we're ready
@@ -377,7 +395,7 @@ class McpClient {
 
   async listTools(): Promise<McpToolSpec[]> {
     const list = await this.request("tools/list", {}, INIT_TIMEOUT_MS);
-    if (list.error) throw new Error(list.error.message);
+    if (list.error) throw list.error.network ? new McpNetworkError(list.error.message) : new Error(list.error.message);
     return list.result?.tools ?? [];
   }
 
@@ -458,16 +476,22 @@ interface TokenResponse {
   error_description?: string;
 }
 const expiryFrom = (t: TokenResponse): number | undefined => (typeof t.expires_in === "number" ? Date.now() + t.expires_in * 1000 : undefined);
+// The file holds bearer tokens, so only its owner may read it (0600): set on
+// every write, and tightened on read for a store created before this rule or
+// copied over from another machine.
 function readOAuthStore(): OAuthStore {
   try {
-    return JSON.parse(fs.readFileSync(OAUTH_STORE_PATH, "utf8")) as OAuthStore;
+    const store = JSON.parse(fs.readFileSync(OAUTH_STORE_PATH, "utf8")) as OAuthStore;
+    try { fs.chmodSync(OAUTH_STORE_PATH, 0o600); } catch { /* not ours to fix (read-only mount) — still usable */ }
+    return store;
   } catch {
     return {};
   }
 }
 function writeOAuthStore(store: OAuthStore): void {
   fs.mkdirSync(path.dirname(OAUTH_STORE_PATH), { recursive: true });
-  fs.writeFileSync(OAUTH_STORE_PATH, JSON.stringify(store, null, 2) + "\n");
+  fs.writeFileSync(OAUTH_STORE_PATH, JSON.stringify(store, null, 2) + "\n", { mode: 0o600 });
+  fs.chmodSync(OAUTH_STORE_PATH, 0o600); // mode applies only when the file is created
 }
 const oauthStore = readOAuthStore();
 
@@ -798,8 +822,10 @@ function markNeedsAuth(name: string, challenge: NeedsAuthError): void {
 
 // Connect a single configured server and register its tools. Updates the
 // registry with the live status. Used by connectMcpServers() at startup and by
-// /mcp reconnect / enable / auth.
-async function connectOne(name: string, retried = false, quiet = false): Promise<void> {
+// /mcp reconnect / enable / auth. `retryDelays`: pauses before retrying a
+// network failure (background startup only — an explicit /mcp action answers
+// at once, and its user can simply run it again).
+async function connectOne(name: string, retried = false, quiet = false, retryDelays: readonly number[] = []): Promise<void> {
   const entry = entryFor(name);
   const attempt = {}; // this connect's identity (see the guard after the handshake)
   entry.attempt = attempt;
@@ -839,6 +865,15 @@ async function connectOne(name: string, retried = false, quiet = false): Promise
       // A stale token (expired early, revoked): one refresh + retry before giving up.
       if (!retried && stored?.refreshToken && (await refreshAccessToken(name))) return connectOne(name, true, quiet);
       markNeedsAuth(name, err);
+    } else if (err instanceof McpNetworkError && retryDelays.length) {
+      // Unreachable this time: stay "connecting" and try again shortly, unless
+      // the user disabled or reconnected it meanwhile (a newer attempt).
+      entry.status = "pending";
+      entry.error = (err as Error).message;
+      await new Promise((resolve) => setTimeout(resolve, retryDelays[0]).unref());
+      const now = registry.get(name); // re-read: /mcp may have changed it while we waited
+      if (now !== entry || now.attempt !== attempt || now.status === "disabled") return;
+      return connectOne(name, retried, quiet, retryDelays.slice(1));
     } else {
       entry.status = "failed";
       entry.error = (err as Error).message;
@@ -898,7 +933,7 @@ export async function connectMcpServers(options: { background?: boolean } = {}):
   const entries = Object.keys(CONFIG.mcpServers); // configured server names
   if (options.background) {
     for (const name of entries) entryFor(name).status = "pending";
-    for (const name of entries) void connectOne(name, false, true); // fire and forget; connectOne never throws
+    for (const name of entries) void connectOne(name, false, true, MCP_CONNECT_RETRY.delaysMs); // fire and forget; connectOne never throws
   } else {
     for (const name of entries) await connectOne(name); // sequential: a slow start doesn't starve the next one
   }
