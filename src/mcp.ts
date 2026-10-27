@@ -609,8 +609,46 @@ export async function discoverOAuth(serverUrl: string, challenge: AuthChallenge 
 // DCR case, where we register whatever we got); a fixed port is what a
 // pre-registered client demands. The code promise is armed on creation, BEFORE
 // the browser opens, so a fast callback can't race us.
+// Logins waiting for their browser redirect, by OAuth state. The loopback
+// listener is one way in; a pasted redirect address is the other, for a browser
+// on another machine (SSH, a remote box) whose "localhost" is not this one.
+const waitingLogins = new Map<string, { accept: (url: URL) => void; cancel: () => void }>();
+
+export const oauthLoginPending = (): boolean => waitingLogins.size > 0;
+
+// Esc while a login waits: give up on it (the flow rejects, its listener closes).
+export function cancelOAuthLogins(): void {
+  for (const login of [...waitingLogins.values()]) login.cancel();
+}
+
+// The user pasted the address the browser landed on — on its own, or inside a
+// sentence ("curl this: http://localhost:37831/callback?code=…"). Hand it to the
+// login waiting for its state, exactly as if the browser had reached us.
+// "stale": a callback address no waiting login owns (an older attempt, a typo);
+// "none": no callback address in the text at all.
+export function deliverOAuthRedirect(text: string): "delivered" | "stale" | "none" {
+  const found = /(?:https?:\/\/)?(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?\/callback\?[^\s"'<>]+/.exec(text);
+  if (!found) return "none";
+  let url: URL;
+  try {
+    url = new URL(found[0].replace(/[)\]}。，、；,;!！?？]+$/, "").replace(/^(?!https?:\/\/)/, "http://")); // trailing sentence punctuation is not part of it
+  } catch {
+    return "none";
+  }
+  const login = waitingLogins.get(url.searchParams.get("state") ?? "");
+  if (!login) return "stale";
+  login.accept(url);
+  return "delivered";
+}
+
 async function listenForCallback(port: number, state: string): Promise<{ port: number; close: () => void; code: Promise<string> }> {
   let settle: { resolve: (code: string) => void; reject: (err: Error) => void } | undefined;
+  // The redirect's verdict, however it arrives (the browser, or a pasted address).
+  const accept = (url: URL) => {
+    const code = url.searchParams.get("code");
+    if (code) settle?.resolve(code);
+    else settle?.reject(new Error(`OAuth callback did not include a code: ${url.searchParams.get("error_description") ?? url.searchParams.get("error") ?? "unknown error"}`));
+  };
   const handler = (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     res.setHeader("connection", "close"); // one-shot listener: a kept-alive socket would deliver a LATER flow's callback (same fixed port) to this dead handler
@@ -619,11 +657,7 @@ async function listenForCallback(port: number, state: string): Promise<{ port: n
     res.end("<h1>Connected</h1><p>You can close this window and return to the terminal.</p>");
     // Settle only once the page has been flushed: settling tears the servers
     // down, and tearing down before the write lands would blank the browser tab.
-    res.once("finish", () => {
-      const code = url.searchParams.get("code");
-      if (code) settle?.resolve(code);
-      else settle?.reject(new Error(`OAuth callback did not include a code: ${url.searchParams.get("error_description") ?? url.searchParams.get("error") ?? "unknown error"}`));
-    });
+    res.once("finish", () => accept(url));
   };
   const v4: Server = createServer(handler);
   const bound = await new Promise<number>((resolve, reject) => {
@@ -639,6 +673,7 @@ async function listenForCallback(port: number, state: string): Promise<{ port: n
     v6.listen(bound, "::1", () => resolve());
   });
   const close = () => {
+    waitingLogins.delete(state);
     // Release the port for real: close() alone leaves open sockets alive, and a
     // pre-registered client's next flow needs the SAME port back immediately.
     for (const s of [v4, v6]) {
@@ -656,6 +691,7 @@ async function listenForCallback(port: number, state: string): Promise<{ port: n
       reject: (e) => (clearTimeout(timer), close(), reject(e)),
     };
   });
+  waitingLogins.set(state, { accept, cancel: () => settle?.reject(new Error("Authorization cancelled")) });
   return { port: bound, close, code };
 }
 

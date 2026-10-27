@@ -44,7 +44,7 @@ import { detailPage, summarizeActivity } from "./activity.js";
 import { useTerminalSize } from "./viewport.js";
 import { makeInkSink, type Item } from "./sink.js"; // turns the loop's output into React state
 import { runInfoCommand, SESSION_HELP, mcpStatusText } from "./commands.js"; // the non-interactive slash commands + /mcp status
-import { listMcpServers, MCP_SUBCOMMANDS, mcpActionsFor, mcpProblems, mcpServerDetails, reloadMcpServers, runMcpAction } from "../mcp.js"; // /mcp: list + per-server actions
+import { listMcpServers, MCP_SUBCOMMANDS, mcpActionsFor, mcpProblems, mcpServerDetails, reloadMcpServers, runMcpAction, oauthLoginPending, cancelOAuthLogins, deliverOAuthRedirect, type McpAction } from "../mcp.js"; // /mcp: list + per-server actions, and the login that waits for its browser
 import type { TurnHooks } from "./chat.js"; // what one turn needs from the App
 import type { InkSession } from "./setup.js"; // the bootstrapped session context
 
@@ -568,6 +568,15 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
   const submitLine = async (draft: string, attachments: readonly ImageAttachment[] = [], immediate = false) => {
     peerTurns.current = 0; // a human is here: peers may start turns again
     peerHoldNoted.current = false;
+    // An MCP login is waiting for its browser redirect: what you submit is the
+    // address the browser landed on, or nothing for the model yet.
+    if (oauthLoginPending()) {
+      const got = deliverOAuthRedirect(pastedTexts.expand(draft));
+      if (got === "delivered") return note(chalk.dim("(got the authorization redirect — finishing the login…)"));
+      return note(chalk.yellow(got === "stale"
+        ? "That address belongs to another login attempt — paste the one from this login, or Esc to cancel."
+        : "An MCP login is waiting: paste the address the browser landed on (http://localhost:…/callback?code=…), or Esc to cancel."));
+    }
     // Talk mode: plain text goes to the chosen session, even while this agent works.
     if (talkTo && !pending && !draft.startsWith("/")) {
       const text = pastedTexts.expand(draft);
@@ -661,6 +670,23 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
     note(chalk.dim("(interrupting the current step to process your follow-up)"));
   };
 
+  // Run one /mcp action. A login waits for its browser redirect (up to 5
+  // minutes): say so on the spinner line, let Esc cancel it, and accept the
+  // redirected address pasted into the input box — the way in when the browser
+  // runs on another machine (SSH), where localhost is not this one.
+  const runMcpUi = async (name: string, action: McpAction) => {
+    setBusy(true);
+    if (action === "authenticate") setStatus(`Waiting for ${name} to authorize in the browser · paste the address it lands on here, or Esc to cancel`);
+    try {
+      note(chalk.dim(await runMcpAction(name, action, (url) => note(chalk.dim(`authenticate in your browser: ${url}\n  browser on another machine (SSH)? after authorizing, paste the address it lands on (http://localhost:…/callback?code=…) here and press Enter`)))));
+    } catch (err) {
+      note(chalk.yellow((err as Error).message));
+    } finally {
+      setBusy(false);
+      setStatus(null);
+    }
+  };
+
   // Handle a /slash command. Returns true if the line was a command (handled).
   // /mcp — list configured servers + status, then pick one to manage it.
   const handleMcpCommand = async (arg: string) => {
@@ -680,17 +706,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
 
     // Direct subcommands (scriptable, matching Claude Code): /mcp reconnect|auth|enable|disable <name>
     if (parts.length >= 2 && MCP_SUBCOMMANDS[parts[0]]) {
-      const name = parts.slice(1).join(" ");
-      setBusy(true);
-      try {
-        const action = MCP_SUBCOMMANDS[parts[0]];
-        const msg = await runMcpAction(name, action, (url) => note(chalk.dim(`authenticate in your browser: ${url}`)));
-        note(chalk.dim(msg));
-      } catch (err) {
-        note(chalk.yellow((err as Error).message));
-      } finally {
-        setBusy(false);
-      }
+      await runMcpUi(parts.slice(1).join(" "), MCP_SUBCOMMANDS[parts[0]]);
       return;
     }
 
@@ -706,11 +722,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
       const actions = mcpActionsFor(server);
       openSelect(`${server.name} MCP Server`, actions.map((a) => a.label), (j) => {
         if (j < 0) return note(chalk.dim("(cancelled)"));
-        setBusy(true);
-        runMcpAction(server.name, actions[j].action, (url) => note(chalk.dim(`authenticate in your browser: ${url}`)))
-          .then((msg) => note(chalk.dim(msg)))
-          .catch((err) => note(chalk.yellow((err as Error).message)))
-          .finally(() => setBusy(false));
+        void runMcpUi(server.name, actions[j].action);
       }, mcpServerDetails(server)); // Claude Code's server screen: status, auth, protocol, URL, config, capabilities, tools
     });
   };
@@ -990,6 +1002,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
     // Esc while a turn runs (and no menu is up): interrupt it — like the first
     // Ctrl+C of the readline REPL, without the force-quit escalation.
     if (key.escape && statusRequest.current) { statusRequest.current.abort(); return; }
+    if (key.escape && oauthLoginPending()) { cancelOAuthLogins(); return; } // a /mcp login waiting for its browser
     if (key.escape && talkTo && !pending && !input) { setTalkTo(null); note(chalk.dim(`(back to this agent — no longer talking to "${talkTo.name}")`)); return; }
     if (key.escape && busy && !pending) {
       if (followUps.size) { interruptForFollowUp(); return; }
@@ -1096,6 +1109,15 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
 
     // Ink 5 strips the leading ESC from CSI-u / modifyOtherKeys sequences.
     if (key.return || modifiedReturn) {
+      // A /mcp login waits for its browser redirect: the UI is busy, but what
+      // you submit is the address the browser landed on (submitLine takes it).
+      if (oauthLoginPending()) {
+        const text = input.trim();
+        setInput("");
+        setCursor(0);
+        if (text) void submitLine(text);
+        return;
+      }
       if (submitting.current || (busy && !turn.current)) return;
       const immediate = key.ctrl || modifiedReturn;
       if (!input.trim() && immediate && followUps.size) { interruptForFollowUp(); return; }
@@ -1380,7 +1402,7 @@ export function App({ session, runTurn, clipboard }: { clipboard?: ClipboardSour
       </Box>
       )}
       {completion.view}
-      {rows >= 20 && busy && !details && !selectedAgent && !pending && <Text dimColor wrap="truncate-end">Enter queue follow-up · Ctrl+Enter interrupt and send now</Text>}
+      {rows >= 20 && busy && !details && !selectedAgent && !pending && !oauthLoginPending() && <Text dimColor wrap="truncate-end">Enter queue follow-up · Ctrl+Enter interrupt and send now</Text>}
 
       {rows >= 20 && !details && !selectedAgent && !pending && !completion.visible && <AgentList agents={agents} focus={subAgentFocus} viewing={subAgentDetail} mainBusy={busy} maxRows={Math.max(2, Math.min(3, rows - 24))} />}
       <Box justifyContent="space-between">

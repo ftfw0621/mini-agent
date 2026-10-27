@@ -526,6 +526,10 @@ async function main() {
     apply(models[choice]); // picker is session-only too; "/model save <name>" to persist
   };
 
+  // The login link for /mcp auth. This REPL waits on the login, so a browser on
+  // another machine (SSH) gets its redirect here through curl, run on this one.
+  const showAuthUrl = (url: string) => console.log(chalk.dim(`authenticate in your browser: ${url}\n  browser on another machine (SSH)? after authorizing, run here in another terminal: curl '<the address it lands on>'`));
+
   // /mcp — list configured MCP servers + status, then manage one (like Claude Code).
   const mcpStatusText = (status: string): string =>
     status === "connected" ? chalk.green("connected") : status === "needs-auth" ? chalk.yellow("needs auth") : status === "failed" ? chalk.red("failed") : status === "pending" ? chalk.dim("connecting…") : chalk.dim("disabled");
@@ -542,7 +546,7 @@ async function main() {
       const name = parts.slice(1).join(" ");
       const action = MCP_SUBCOMMANDS[parts[0]];
       try {
-        console.log(chalk.dim(await runMcpAction(name, action, (url) => console.log(chalk.dim(`authenticate in your browser: ${url}`)))));
+        console.log(chalk.dim(await runMcpAction(name, action, showAuthUrl)));
       } catch (err) {
         console.log(chalk.yellow((err as Error).message));
       }
@@ -572,7 +576,7 @@ async function main() {
       return;
     }
     try {
-      console.log(chalk.dim(await runMcpAction(server.name, actions[actionChoice].action, (url) => console.log(chalk.dim(`authenticate in your browser: ${url}`)))));
+      console.log(chalk.dim(await runMcpAction(server.name, actions[actionChoice].action, showAuthUrl)));
     } catch (err) {
       console.log(chalk.yellow((err as Error).message));
     }

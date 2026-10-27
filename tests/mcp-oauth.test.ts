@@ -17,7 +17,7 @@ const STORE = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "mini-agent-oauth-
 process.env.MINI_AGENT_OAUTH_STORE = STORE;
 process.env.MINI_AGENT_NO_BROWSER = "1";
 // Imported AFTER the env is set: the store path is read at module load.
-const { connectMcpServers, listMcpServers, authenticateMcpServer, discoverOAuth, NeedsAuthError } = await import("../src/mcp.js");
+const { connectMcpServers, listMcpServers, authenticateMcpServer, discoverOAuth, NeedsAuthError, oauthLoginPending, deliverOAuthRedirect, cancelOAuthLogins } = await import("../src/mcp.js");
 const { CONFIG } = await import("../src/config.js");
 const { tools, dispatch } = await import("../src/tools.js");
 
@@ -191,6 +191,32 @@ CONFIG.mcpServers.fake2 = { url: `${origin}/mcp`, oauth: { clientId: "test-clien
   const msg = await authenticateMcpServer("fake2", playBrowser);
   checkContains("probe: authenticating a never-connected server works", msg, "Authentication successful");
   check("probe: its tools are registered", "mcp__fake2__add" in tools);
+}
+
+// ---- a browser on another machine (SSH): its redirect cannot reach us, so it is pasted ----
+{
+  let pasted = "";
+  const remoteBrowser = (authUrl: string) => {
+    const u = new URL(authUrl);
+    lastCodeChallenge = u.searchParams.get("code_challenge") ?? "";
+    lastRedirectUri = u.searchParams.get("redirect_uri") ?? "";
+    // Where the browser lands, as Linear sends it (with iss); it never reaches the listener.
+    const landed = `${lastRedirectUri}?code=the-code&state=${u.searchParams.get("state")}&iss=${encodeURIComponent(origin)}`;
+    setTimeout(() => {
+      check("paste: a login is waiting", oauthLoginPending());
+      check("paste: text without a redirect is not one", deliverOAuthRedirect("hello there") === "none");
+      check("paste: another attempt's redirect is refused", deliverOAuthRedirect(landed.replace(/state=[^&]+/, "state=older-attempt")) === "stale");
+      pasted = deliverOAuthRedirect(`你用curl call一下这个：${landed}。`); // inside a sentence, as people paste it
+    }, 10);
+  };
+  const msg = await authenticateMcpServer("fake2", remoteBrowser);
+  check("paste: the pasted redirect completes the login", pasted === "delivered" && msg.includes("Authentication successful") && !oauthLoginPending(), msg);
+}
+{
+  const msg = await authenticateMcpServer("fake2", () => setTimeout(() => cancelOAuthLogins(), 10)).catch((e: Error) => e.message);
+  check("cancel: Esc ends a waiting login and frees its port", msg === "Authorization cancelled" && !oauthLoginPending(), msg);
+  const again = await authenticateMcpServer("fake2", playBrowser);
+  check("cancel: the next login can bind the same port", again.includes("Authentication successful"), again);
 }
 
 disconnect();
